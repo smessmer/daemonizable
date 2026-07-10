@@ -1,0 +1,44 @@
+# End-to-end tests and helper binaries for the `daemonizable` crate.
+#
+# Lives in its own unpublished crate so the published `daemonizable` package
+# stays lib-only: the helper binaries here exist solely to be spawned by the
+# integration tests (via CARGO_BIN_EXE_*), and shipping them to crates.io
+# would make `cargo install daemonizable` build test executables.
+
+[package]
+name = "daemonizable-e2e-tests"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+daemonizable = { path = "../daemonizable" }
+libc.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+interprocess.workspace = true
+nix = { workspace = true, features = ["poll", "process", "signal"] }
+rustversion.workspace = true
+tempfile.workspace = true
+trybuild.workspace = true
+
+# Helper binary used by the daemon-lifecycle integration tests. Spawned via
+# fork+exec from start_background_process_with_exe so the test daemon runs in
+# a clean process image instead of inheriting libtest's multithread state.
+[[bin]]
+name = "daemonizable-test-background"
+path = "src/bin/daemonizable_test_background.rs"
+
+# Minimal Daemonizable app used by the framework end-to-end test
+# (tests/framework_e2e.rs). Goes through the full production path —
+# run::<App>() env-marker dispatch, fork+exec re-exec spawn, build-id
+# handshake, bootstrap payload — where the test-background helper drives the
+# raw IPC primitives directly.
+[[bin]]
+name = "daemonizable-test-app"
+path = "src/bin/daemonizable_test_app.rs"

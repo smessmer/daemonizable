@@ -1,0 +1,38 @@
+[package]
+name = "daemonizable"
+description = "Run your CLI app in the foreground or fork+exec it into a background daemon, with a build-id handshake and typed RPC between parent and daemon"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "README.md"
+version.workspace = true
+keywords = ["daemon", "daemonize", "fork", "background", "cli"]
+categories = ["command-line-interface", "os::unix-apis"]
+
+[features]
+default = ["macros"]
+# Re-exports the #[daemonizable::main] attribute from the companion
+# proc-macro crate.
+macros = ["dep:daemonizable-macros"]
+# Re-exports test-only helpers (e.g. `RpcConnection::into_server_and_client`)
+# so downstream crates can drive the IPC primitives in their own unit tests
+# without re-implementing pipe wiring. Not part of the stable surface.
+testutils = []
+
+[dependencies]
+command-fds.workspace = true
+daemonizable-macros = { path = "../daemonizable-macros", optional = true }
+interprocess.workspace = true
+libc.workspace = true
+log.workspace = true
+nix = { workspace = true, features = ["poll"] }
+postcard = { workspace = true, features = ["use-std"] }
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+# Integration tests and their helper binaries live in the unpublished
+# sibling crate `daemonizable-e2e-tests`, keeping this package lib-only
+# for publishing.

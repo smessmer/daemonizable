@@ -1,0 +1,28 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+authors = ["Sebastian Messmer <messmer@cryfs.org>"]
+edition = "2024"
+repository = "https://github.com/smessmer/daemonizable"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+version = "0.0.1"
+
+[workspace.dependencies]
+command-fds = "^0.3.3"
+interprocess = "^2.2.3"
+libc = "^0.2.172"
+log = "^0.4.27"
+nix = "^0.31"
+postcard = "^1"
+proc-macro2 = "^1.0.95"
+quote = "^1.0.40"
+rustversion = "^1.0.20"
+serde = "^1.0.219"
+syn = "^2.0.101"
+tempfile = "^3.27"
+thiserror = "^2.0.12"
+tokio = "^1.44.2"
+trybuild = "^1.0.105"

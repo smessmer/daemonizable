@@ -1,0 +1,25 @@
+# Proc-macro companion crate for `daemonizable`. Published separately (proc
+# macros must live in their own crate); users never depend on it directly —
+# `daemonizable` re-exports the attribute behind its default-on `macros`
+# feature.
+
+[package]
+name = "daemonizable-macros"
+description = "Proc-macro companion crate for the daemonizable crate; don't depend on it directly"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+readme = "README.md"
+version.workspace = true
+keywords = ["daemon", "daemonize", "fork", "background", "cli"]
+categories = ["command-line-interface", "os::unix-apis"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full"] }

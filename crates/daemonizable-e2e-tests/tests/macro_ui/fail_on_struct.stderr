@@ -1,0 +1,5 @@
+error: #[daemonizable::main] must be attached to an `impl Daemonizable for YourApp` block
+ --> tests/macro_ui/fail_on_struct.rs:7:1
+  |
+7 | struct NotAnImpl;
+  | ^^^^^^

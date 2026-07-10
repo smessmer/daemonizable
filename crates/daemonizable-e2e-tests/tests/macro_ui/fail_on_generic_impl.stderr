@@ -1,0 +1,5 @@
+error: #[daemonizable::main] does not support generic impls: `daemonizable::run` needs one concrete application type to dispatch on
+  --> tests/macro_ui/fail_on_generic_impl.rs:15:5
+   |
+15 | impl<T: 'static> Daemonizable for App<T> {
+   |     ^^^^^^^^^^^^

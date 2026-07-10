@@ -1,0 +1,5 @@
+error: #[daemonizable::main] must be attached to an `impl Daemonizable for YourApp` block (the trait path must end in `Daemonizable`)
+  --> tests/macro_ui/fail_on_non_daemonizable_impl.rs:11:25
+   |
+11 | impl SomeOtherTrait for App {}
+   |                         ^^^
