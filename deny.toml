@@ -1,0 +1,36 @@
+# Configuration for cargo-deny (https://embarkstudios.github.io/cargo-deny/).
+# Checked in CI by the `cargo-deny` job in .github/workflows/ci.yml.
+
+[advisories]
+version = 2
+# Fail on any dependency pulled from a version that has been yanked from the
+# registry.
+yanked = "deny"
+
+[licenses]
+version = 2
+# Every license actually present in the dependency tree resolves to one of
+# these. OR-expressions (e.g. "MIT OR Apache-2.0") are satisfied as long as one
+# operand is allowed, so copyleft options offered as an alternative are fine.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "0BSD",
+]
+
+[bans]
+# Duplicate versions of the same crate are a warning, not an error: they are
+# usually forced by the dependency graph and out of this crate's control.
+multiple-versions = "warn"
+# Wildcard version requirements hide breakage; disallow them in our manifests.
+wildcards = "deny"
+# ...but the internal workspace crates depend on each other by `path` with no
+# version, which cargo-deny counts as a wildcard. Those are first-party, so
+# exempt path dependencies from the wildcard ban.
+allow-wildcard-paths = true
+
+[sources]
+# Only allow dependencies from the official crates.io registry.
+unknown-registry = "deny"
+unknown-git = "deny"
