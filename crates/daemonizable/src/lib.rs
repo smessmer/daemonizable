@@ -137,8 +137,8 @@ pub use ipc::{RpcClient, RpcConnection, RpcServer};
 // can match on failure modes, e.g. distinguish a peer that closed the pipe
 // (`PipeRecvError::SenderClosed`) from a timeout.
 pub use ipc::{
-    HandshakeError, InheritedFdsError, PipeCreateError, PipeRecvError, PipeSendError,
-    SpawnDaemonError,
+    DetachStdioError, HandshakeError, InheritedFdsError, PipeCreateError, PipeRecvError,
+    PipeSendError, SpawnDaemonError,
 };
 
 // Process-global helper: the daemon calls this at its post-startup boundary

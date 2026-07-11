@@ -5,8 +5,8 @@ mod rpc;
 mod spawn;
 
 pub use error::{
-    HandshakeError, InheritedFdsError, PipeCreateError, PipeRecvError, PipeSendError,
-    SpawnDaemonError,
+    DetachStdioError, HandshakeError, InheritedFdsError, PipeCreateError, PipeRecvError,
+    PipeSendError, SpawnDaemonError,
 };
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
 #[cfg(any(test, feature = "testutils"))]
@@ -29,25 +29,27 @@ pub use spawn::{rpc_server_from_inherited_fds, send_handshake, start_background_
 /// allocation that re-grabs those numbers would otherwise produce garbage in
 /// unrelated files. The temp `/dev/null` fd is dropped after the dup2s; the
 /// targets keep their duplicated descriptors.
-pub fn detach_stdio() {
-    let devnull = match std::fs::OpenOptions::new()
+///
+/// # Errors
+/// Returns [`DetachStdioError`] if `/dev/null` can't be opened or a `dup2`
+/// fails. Detaching is best-effort — a failure leaves stdio bound to whatever
+/// it was inherited from (possibly partially redirected; see the error
+/// variants). The caller decides whether that's fatal; the daemon otherwise
+/// keeps running.
+pub fn detach_stdio() -> Result<(), DetachStdioError> {
+    let devnull = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/null")
-    {
-        Ok(f) => f,
-        Err(err) => {
-            log::warn!("failed to open /dev/null while detaching daemon stdio: {err}");
-            return;
-        }
-    };
+        .map_err(DetachStdioError::OpenDevNull)?;
     let fd = std::os::fd::AsRawFd::as_raw_fd(&devnull);
     for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
         if unsafe { libc::dup2(fd, target) } < 0 {
-            log::warn!(
-                "dup2(/dev/null, {target}) failed while detaching daemon stdio: {}",
-                std::io::Error::last_os_error(),
-            );
+            return Err(DetachStdioError::Dup2 {
+                target,
+                source: std::io::Error::last_os_error(),
+            });
         }
     }
+    Ok(())
 }
