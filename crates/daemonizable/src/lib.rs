@@ -103,19 +103,16 @@
 //! image, before any application code, so it is not exposed to that hazard
 //! either.)
 
-// TODO The one residual hazard is a narrow fd-inheritance race, unrelated to
-//   any particular runtime: the pipe fds get FD_CLOEXEC set non-atomically
-//   after creation (see the race discussion in ipc/pipe/mod.rs), so a
-//   concurrent fork/Command::spawn on another thread during that window —
-//   including a second spawn_daemon from another thread, an advertised use of
-//   the Copy+Send+Sync Daemonizer — can leak duplicate pipe ends into an
-//   unrelated child across execve, which silently defeats the documented EOF
-//   liveness (EOF only fires once ALL write ends close). To close the race
-//   rather than only document it: (a) create pipes with pipe2(O_CLOEXEC)
-//   (nix::unistd::pipe2, nix is already a dependency) on the platforms that
-//   have it, leaving only macOS reliant on the documented invariant;
-//   (b) optionally serialize pipe-creation + spawn behind a private static
-//   Mutex to close the spawn-vs-spawn instance of the race on every platform.
+// On the platforms that have `pipe2(O_CLOEXEC)` (Linux/Android, the *BSDs, and
+// more), pipe fds are now created with FD_CLOEXEC set atomically, so the
+// fd-inheritance race is closed there regardless of runtime — including a
+// second spawn_daemon from another thread, an advertised use of the
+// Copy+Send+Sync Daemonizer. macOS/iOS lack `pipe2` (and any atomic
+// equivalent), so on those targets the CLOEXEC flag is still set in a separate
+// step and a concurrent fork/Command::spawn in that window can leak duplicate
+// pipe ends across execve, silently defeating EOF liveness (EOF only fires once
+// ALL write ends close). There we rely on the documented spawn-at-startup
+// caller contract instead. See the race discussion in ipc/pipe/mod.rs.
 
 mod app;
 mod ipc;
