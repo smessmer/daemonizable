@@ -1,6 +1,9 @@
 //! Parent-side fork+exec machinery: re-exec the current binary (or a test
 //! helper) as a background child, wire up the IPC pipes, and — for the real
-//! daemon path — validate the handshake and ship the bootstrap payload.
+//! daemon path — validate the handshake and ship the bootstrap payload. The
+//! validated daemon is a *grandchild*: the re-exec'd child forks once more so
+//! it is never a session leader, and the direct child this parent holds a
+//! `Child` handle for is a short-lived intermediate.
 
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
@@ -66,9 +69,13 @@ fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
 ///     to write something to fd 4 (handshake bytes won't match the
 ///     expected build id).
 ///
-/// On handshake/bootstrap failure the just-spawned child is killed and reaped
-/// (best-effort) before the error is returned — a failed spawn must not leave
-/// an orphaned process or an unreapable zombie behind in a long-lived caller.
+/// The re-exec'd child forks a second time (see `run_as_daemon_child`) so the
+/// daemon is the grandchild; the direct child is a short-lived session-leader
+/// intermediate. On success the intermediate is reaped here (it has already
+/// `_exit(0)`d). On handshake/bootstrap failure the spawn is killed via its
+/// process group — `kill(-child_pid, SIGKILL)`, which reaches the grandchild —
+/// and the intermediate reaped before the error is returned, so a failed spawn
+/// leaves no orphan and no unreapable zombie behind in a long-lived caller.
 pub(crate) fn spawn_daemon_process<Request, Response>(
     expected_build_id: &str,
     payload_bytes: &[u8],
@@ -85,7 +92,7 @@ where
     // see a recognizable command line. Falls back to the exec path if
     // `current_exe()` fails — preserves correctness over cosmetics.
     let argv0 = std::env::current_exe().unwrap_or_else(|_| exe.clone());
-    let (client, mut child) = start_background_process_inner::<Request, Response>(
+    let (client, child) = start_background_process_inner::<Request, Response>(
         &exe,
         Some(argv0.as_path()),
         &[],
@@ -95,43 +102,98 @@ where
         )],
     )?;
 
+    complete_spawn(client, child, expected_build_id, payload_bytes)
+}
+
+/// Test-only variant of [`spawn_daemon_process`]: spawn an arbitrary helper
+/// binary instead of re-exec'ing the current one, but keep the full handshake
+/// validation, bootstrap shipping, and success/failure child cleanup. Exists
+/// so the documented failed-spawn cleanup contract is testable —
+/// [`spawn_daemon_process`] always re-execs `/proc/self/exe`, which is unusable
+/// from a libtest binary, and the raw [`start_background_process_with_exe`] path
+/// bypasses handshake validation and drops the `Child`.
+///
+/// `#[doc(hidden)]` and gated behind `test`/`testutils`: not part of the stable
+/// surface.
+#[cfg(any(test, feature = "testutils"))]
+#[doc(hidden)]
+pub fn spawn_daemon_process_with_exe<Request, Response>(
+    exe: &Path,
+    expected_build_id: &str,
+    payload_bytes: &[u8],
+    extra_env: &[(&OsStr, &OsStr)],
+) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
+where
+    Request: Serialize + DeserializeOwned,
+    Response: Serialize + DeserializeOwned + Send,
+{
+    let (client, child) = start_background_process_inner(exe, None, &[], extra_env)?;
+    complete_spawn(client, child, expected_build_id, payload_bytes)
+}
+
+/// Drive the parent side of the spawn protocol to completion against an
+/// already-spawned `child`: validate the build-id handshake, ship the bootstrap
+/// payload, and — on any failure — kill and reap the child before returning the
+/// error, so a failed spawn leaves no orphan and no unreapable zombie behind in
+/// a long-lived caller. Shared by [`spawn_daemon_process`] and the test-only
+/// [`spawn_daemon_process_with_exe`] so the cleanup path has one home and one
+/// set of tests (`daemonizable-e2e-tests/tests/failed_spawn_cleanup.rs`).
+fn complete_spawn<Request, Response>(
+    client: RpcClient<Request, Response>,
+    mut child: std::process::Child,
+    expected_build_id: &str,
+    payload_bytes: &[u8],
+) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
+where
+    Request: Serialize + DeserializeOwned,
+    Response: Serialize + DeserializeOwned + Send,
+{
+    // `child` is the session-leader intermediate from the second fork in
+    // run_as_daemon_child; the real daemon is its forked grandchild. Capture the
+    // pid before any wait() so it still names the (live or zombie) direct child.
+    let child_pid = child.id() as libc::pid_t;
+
     match handshake_and_ship_bootstrap(client, expected_build_id, payload_bytes) {
-        Ok(client) => Ok(client),
-        Err(err) => {
-            // The child is not (yet) a validated daemon of ours — reap it so a
-            // failed spawn is fully cleaned up. Best-effort: it usually has
-            // already exited (its own handshake/bootstrap timeout), making
-            // kill() a no-op and wait() an immediate reap.
+        Ok(client) => {
+            // The intermediate _exit(0)s before the handshake is sent, so a
+            // successful handshake proves it is already dead; this reaps it
+            // (near-)immediately. Without it, every successful spawn would park
+            // a zombie intermediate in a long-lived caller.
             //
-            // TODO This kill+wait cleanup is a documented API promise (README
-            //   "Process contract", crate docs, spawn_daemon rustdoc) with
-            //   zero test coverage: no test drives spawn_daemon_process into
-            //   a failure with a real child, so a refactor that breaks the
-            //   cleanup (e.g. moving the Child into
-            //   handshake_and_ship_bootstrap, or replacing the match with `?`)
-            //   would keep the whole workspace green. It can't be covered
-            //   as-is because spawn_daemon_process always re-execs
-            //   /proc/self/exe (re-exec'ing the libtest binary is unusable)
-            //   and the test-helper spawn path bypasses handshake validation
-            //   and drops the Child. Fix: extract a testable seam — e.g. a
-            //   fn taking (RpcClient, Child) that does
-            //   validate/ship-then-kill+wait-on-error, or a
-            //   testutils-gated spawn variant taking an exe path — then, from
-            //   daemonizable-e2e-tests, spawn daemonizable-test-background
-            //   with a new "wrong handshake then idle" behavior (writes its
-            //   pid to a file) and assert the error is HandshakeError::Mismatch
-            //   AND the child was reaped (libc::kill(pid, 0) == ESRCH,
-            //   waitpid == ECHILD).
-            // TODO When the double-fork lands in run_as_daemon_child (see
-            //   the TODO at its setsid() call in app/daemon_child.rs), this cleanup must
-            //   switch to process-group signaling: the direct child will be
-            //   a long-dead session-leader intermediate, so kill() here
-            //   would hit a corpse while the real daemon (its forked child)
-            //   survives. Replacement: libc::kill(-child_pid, SIGKILL)
-            //   (valid because the child's setsid() made its pid the pgid,
-            //   and the pid is not recycled while the group has members),
-            //   tolerate ESRCH (child died before setsid), then keep the
-            //   direct kill()+wait() below as fallback and reaper.
+            // Blocking wait(): an externally SIGSTOPped or ptraced intermediate
+            // would block here indefinitely (documented on `spawn_daemon`, and
+            // the same failure class as the unbounded bootstrap send above).
+            // Since this wait is only zombie hygiene — the real daemon is the
+            // orphaned grandchild — it could degrade to try_wait()+timeout if
+            // that ever mattered.
+            let _ = child.wait();
+            Ok(client)
+        }
+        Err(err) => {
+            // Kill the whole spawn, then reap the direct child. Post-fork the
+            // direct child is the already-dead intermediate while the real
+            // daemon is the grandchild, so a plain child.kill() would signal a
+            // corpse and leave the daemon running — we must signal the process
+            // GROUP.
+            //
+            // kill(-child_pid) reaches the grandchild because the child's
+            // setsid() made child_pid the process-group id and the grandchild
+            // stays in that group. It is race-free even though we hold only the
+            // pid: child_pid is our OWN unreaped direct child, so by the POSIX
+            // pid-reuse rule (XBD 4.14 — a pid is not reused until BOTH the
+            // process lifetime ends AND any equal-pgid group's lifetime ends)
+            // plus the zombie-retention contract, child_pid cannot name any
+            // foreign process or group until the wait() below. MUST signal
+            // BEFORE wait(): reaping first frees child_pid for reuse and
+            // -child_pid could then hit an unrelated group.
+            //   * post-fork:  -child_pid SIGKILLs the live grandchild (the daemon)
+            //   * pre-setsid: -child_pid is ESRCH (the child is still in our
+            //     group, whose id is our pgid, not child_pid); the direct
+            //     child.kill() gets it instead
+            // A grandchild the group-kill somehow misses (it left the group via
+            // its own setsid/setpgid) still self-terminates via pipe EOF within
+            // BOOTSTRAP_TIMEOUT once the client is dropped on the error return.
+            let _ = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
             let _ = child.kill();
             let _ = child.wait();
             Err(err)

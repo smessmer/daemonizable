@@ -48,9 +48,19 @@ impl<A: Daemonizable> Daemonizer<A> {
     ///
     /// Blocks until the daemon has passed the build-id handshake and acked
     /// receipt of `payload` (ack means received and decoded; the daemon
-    /// *applies* it inside [`Daemonizable::run_daemon`] afterwards). On
-    /// handshake or bootstrap failure the child is killed and reaped
-    /// (best-effort) before the error is returned.
+    /// *applies* it inside [`Daemonizable::run_daemon`] afterwards).
+    ///
+    /// The daemon is a **grandchild**: the re-exec'd child forks again after
+    /// `setsid` so it is never a session leader (and can never acquire a
+    /// controlling terminal). The short-lived intermediate is reaped here, so a
+    /// successful spawn leaves the caller no child and no zombie. On handshake
+    /// or bootstrap failure the spawn is killed via its process group and the
+    /// intermediate reaped before the error is returned. See the crate-level
+    /// [Process contract](crate#process-contract) for the full detail, including
+    /// two caveats: this call can block indefinitely if the intermediate is
+    /// externally SIGSTOPped/ptraced in the instant before it exits, and the
+    /// caller must not concurrently `waitpid(-1)`/reap arbitrary children during
+    /// the spawn.
     ///
     /// Because the daemon is created with fork+exec (not a bare `fork()`), it
     /// is safe to call this with a thread pool or async runtime already

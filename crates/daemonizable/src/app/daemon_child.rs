@@ -1,8 +1,8 @@
 //! The re-exec'd daemon child's startup sequence, run straight from
 //! [`run`](super::run) before any app code: claim the inherited fds, start a
-//! new session, detach the working directory, complete the build-id
-//! handshake, receive and ack the bootstrap payload, then hand off to the
-//! application's daemon entry point.
+//! new session, fork again so the daemon is never a session leader, detach the
+//! working directory, complete the build-id handshake, receive and ack the
+//! bootstrap payload, then hand off to the application's daemon entry point.
 
 use super::Daemonizable;
 use crate::ipc::{
@@ -11,10 +11,12 @@ use crate::ipc::{
 };
 
 /// The re-exec'd daemon child lands here, straight from [`run`](super::run) —
-/// before any app code. Order matters and mirrors the legacy framework: claim
-/// fds (exit 2) → `setsid` (exit 1) → `chdir("/")` (warn only) → send
-/// handshake (exit 127) → receive + decode payload → ack (exit 127) → hand off
-/// to the app.
+/// before any app code. Order matters: claim fds (exit 2) → `setsid` (exit 1) →
+/// second fork (intermediate `_exit(0)`; fork failure exit 1) → `chdir("/")`
+/// (warn only) → send handshake (exit 127) → receive + decode payload → ack
+/// (exit 127) → hand off to the app. Exit codes 2 and 1 come from the direct
+/// child (pre-fork); the 127s and the chdir warning come from the surviving
+/// grandchild (post-fork).
 pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     let mut server: RpcServer<A::Request, A::Response> = match rpc_server_from_inherited_fds() {
         Ok(s) => s,
@@ -34,29 +36,68 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
         std::process::exit(1);
     }
 
-    // TODO Double-fork: fork once more right here and let this
-    //   session-leader intermediate _exit(0), so the surviving grandchild
-    //   can never acquire a controlling terminal (daemon(7) step 7; per
-    //   POSIX XBD 11.1.3 a ctty-less session leader that open()s a tty
-    //   without O_NOCTTY may acquire it as controlling terminal). Safe at
-    //   this point: we are a fresh single-threaded post-exec image, and the
-    //   claimed pipe fds are inherited across the fork. Ordering: the
-    //   second fork must happen BEFORE send_handshake below (the parent
-    //   must validate the final daemon, and EOF liveness must track the
-    //   process that actually serves), and the planned pid-file battery
-    //   must write its pid AFTER this fork. This change must land TOGETHER
-    //   with the matching cleanup TODO in ipc/spawn/process.rs (on the kill+wait in
-    //   spawn_daemon_process): the parent's Child handle will point at the
-    //   already-dead intermediate, so failed-spawn cleanup has to become
-    //   process-group signaling — kill(-child_pid), race-free because
-    //   setsid() above made our pid the pgid and a pid is not recycled
-    //   while it names a live process group; ESRCH falls back to
-    //   kill(child_pid) for deaths before setsid. On success the parent
-    //   should wait() the intermediate immediately, which removes the
-    //   zombie caveat from the process contract. Update the README
-    //   ("Process contract" + the session-leader cost bullet), the crate
-    //   docs, and the process-tree expectations in
-    //   daemon_survives_parent_exit.rs / daemon_child_lifecycle.rs.
+    // Second fork (daemon(7) step 7): the session-leader intermediate exits
+    // immediately, so the surviving grandchild is never a session leader and
+    // can never acquire a controlling terminal — per POSIX XBD 11.1.3 a
+    // ctty-less session leader that open()s a tty without O_NOCTTY may acquire
+    // it as its controlling terminal, and TIOCSCTTY likewise requires a
+    // session leader; a non-leader is structurally immune to both.
+    //
+    // Safe here: we are a fresh single-threaded post-exec image — no app code
+    // has run in this arm yet (`A::build_id()` first runs in send_handshake
+    // below), so this is not a fork-in-a-multithreaded-process. (The one
+    // residual assumption is that the application's `main` preamble started no
+    // thread before `run()`; `#[daemonizable::main]` guarantees an empty
+    // preamble. Same assumption as the remove_var SAFETY note below.) The
+    // claimed pipe fds 3/4 are inherited across fork (FD_CLOEXEC only affects
+    // execve), so the grandchild owns them.
+    //
+    // Ordering — all load-bearing:
+    //   * AFTER setsid(): the grandchild must be a non-leader member of the new
+    //     session, and setsid() made this pid the process-group id that the
+    //     parent's failed-spawn cleanup signals via kill(-child_pid).
+    //   * BEFORE send_handshake() below: the parent must validate — and
+    //     pipe-EOF liveness must track — the process that actually serves.
+    //   * BEFORE chdir("/") below: the chdir (and its warning) belongs to the
+    //     grandchild, the process that keeps the cwd.
+    //   * The pid-file battery (planned, between handshake and ack) already
+    //     sits after this fork, so it records the FINAL daemon pid.
+    //
+    // The intermediate must do NO work between fork and _exit — no subprocess,
+    // no fd dup that escapes — so it cannot linger as a pipe write-end holder.
+    //
+    // Alternative considered and rejected: clone3(CLONE_PARENT) would keep the
+    // daemon a direct child of the spawner (no group-kill, trivial PPID), but
+    // it is Linux-only, bypasses std::process::Command, and resurrects the
+    // zombie caveat this second fork removes.
+    match unsafe { libc::fork() } {
+        -1 => {
+            // Fatal, like a failed setsid: without the second fork the daemon
+            // would remain a session leader that can acquire a controlling
+            // terminal. Degrading to single-fork operation would silently break
+            // the documented "never a session leader" guarantee, so fail the
+            // spawn instead — the parent sees EOF on the handshake and the
+            // caller can retry.
+            eprintln!(
+                "daemon child: fork() after setsid failed: {}",
+                std::io::Error::last_os_error()
+            );
+            std::process::exit(1);
+        }
+        0 => {
+            // Grandchild: the actual daemon. Falls through to chdir and the
+            // handshake below.
+        }
+        _grandchild_pid => {
+            // Intermediate session leader: its only job was the fork above.
+            // `_exit`, not `std::process::exit`/return — `_exit` skips atexit
+            // handlers and C stdio flushing (a buffered write from a
+            // hand-written main preamble must flush at most once, in the
+            // daemon) and skips Rust drops (the live `server` owns fds 3/4;
+            // the grandchild's inherited copies keep the pipes open regardless).
+            unsafe { libc::_exit(0) };
+        }
+    }
 
     // Drop the inherited working directory (chdir to `/`) so the daemon doesn't
     // pin the parent's cwd filesystem for its whole lifetime — otherwise
@@ -89,10 +130,13 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     //   Requires extending the empty bootstrap ack into a result frame
     //   (empty = ok, otherwise a framework error the parent maps into
     //   SpawnDaemonError variants like AlreadyRunning / DropPrivileges).
-    //   Ordering within this block: umask → sigmask reset → close_range →
-    //   pid file (write the FINAL pid — after the planned double fork above)
-    //   → chown pid file → open log files → chroot → initgroups/setgid →
-    //   setuid → ack.
+    //   Ordering within this block: umask → sigmask reset → close_range (must
+    //   NOT close the inherited pipe fds 3/4) → pid file (write the FINAL pid
+    //   — this runs in the grandchild, after the second fork above) → chown
+    //   pid file → open log files → chroot → initgroups/setgid → setuid → ack.
+    //   Note: setuid must stay AFTER the second fork — dropping privileges
+    //   before it could give the intermediate a different uid and make the
+    //   parent's kill(-child_pid) cleanup hit EPERM.
     let payload_bytes = match server.recv_raw_bootstrap_with_timeout(BOOTSTRAP_TIMEOUT) {
         Ok(bytes) => bytes,
         Err(err) => {
@@ -118,8 +162,10 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // Drop the marker so processes this daemon spawns (including a future
     // daemonizable app re-exec'ing itself) aren't misdetected as OUR daemon
     // child. SAFETY: the daemon child is still single-threaded here — we
-    // re-exec'd with a fresh process image and haven't started any runtime;
-    // `run_daemon` (e.g. its tokio init) comes after this line.
+    // re-exec'd with a fresh process image (and the second fork above added no
+    // threads) and haven't started any runtime; `run_daemon` (e.g. its tokio
+    // init) comes after this line. This runs in the surviving grandchild, the
+    // process that actually spawns the daemon's children.
     //
     // TODO The SAFETY claim above is an unenforced assumption, not an
     //   invariant: by this point two pieces of app-controlled code have

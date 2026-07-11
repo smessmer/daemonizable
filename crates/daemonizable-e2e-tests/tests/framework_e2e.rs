@@ -51,18 +51,50 @@ fn daemonize_dispatch_does_full_spawn_handshake_bootstrap_and_rpc_roundtrip() {
     // (Note: "before run_daemon", not "before app code" — `build_id()` and
     // the payload's `Deserialize` run earlier in the child arm; see the
     // remove_var TODO in app/daemon_child.rs.)
-    //
-    // TODO This test doesn't assert the framework's `setsid` (the single
-    //   most important line for daemon survival) — no test does; the
-    //   daemon_survives_parent_exit test observes only the helper binary's
-    //   own setsid. Fix: add `sid: i32` (libc::getsid(0)) to TestResponse,
-    //   include it in the outfile, and assert here that the daemon's
-    //   session differs from this test process's session id.
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
-    assert_eq!(
-        "parent-got:43 cwd:/ payload:tag-from-parent marker:removed",
-        result
+    let fields = parse_outfile(&result);
+    assert_eq!(fields["parent-got"], "43", "outfile: {result}");
+    assert_eq!(fields["cwd"], "/", "outfile: {result}");
+    assert_eq!(fields["payload"], "tag-from-parent", "outfile: {result}");
+    assert_eq!(fields["marker"], "removed", "outfile: {result}");
+
+    // Session assertions — the payoff of the framework's `setsid` + second fork.
+    let daemon_sid: i32 = fields["sid"].parse().expect("sid not an int");
+    let daemon_pid: i32 = fields["pid"].parse().expect("pid not an int");
+    let test_sid = unsafe { libc::getsid(0) };
+    assert!(daemon_sid > 0, "daemon reported a bogus sid: {daemon_sid}");
+    // setsid took effect: the daemon is in its own session, not the test's
+    // (the test-app parent shares this test's session; the daemon left it).
+    assert_ne!(
+        daemon_sid, test_sid,
+        "daemon shares the test's session — framework setsid did not take effect",
     );
+    // The daemon is NOT a session leader: its sid is the (dead) intermediate's
+    // pid, so sid != its own pid. Under a single fork the daemon WOULD be the
+    // leader (sid == pid), so this is the assertion that pins the second fork.
+    assert_ne!(
+        daemon_sid, daemon_pid,
+        "daemon is a session leader (sid == pid) — the second fork did not happen",
+    );
+
+    // The successful spawn left no zombie: `spawn_daemon` reaped the
+    // intermediate (Linux-only scan; 0 elsewhere — see the test app).
+    assert_eq!(
+        fields["zombies"], "0",
+        "spawn_daemon left a zombie intermediate: {result}",
+    );
+}
+
+/// Parse the test app's `key:value key:value ...` outfile. All values are
+/// space-free (paths are `/`, tags/markers are single tokens, ids are numbers),
+/// so a split on spaces then on the first `:` is unambiguous.
+fn parse_outfile(s: &str) -> std::collections::HashMap<String, String> {
+    s.split(' ')
+        .filter_map(|kv| {
+            let (k, v) = kv.split_once(':')?;
+            Some((k.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 #[test]

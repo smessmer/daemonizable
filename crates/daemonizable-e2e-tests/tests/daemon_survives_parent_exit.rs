@@ -7,23 +7,17 @@
 //! to reap, verifies the daemon is in its own session (setsid took effect),
 //! and that it's still updating the sentinel. Cleans up via SIGTERM.
 //!
-//! Locks in the setsid behavior of the fork+exec spawn: without `setsid()`
-//! in the daemon, it would die along with the parent's shell session.
+//! Covers parent-exit survival of the **raw** spawn machinery
+//! (`start_background_process_with_exe`): the daemon keeps running after the
+//! sub-process that spawned it exits.
 //!
-//! TODO The claim above overstates what this test covers: the daemon here is
-//!   spawned via `start_background_process_with_exe`, which bypasses the
-//!   framework's child arm entirely — the `setsid` this test observes via
-//!   `getsid()` is one the HELPER BINARY performs itself
-//!   (daemonizable_test_background.rs `sentinel_loop`), not the framework's
-//!   `setsid` in `run_as_daemon_child` (app/daemon_child.rs), which currently has zero
-//!   regression coverage. A refactor dropping that production setsid would
-//!   keep the whole suite green while shipped daemons stay in the user's
-//!   terminal session (SIGHUP on shell close kills background mounts). Fix:
-//!   have the e2e TestApp's `run_daemon` report its session id (add
-//!   `sid: i32` via `libc::getsid(0)` to `TestResponse` in
-//!   daemonizable_test_app.rs) and assert in framework_e2e's daemonize test
-//!   that it differs from the test process's session; then reword this doc
-//!   to say it covers parent-exit survival of the raw spawn machinery.
+//! Note: the `setsid` this test observes via `getsid()` is one the HELPER
+//! BINARY performs itself (daemonizable_test_background.rs `sentinel_loop`),
+//! not the framework's `setsid`/second fork in `run_as_daemon_child` — the raw
+//! path deliberately bypasses the framework's child arm. The framework's own
+//! `setsid` (and that the daemon is not a session leader) is covered by
+//! `framework_e2e.rs`, which asserts the daemon's session differs from the test
+//! process's AND from the daemon's own pid.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -40,8 +34,9 @@ fn helper_exe() -> PathBuf {
 }
 
 /// RAII handle that kills the daemon on drop, so an assertion failure in the
-/// test doesn't leak the (init-parented, detached) daemon process. SIGTERM
-/// first; SIGKILL after a 2 s grace period. Never panics from Drop.
+/// test doesn't leak the (init- or subreaper-parented, detached) daemon
+/// process. SIGTERM first; SIGKILL after a 2 s grace period. Never panics from
+/// Drop.
 struct DaemonGuard(Pid);
 
 impl Drop for DaemonGuard {

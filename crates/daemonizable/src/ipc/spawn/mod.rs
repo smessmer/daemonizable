@@ -19,6 +19,8 @@ mod process;
 pub use handshake::send_handshake;
 pub use inherited::rpc_server_from_inherited_fds;
 pub(crate) use process::spawn_daemon_process;
+#[cfg(any(test, feature = "testutils"))]
+pub use process::spawn_daemon_process_with_exe;
 pub use process::start_background_process_with_exe;
 
 /// Fd numbers the fork+exec child receives its inherited pipe ends on.

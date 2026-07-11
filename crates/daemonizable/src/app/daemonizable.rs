@@ -52,11 +52,12 @@ pub trait Daemonizable: Sized {
     /// Daemon-side entry point, running in the re-exec'd child.
     ///
     /// By the time this is called the framework has claimed the inherited
-    /// IPC fds, started a new session (`setsid`), changed the working
-    /// directory to `/`, passed the build-id handshake, and decoded
-    /// `payload`. The process is otherwise pristine: no logging, no panic
-    /// hooks, stdio still inherited from the parent — install whatever you
-    /// need (typically from `payload`) before serving requests.
+    /// IPC fds, started a new session (`setsid`), forked again so this process
+    /// is a grandchild that is *not* the session leader, changed the working
+    /// directory to `/`, passed the build-id handshake, and decoded `payload`.
+    /// The process is otherwise pristine: no logging, no panic hooks, stdio
+    /// still inherited from the parent — install whatever you need (typically
+    /// from `payload`) before serving requests.
     ///
     /// Diverges: drive the request loop until [`RpcServer::next_request`]
     /// returns [`PipeRecvError::SenderClosed`](crate::PipeRecvError::SenderClosed)

@@ -16,7 +16,10 @@ version.workspace = true
 publish = false
 
 [dependencies]
-daemonizable = { path = "../daemonizable" }
+# `testutils` exposes `spawn_daemon_process_with_exe`, which the failed-spawn
+# cleanup tests use to drive the real handshake/bootstrap/cleanup path against a
+# controlled helper binary (production always re-execs `/proc/self/exe`).
+daemonizable = { path = "../daemonizable", features = ["testutils"] }
 libc.workspace = true
 serde = { workspace = true, features = ["derive"] }
 
