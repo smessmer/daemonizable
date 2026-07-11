@@ -35,6 +35,13 @@ pub enum PipeSendError {
     #[error("Failed to encode message: {0}")]
     Encode(#[from] postcard::Error),
 
+    /// A timeout-bounded send (e.g. the bootstrap payload) did not complete
+    /// before its deadline — the kernel pipe buffer stayed full because the
+    /// peer wasn't draining it. Only the timeout-bounded send path
+    /// (`send_raw_with_timeout`) produces this; unbounded sends block instead.
+    #[error("Timed out writing to pipe")]
+    Timeout,
+
     /// Writing to the pipe failed. A receiver that closed its end surfaces
     /// here as [`std::io::ErrorKind::BrokenPipe`].
     #[error("Failed to write to pipe: {0}")]
