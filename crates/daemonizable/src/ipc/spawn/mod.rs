@@ -18,8 +18,8 @@ mod process;
 
 pub use handshake::send_handshake;
 pub use inherited::rpc_server_from_inherited_fds;
-pub use process::start_background_process_with_exe;
 pub(crate) use process::spawn_daemon_process;
+pub use process::start_background_process_with_exe;
 
 /// Fd numbers the fork+exec child receives its inherited pipe ends on.
 /// Matches `sd_listen_fds(3)`-style convention (parent-provided fds start at 3).

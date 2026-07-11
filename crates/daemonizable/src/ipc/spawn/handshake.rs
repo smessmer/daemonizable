@@ -150,8 +150,7 @@ mod tests {
             .into_server_and_client();
         let err = client
             .recv_raw_handshake_with_timeout(Duration::from_millis(50))
-            .err()
-            .expect("hung daemon should be rejected via timeout");
+            .expect_err("hung daemon should be rejected via timeout");
         assert!(
             matches!(err, PipeRecvError::Timeout),
             "expected Timeout, got: {err:?}",

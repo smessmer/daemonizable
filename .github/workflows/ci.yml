@@ -1,0 +1,259 @@
+name: CI
+
+# Run on pushes to the default branch, on every pull request, on merge-queue
+# entries, and on demand. Feature branches get their coverage through the PR
+# they open; `workflow_dispatch` lets you kick a run manually from any branch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (a new push to a PR obsoletes the
+# in-flight run for that PR). The default branch is exempted from the group so
+# post-merge runs never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Native x86-64 Linux: the primary matrix. Every (toolchain × features ×
+  # profile) combination is built and its full test suite (unit + doctests +
+  # the fork+exec daemon e2e tests + the trybuild macro-UI snapshots) run.
+  #
+  # Toolchains are exactly stable / nightly / MSRV: the macro-UI compile-fail
+  # snapshots are `rustversion`-gated to the stable channel, so this trio is
+  # what tests/macro_ui.rs is written against. `1.85` is the workspace
+  # `rust-version` (edition 2024); keep the two in sync.
+  # ---------------------------------------------------------------------------
+  test:
+    name: test / ${{ matrix.toolchain }} / ${{ matrix.features || 'default' }} / ${{ matrix.profile || 'debug' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["stable", "nightly", "1.85"]
+        features: ["", "--no-default-features", "--all-features"]
+        profile: ["", "--release"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (${{ matrix.toolchain }})
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}-${{ matrix.profile }}
+      - name: Build
+        run: cargo build --workspace --all-targets ${{ matrix.features }} ${{ matrix.profile }}
+      - name: Test
+        run: cargo test --workspace ${{ matrix.features }} ${{ matrix.profile }}
+
+  # ---------------------------------------------------------------------------
+  # Minimal-versions: resolve every dependency to the lowest version its
+  # requirement allows and make sure the workspace still builds and tests. This
+  # catches version constraints in Cargo.toml that are actually too loose.
+  # Requires nightly for `-Z direct-minimal-versions`.
+  # ---------------------------------------------------------------------------
+  minimal-versions:
+    name: minimal-versions / ${{ matrix.features || 'default' }} / ${{ matrix.profile || 'debug' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "--no-default-features", "--all-features"]
+        profile: ["", "--release"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (nightly)
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: minimal-${{ matrix.features }}-${{ matrix.profile }}
+      - name: Pin dependencies to their minimal versions
+        run: cargo update -Z direct-minimal-versions
+      - name: Build
+        run: cargo build --workspace --all-targets ${{ matrix.features }} ${{ matrix.profile }}
+      - name: Test
+        run: cargo test --workspace ${{ matrix.features }} ${{ matrix.profile }}
+
+  # ---------------------------------------------------------------------------
+  # Native macOS: exercises the non-Linux code path. On Linux the re-exec spawn
+  # hands `/proc/self/exe` to execve; everywhere else it falls back to
+  # `std::env::current_exe()` (see ipc/spawn/process.rs). This job is the only
+  # thing that compiles and runs that fallback plus the Unix IPC/signal plumbing
+  # against a BSD-flavoured libc.
+  # ---------------------------------------------------------------------------
+  macos:
+    name: test / macos / ${{ matrix.features || 'default' }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "--all-features"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ matrix.features }}
+      - name: Build
+        run: cargo build --workspace --all-targets ${{ matrix.features }}
+      - name: Test
+        run: cargo test --workspace ${{ matrix.features }}
+
+  # ---------------------------------------------------------------------------
+  # Cross-compilation to other architectures, BUILD ONLY.
+  #
+  # Tests are deliberately not run here: `cross` executes the guest binary
+  # under qemu-user, where `/proc/self/exe` resolves to the qemu emulator
+  # rather than the guest image, so the daemon re-exec spawn the e2e tests
+  # depend on cannot work under emulation. Building is still valuable — it
+  # guards against pointer-width / 32-bit-target regressions across the whole
+  # dependency tree.
+  # ---------------------------------------------------------------------------
+  cross-build:
+    name: cross-build / ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cross-${{ matrix.target }}
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Cross build
+        run: cross build --workspace --all-targets --all-features --target ${{ matrix.target }}
+
+  # ---------------------------------------------------------------------------
+  # Linter: clippy over all targets and all features, warnings promoted to
+  # errors.
+  # ---------------------------------------------------------------------------
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Formatting: rustfmt in check mode.
+  # ---------------------------------------------------------------------------
+  rustfmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # ---------------------------------------------------------------------------
+  # Documentation: build the docs with intra-doc-link and other rustdoc
+  # warnings treated as errors, so dead links and broken doc examples fail CI.
+  # ---------------------------------------------------------------------------
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: '-D warnings'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --all-features --no-deps
+
+  # ---------------------------------------------------------------------------
+  # Semver: compare the public API of the publishable crates against the last
+  # release on crates.io and flag accidental breaking changes. Skips crates
+  # that are `publish = false` (the e2e-tests crate) and no-ops gracefully for
+  # a crate that has never been published.
+  # ---------------------------------------------------------------------------
+  semver-checks:
+    name: semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  # ---------------------------------------------------------------------------
+  # Coverage: instrument and run the whole workspace with cargo-llvm-cov and
+  # upload the LCOV report to Codecov. `CODECOV_TOKEN` is optional for public
+  # repositories; the upload is non-blocking so Codecov hiccups never turn CI
+  # red.
+  # ---------------------------------------------------------------------------
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+          verbose: true
+
+  # ---------------------------------------------------------------------------
+  # Aggregate gate: a single job that succeeds only if every other job did.
+  # Point branch protection at "CI success" instead of enumerating the whole
+  # matrix, whose job names change whenever the matrix does.
+  # ---------------------------------------------------------------------------
+  ci-success:
+    name: CI success
+    if: always()
+    needs:
+      - test
+      - minimal-versions
+      - macos
+      - cross-build
+      - clippy
+      - rustfmt
+      - docs
+      - semver-checks
+      - coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any dependency failed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+      - name: All checks passed
+        run: echo "All CI jobs succeeded."
