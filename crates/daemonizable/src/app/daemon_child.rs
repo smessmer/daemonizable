@@ -11,13 +11,35 @@ use crate::ipc::{
 };
 
 /// The re-exec'd daemon child lands here, straight from [`run`](super::run) —
-/// before any app code. Order matters: claim fds (exit 2) → `setsid` (exit 1) →
+/// before any app code. Order matters: drop the daemon-child marker (while
+/// still genuinely single-threaded) → claim fds (exit 2) → `setsid` (exit 1) →
 /// second fork (intermediate `_exit(0)`; fork failure exit 1) → `chdir("/")`
 /// (warn only) → send handshake (exit 127) → receive + decode payload → ack
 /// (exit 127) → hand off to the app. Exit codes 2 and 1 come from the direct
 /// child (pre-fork); the 127s and the chdir warning come from the surviving
 /// grandchild (post-fork).
 pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
+    // Drop the daemon-child marker before anything else runs. Its detection job
+    // is done (`run` already read it to dispatch us here) and it must be gone
+    // before this process spawns any child of its own — including a future
+    // daemonizable app that re-exec's itself — so those children aren't
+    // misdetected as OUR daemon child.
+    //
+    // SAFETY: `std::env::remove_var` is unsound if another thread is
+    // concurrently in libc code that reads `environ` (getenv, or localtime_r via
+    // TZ, getaddrinfo, ...). It is sound *here* precisely because this is the
+    // FIRST statement of the daemon-child arm: we reached it from a fresh
+    // post-exec image with no app-controlled code yet run — `A::build_id()`
+    // (in send_handshake) and the payload's `Deserialize` (in the recv below)
+    // both run later — and the application's `main` preamble is empty
+    // (guaranteed by `#[daemonizable::main]`; required of any hand-written
+    // `main`, see [`run`](super::run)). So the process is genuinely
+    // single-threaded at this point, and no other thread can observe `environ`
+    // mid-mutation.
+    unsafe {
+        std::env::remove_var(DAEMON_CHILD_ENV_VAR);
+    }
+
     let mut server: RpcServer<A::Request, A::Response> = match rpc_server_from_inherited_fds() {
         Ok(s) => s,
         Err(err) => {
@@ -48,7 +70,7 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // below), so this is not a fork-in-a-multithreaded-process. (The one
     // residual assumption is that the application's `main` preamble started no
     // thread before `run()`; `#[daemonizable::main]` guarantees an empty
-    // preamble. Same assumption as the remove_var SAFETY note below.) The
+    // preamble. Same assumption as the remove_var SAFETY note at the top.) The
     // claimed pipe fds 3/4 are inherited across fork (FD_CLOEXEC only affects
     // execve), so the grandchild owns them.
     //
@@ -159,38 +181,9 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
         std::process::exit(127);
     }
 
-    // Drop the marker so processes this daemon spawns (including a future
-    // daemonizable app re-exec'ing itself) aren't misdetected as OUR daemon
-    // child. SAFETY: the daemon child is still single-threaded here — we
-    // re-exec'd with a fresh process image (and the second fork above added no
-    // threads) and haven't started any runtime; `run_daemon` (e.g. its tokio
-    // init) comes after this line. This runs in the surviving grandchild, the
-    // process that actually spawns the daemon's children.
-    //
-    // TODO The SAFETY claim above is an unenforced assumption, not an
-    //   invariant: by this point two pieces of app-controlled code have
-    //   already run in the child — `A::build_id()` (in the send_handshake
-    //   call above) and the app's `Deserialize` impl for `BootstrapPayload`
-    //   (in the postcard::from_bytes above) — and nothing forbids either
-    //   from spawning a thread (e.g. a build-info/telemetry library whose
-    //   lazy init starts a background thread). A thread doing C-level
-    //   getenv (localtime_r reading TZ, getaddrinfo, ...) concurrent with
-    //   this remove_var is UB (glibc environ data race). Fix: hoist the
-    //   remove_var to the FIRST statement of run_as_daemon_child (the
-    //   dispatch in `run` has already consumed the marker, nothing later
-    //   reads it, and at that point the exec image genuinely is
-    //   single-threaded), and document the residual requirement on `run`'s
-    //   contract: `run` must be called before any thread is spawned — the
-    //   re-exec'd daemon child executes the application's main preamble
-    //   too, so a thread started before `run` also exists in the child
-    //   (#[daemonizable::main] guarantees an empty preamble). Note: no
-    //   in-tree binary can trigger this today (cryfs's build_id is a
-    //   format! of constants and its payload Deserialize is derived); this
-    //   matters for external consumers of the published crate.
-    unsafe {
-        std::env::remove_var(DAEMON_CHILD_ENV_VAR);
-    }
-
+    // The daemon-child marker was already dropped at the top of this function
+    // (see the SAFETY note there), so processes spawned from `run_daemon` below
+    // won't be misdetected as our daemon child.
     A::run_daemon(payload, server)
 }
 
