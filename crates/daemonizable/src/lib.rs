@@ -77,7 +77,7 @@
 //   handle; a runtime running on other threads (or plain non-tokio threads)
 //   is invisible to it. And the real invariant is broader than tokio: the
 //   pipe fds get FD_CLOEXEC set non-atomically after creation (see the race
-//   discussion in ipc/pipe.rs), so ANY concurrent fork/Command::spawn on
+//   discussion in ipc/pipe/mod.rs), so ANY concurrent fork/Command::spawn on
 //   another thread during that window — including a second spawn_daemon from
 //   another thread, an advertised use of the Copy+Send+Sync Daemonizer —
 //   leaks duplicate pipe ends into an unrelated child across execve, which
