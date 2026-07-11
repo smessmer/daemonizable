@@ -207,6 +207,26 @@ pub enum InheritedFdsError {
     },
 }
 
+/// Detaching the daemon's inherited stdio to `/dev/null` failed.
+#[derive(Debug, Error)]
+pub enum DetachStdioError {
+    /// Opening `/dev/null` failed, so there was nothing to redirect stdio to.
+    /// The inherited stdio is left untouched.
+    #[error("Failed to open /dev/null while detaching daemon stdio: {0}")]
+    OpenDevNull(#[source] std::io::Error),
+
+    /// `dup2(/dev/null, target)` failed for one of stdin/stdout/stderr. Any
+    /// earlier targets in the stdin→stdout→stderr order were already
+    /// redirected before this one failed.
+    #[error("dup2(/dev/null, {target}) failed while detaching daemon stdio: {source}")]
+    Dup2 {
+        /// The standard fd (0/1/2) the redirect targeted.
+        target: i32,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 /// Receiving the daemon's bootstrap ack failed.
 #[derive(Debug, Error)]
 pub(crate) enum BootstrapAckError {
