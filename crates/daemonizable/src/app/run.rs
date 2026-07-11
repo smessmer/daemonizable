@@ -13,7 +13,37 @@ use crate::ipc::{DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR};
 /// dispatch and the fd claim are process singletons, so `run` must be too.
 static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 
-/// The single entry point: call this from `main` and nothing else.
+/// The single entry point: `main` calls this and does nothing else.
+///
+/// You normally don't write that `main` yourself — `#[daemonizable::main]` on
+/// the impl block generates it (default-on `macros` feature). Without the
+/// feature, write exactly this and nothing more:
+///
+/// ```no_run
+/// # use std::process::ExitCode;
+/// # use daemonizable::{Daemonizable, Daemonizer, RpcServer};
+/// # struct MyApp;
+/// # impl Daemonizable for MyApp {
+/// #     type Request = ();
+/// #     type Response = ();
+/// #     type BootstrapPayload = ();
+/// #     fn build_id() -> String { String::new() }
+/// #     fn run_foreground(_: Daemonizer<Self>) -> ExitCode { ExitCode::SUCCESS }
+/// #     fn run_daemon(_: (), _: RpcServer<(), ()>) -> ! { std::process::exit(0) }
+/// # }
+/// fn main() -> ExitCode {
+///     daemonizable::run::<MyApp>()
+/// }
+/// ```
+///
+/// "And nothing else" is a real constraint, not a style note: the re-exec'd
+/// daemon child runs the same `main`, so anything you put in front of `run`
+/// runs *twice* — once in the foreground process and again in the daemon child,
+/// where argv is empty and the process has not yet claimed its IPC fds. A
+/// thread spawned before `run` therefore also exists in the child. The
+/// attribute guarantees an empty preamble by construction; a hand-written
+/// `main` has to keep that promise itself (and must return `run`'s
+/// [`ExitCode`] rather than swallowing it).
 ///
 /// Dispatches on the process role: a normal invocation calls
 /// [`A::run_foreground`](Daemonizable::run_foreground) with the [`Daemonizer`]

@@ -79,6 +79,13 @@ jobs:
         with:
           key: check-${{ matrix.crate }}-${{ matrix.features }}
       - run: cargo check -p ${{ matrix.crate }} --all-targets ${{ matrix.features }}
+      # `--all-targets` does not build doctests, and the workspace `test` job
+      # can't cover them per-feature either (feature unification again:
+      # `daemonizable-e2e-tests` depends on `daemonizable` with default features,
+      # so `macros` is on even in that job's --no-default-features leg). This is
+      # therefore the only place the crate docs are compiled with `macros`
+      # genuinely off — which the crate-root example is cfg_attr-gated on.
+      - run: cargo test -p ${{ matrix.crate }} --doc ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
   # Minimal-versions: resolve every dependency to the lowest version its

@@ -2,18 +2,22 @@
 //! fork+exec themselves into a background daemon and talk to the child via
 //! typed RPC.
 //!
-//! Implement [`Daemonizable`] for your app type and call [`run::<MyApp>()`](run)
-//! from `main`. The library handles the process mechanics only — daemon-child
-//! detection (via an environment marker, no argv flag), the `fork+exec`
-//! re-exec spawn, the build-id handshake, shipping one app-defined bootstrap
-//! payload, and the typed RPC channel. All policy (argument parsing, logging,
-//! panic hooks, banners) stays in the application.
+//! Implement [`Daemonizable`] for your app type and put `#[daemonizable::main]`
+//! on the impl block: the attribute (default-on `macros` feature) generates the
+//! whole of your `main`, which is nothing but [`run::<MyApp>()`](run). The
+//! library handles the process mechanics only — daemon-child detection (via an
+//! environment marker, no argv flag), the `fork+exec` re-exec spawn, the
+//! build-id handshake, shipping one app-defined bootstrap payload, and the
+//! typed RPC channel. All policy (argument parsing, logging, panic hooks,
+//! banners) stays in the application.
 //!
 //! The typed RPC channel between parent and daemon uses the app's own
 //! [`Daemonizable::Request`] / [`Daemonizable::Response`] types — framework
 //! messages travel out-of-band on the same pipe and are invisible to app code.
 //!
 //! # Example
+//!
+//! `src/main.rs` — the attribute generates `main`, so this is the whole file:
 //!
 //! ```no_run
 //! use std::process::ExitCode;
@@ -22,6 +26,7 @@
 //!
 //! struct MyApp;
 //!
+#![cfg_attr(feature = "macros", doc = "#[daemonizable::main]")]
 //! impl Daemonizable for MyApp {
 //!     type Request = String;
 //!     type Response = String;
@@ -49,14 +54,18 @@
 //!         std::process::exit(0)
 //!     }
 //! }
-//!
-//! fn main() -> ExitCode {
-//!     daemonizable::run::<MyApp>()
-//! }
+#![cfg_attr(not(feature = "macros"), doc = "")]
+#![cfg_attr(not(feature = "macros"), doc = "fn main() -> ExitCode {")]
+#![cfg_attr(not(feature = "macros"), doc = "    daemonizable::run::<MyApp>()")]
+#![cfg_attr(not(feature = "macros"), doc = "}")]
 //! ```
 //!
-//! With the default-on `macros` feature, `#[daemonizable::main]` on the impl
-//! block generates that `main` for you.
+//! `#[daemonizable::main]` comes from the default-on `macros` feature. It leaves
+//! the impl untouched and appends
+//! `fn main() -> ExitCode { daemonizable::run::<MyApp>() }` — the entire `main` an
+//! application on this library should have. Build with `default-features = false`
+//! and the attribute is gone; write that one line yourself (and keep it to that
+//! one line — see [`run`] for why).
 //!
 //! # Process contract
 //!

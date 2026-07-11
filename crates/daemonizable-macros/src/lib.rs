@@ -7,20 +7,56 @@ use quote::quote;
 use syn::spanned::Spanned;
 
 /// Attach to your `impl Daemonizable for YourApp` block to generate the
-/// `main` function.
+/// `main` function. This is the recommended way to build a `daemonizable`
+/// application.
 ///
 /// Expands to the unchanged impl plus
 /// `fn main() -> ExitCode { daemonizable::run::<YourApp>() }` — the whole
 /// `main` an application built on `daemonizable` should have. Writing that
-/// line by hand is easy to get subtly wrong (extra work before `run`, a
-/// swallowed exit code); the attribute makes the correct shape the default.
+/// line by hand is easy to get subtly wrong (extra work before `run` — which
+/// the re-exec'd daemon child then runs too — or a swallowed exit code); the
+/// attribute makes the correct shape the default.
+///
+/// `src/main.rs`:
 ///
 /// ```ignore
+/// use std::process::ExitCode;
+///
+/// use daemonizable::{Daemonizable, Daemonizer, RpcServer};
+///
+/// struct MyApp;
+///
 /// #[daemonizable::main]
 /// impl Daemonizable for MyApp {
-///     /* ... */
+///     type Request = String;
+///     type Response = String;
+///     type BootstrapPayload = ();
+///
+///     fn build_id() -> String {
+///         format!("my-app {}", env!("CARGO_PKG_VERSION"))
+///     }
+///
+///     fn run_foreground(daemonizer: Daemonizer<Self>) -> ExitCode {
+///         let mut rpc = daemonizer.spawn_daemon(&()).unwrap();
+///         rpc.send_request(&"hello".to_string()).unwrap();
+///         println!("daemon says: {}", rpc.recv_response_blocking().unwrap());
+///         ExitCode::SUCCESS
+///     }
+///
+///     fn run_daemon(_payload: (), mut rpc: RpcServer<String, String>) -> ! {
+///         while let Ok(request) = rpc.next_request() {
+///             rpc.send_response(&format!("echo: {request}")).unwrap();
+///         }
+///         std::process::exit(0)
+///     }
 /// }
 /// ```
+///
+/// (The fence is `ignore`, not a compiled doctest: this crate cannot depend on
+/// `daemonizable` — that would be a dependency cycle — so the types above are
+/// not in scope here. The same example *is* compiled as a doctest in the
+/// `daemonizable` crate root, and the macro's real expansion is covered by the
+/// trybuild snapshots in `daemonizable-e2e-tests/tests/macro_ui/`.)
 ///
 /// # Requirements
 ///

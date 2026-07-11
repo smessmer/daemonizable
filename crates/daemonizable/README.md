@@ -27,8 +27,13 @@ startup banner on your application.
 - **Daemon hygiene**: `setsid`, `chdir("/")`, single-claim guard on the
   inherited fds, `detach_stdio()` for when your daemon is ready to let go of
   the terminal.
+- **`#[daemonizable::main]`**: put it on your `impl Daemonizable` block and the
+  correct `main` — a single `run::<MyApp>()` call and nothing else — is
+  generated for you.
 
 ## Example
+
+`src/main.rs` — the attribute generates `main`, so this is the whole file:
 
 ```rust,no_run
 use std::process::ExitCode;
@@ -37,6 +42,7 @@ use daemonizable::{Daemonizable, Daemonizer, RpcServer};
 
 struct MyApp;
 
+#[daemonizable::main]
 impl Daemonizable for MyApp {
     type Request = String;
     type Response = String;
@@ -64,14 +70,17 @@ impl Daemonizable for MyApp {
         std::process::exit(0)
     }
 }
-
-fn main() -> ExitCode {
-    daemonizable::run::<MyApp>()
-}
 ```
 
-With the default-on `macros` feature, `#[daemonizable::main]` on the impl
-block generates that `main` for you.
+`#[daemonizable::main]` comes from the default-on `macros` feature. It leaves
+the impl untouched and appends
+`fn main() -> ExitCode { daemonizable::run::<MyApp>() }` — the entire `main` an
+application on this library should have. Build with `default-features = false`
+and the attribute is gone; write that one line yourself, and keep `main` to
+exactly that one line: the re-exec'd daemon child runs the same `main`, so
+anything in front of `run` runs in the daemon too (a thread spawned there
+exists in the child as well). The attribute guarantees an empty preamble by
+construction.
 
 ## Why fork+exec? A comparison with the alternatives
 
@@ -251,9 +260,11 @@ here; and `systemctl daemon-reexec` re-execs PID 1 itself.
 An honest comparison cuts both ways. The price of fork+exec plus a typed
 channel:
 
-- **The binary must cooperate.** `run::<App>()` has to be the first thing
-  in `main`; a wrapper-script entry point breaks re-exec. Fork-based
-  crates work on any code with zero cooperation.
+- **The binary must cooperate.** `run::<App>()` has to be the whole of
+  `main` — `#[daemonizable::main]` guarantees that by construction, but the
+  binary being re-exec'd must still be *your* binary, so a wrapper-script
+  entry point breaks re-exec. Fork-based crates work on any code with zero
+  cooperation.
 - **procfs.** On Linux the re-exec needs `/proc` mounted (bare chroots and
   minimal containers may not have it); other platforms fall back to
   `current_exe()` plus the handshake.
@@ -353,7 +364,10 @@ faith into an operation that can fail loudly.
 ## Features
 
 - `macros` *(default)*: re-exports `#[daemonizable::main]` from the
-  `daemonizable-macros` companion crate.
+  `daemonizable-macros` companion crate — the recommended way to write your
+  `main`. Disable it and you hand-write
+  `fn main() -> ExitCode { daemonizable::run::<MyApp>() }` instead; nothing else
+  about the API changes.
 - `testutils`: test-only helpers (e.g. `RpcConnection::into_server_and_client`)
   so downstream crates can drive the IPC primitives in their own unit tests.
   Not part of the stable surface.

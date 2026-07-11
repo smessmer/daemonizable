@@ -9,10 +9,12 @@ use crate::ipc::RpcServer;
 
 /// An application that can spawn itself as a background daemon.
 ///
-/// Implement this and call [`run::<MyApp>()`](super::run) from `main` — or let
-/// `#[daemonizable::main]` (default-on `macros` feature) generate that main
-/// by attaching it to the impl block. The trait deliberately has no hooks
-/// for argument parsing, logging, or other startup policy —
+/// Implement this and attach `#[daemonizable::main]` to the impl block: the
+/// attribute (default-on `macros` feature) generates the `main` that calls
+/// [`run::<MyApp>()`](super::run), which is all a `main` on this library should
+/// do. Without the feature, write that one-line `main` yourself — see
+/// [`run`](super::run) for the contract it has to keep. The trait deliberately
+/// has no hooks for argument parsing, logging, or other startup policy —
 /// [`run_foreground`](Self::run_foreground) *is* your application; do
 /// whatever you like in it, and daemonize at the moment of your choosing via
 /// the [`Daemonizer`] handed to it.

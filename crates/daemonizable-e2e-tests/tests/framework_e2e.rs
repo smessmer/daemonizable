@@ -1,6 +1,7 @@
 //! End-to-end test of the framework's `run::<App>()` dispatch, using the
 //! `daemonizable-test-app` helper binary (which implements
-//! [`daemonizable::Daemonizable`] and calls `run` from `main`).
+//! [`daemonizable::Daemonizable`] and gets its `main` from
+//! `#[daemonizable::main]`).
 //!
 //! Unlike the daemon-lifecycle tests (which drive the raw IPC primitives via
 //! `start_background_process_with_exe`, skipping handshake and bootstrap),
