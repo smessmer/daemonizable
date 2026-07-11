@@ -42,6 +42,13 @@ pub enum PipeSendError {
     #[error("Timed out writing to pipe")]
     Timeout,
 
+    /// The sender is poisoned: a previous timeout-bounded send left a partial
+    /// message frame on the wire, so the stream is desynchronized and no
+    /// further sends are possible. Every send on a poisoned `Sender` fails with
+    /// this without touching the pipe. Abandon the connection.
+    #[error("Sender desynchronized by a prior partial send; connection must be abandoned")]
+    Desynchronized,
+
     /// Writing to the pipe failed. A receiver that closed its end surfaces
     /// here as [`std::io::ErrorKind::BrokenPipe`].
     #[error("Failed to write to pipe: {0}")]
@@ -65,6 +72,17 @@ pub enum PipeRecvError {
     /// The message's length prefix exceeds the wire format's maximum size.
     #[error("Message size {size} exceeds maximum {max}")]
     MessageTooLarge { size: usize, max: usize },
+
+    /// The receiver is poisoned: a previous receive consumed part of a message
+    /// frame and then failed (a mid-frame [`Timeout`](Self::Timeout), or a
+    /// [`MessageTooLarge`](Self::MessageTooLarge) whose declared payload was
+    /// left unread), so the stream is desynchronized. Every receive on a
+    /// poisoned `Receiver` fails with this without touching the pipe; a further
+    /// read would misinterpret leftover payload bytes as a new length prefix.
+    /// Abandon the connection. A clean idle timeout (nothing consumed) and a
+    /// [`Decode`](Self::Decode) failure of a fully-read frame do *not* poison.
+    #[error("Receiver desynchronized by a prior partial receive; connection must be abandoned")]
+    Desynchronized,
 
     /// Deserializing the message failed.
     #[error("Failed to decode message: {0}")]

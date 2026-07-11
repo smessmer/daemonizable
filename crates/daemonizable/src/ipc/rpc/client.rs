@@ -31,11 +31,14 @@ where
         self.sender.send(request)
     }
 
-    // TODO After a `Timeout` (or `MessageTooLarge`) error the underlying
-    //   stream may be desynchronized and this client must currently be
-    //   abandoned, but nothing enforces or documents that — see the
-    //   desync TODO on `Receiver::recv_timeout` in ipc/pipe/receiver.rs for the full
-    //   analysis and the preferred poisoning fix.
+    /// Receive one response, bounded by `timeout`.
+    ///
+    /// If a `Timeout` fires mid-frame (or a `MessageTooLarge` leaves an unread
+    /// payload on the wire), the underlying receiver is poisoned: this and every
+    /// later `recv_response` return [`PipeRecvError::Desynchronized`], so a
+    /// desynced stream surfaces as a loud typed error instead of silently
+    /// misframed data. A clean idle timeout does not poison, so poll-with-short-
+    /// timeout loops on an idle channel keep working.
     pub fn recv_response(&mut self, timeout: Duration) -> Result<Response, PipeRecvError> {
         self.receiver.recv_timeout(timeout)
     }

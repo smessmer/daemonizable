@@ -19,6 +19,10 @@ where
     T: Serialize + DeserializeOwned,
 {
     sender: interprocess::unnamed_pipe::Sender,
+    /// Set once a timeout-bounded send leaves a partial message frame on the
+    /// wire (see [`PipeSendError::Desynchronized`]). Once set, every send fails
+    /// fast without touching the pipe.
+    poisoned: bool,
     _p: PhantomData<T>,
 }
 
@@ -29,6 +33,7 @@ where
     pub(super) fn new(sender: interprocess::unnamed_pipe::Sender) -> Self {
         Self {
             sender,
+            poisoned: false,
             _p: PhantomData,
         }
     }
@@ -64,14 +69,23 @@ where
     /// `spawn_daemon`: a child that passed the handshake and then wedged
     /// (SIGSTOP/ptrace) without draining the pipe would otherwise block the
     /// unbounded `write_all` forever once the kernel buffer fills, hanging the
-    /// spawn and starving its failure-cleanup path. On expiry the underlying
-    /// stream is left partially written and the sender must be abandoned (the
-    /// failing spawn tears the daemon down regardless).
+    /// spawn and starving its failure-cleanup path.
+    ///
+    /// If a `Timeout` fires after part of a frame was already written, the wire
+    /// is left mid-frame: the `Sender` is poisoned and all subsequent sends fail
+    /// with [`PipeSendError::Desynchronized`]. A timeout that wrote nothing does
+    /// not poison. (Symmetric with [`Receiver::recv_raw_timeout`]; the
+    /// bootstrap caller abandons the sender on any error regardless.)
+    ///
+    /// [`Receiver::recv_raw_timeout`]: super::Receiver::recv_raw_timeout
     pub(crate) fn send_raw_with_timeout(
         &mut self,
         bytes: &[u8],
         timeout: Duration,
     ) -> Result<(), PipeSendError> {
+        if self.poisoned {
+            return Err(PipeSendError::Desynchronized);
+        }
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(PipeSendError::MessageTooLarge {
                 size: bytes.len(),
@@ -81,12 +95,41 @@ where
         self.sender.set_nonblocking(true)?;
         let timeout_at = Instant::now() + timeout;
         let len = bytes.len() as u32;
-        write_all_with_timeout(&mut self.sender, &len.to_le_bytes(), timeout_at)?;
-        write_all_with_timeout(&mut self.sender, bytes, timeout_at)?;
+
+        // Length prefix. A timeout that wrote 0 bytes leaves the wire clean; a
+        // partial prefix (1–3 bytes) leaves it mid-frame and poisons.
+        let mut prefix_written = 0;
+        if let Err(err) = write_all_with_timeout(
+            &mut self.sender,
+            &len.to_le_bytes(),
+            timeout_at,
+            &mut prefix_written,
+        ) {
+            if matches!(err, PipeSendError::Timeout) && prefix_written > 0 {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
+
+        // Payload. The prefix is fully written, so any timeout here is
+        // mid-frame and poisons.
+        let mut payload_written = 0;
+        if let Err(err) =
+            write_all_with_timeout(&mut self.sender, bytes, timeout_at, &mut payload_written)
+        {
+            if matches!(err, PipeSendError::Timeout) {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
+
         Ok(())
     }
 
     fn write_length_prefixed(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
+        if self.poisoned {
+            return Err(PipeSendError::Desynchronized);
+        }
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(PipeSendError::MessageTooLarge {
                 size: bytes.len(),
@@ -94,7 +137,9 @@ where
             });
         }
         // Reset to blocking in case a prior timeout-bounded send left the fd
-        // nonblocking (mirrors `Receiver::read_length_prefixed`).
+        // nonblocking (mirrors `Receiver::read_length_prefixed`). A blocking
+        // write_all can't time out mid-frame; a broken pipe surfaces as a
+        // terminal Io error, so this path never needs to poison.
         self.sender.set_nonblocking(false)?;
         let len = bytes.len() as u32;
         self.sender.write_all(&len.to_le_bytes())?;
@@ -103,16 +148,20 @@ where
     }
 }
 
+/// Writes all of `buf` or fails. `*bytes_written` is updated with how many
+/// bytes reached the pipe; on a `Timeout` the caller inspects it to tell a
+/// wrote-nothing timeout (0) from a mid-frame one (>0).
 fn write_all_with_timeout<W: Write + AsFd>(
     writer: &mut W,
     buf: &[u8],
     timeout_at: Instant,
+    bytes_written: &mut usize,
 ) -> Result<(), PipeSendError> {
     // `PollTimeout` holds milliseconds in a `u16`, so a single `poll` call can
     // wait at most ~65.5s; the impl loops across windows up to the real
     // deadline. `u16::MAX` is the production window; tests pass a small one to
     // drive the multi-window path without a 65s wait.
-    write_all_with_timeout_impl(writer, buf, timeout_at, u16::MAX)
+    write_all_with_timeout_impl(writer, buf, timeout_at, u16::MAX, bytes_written)
 }
 
 fn write_all_with_timeout_impl<W: Write + AsFd>(
@@ -120,10 +169,11 @@ fn write_all_with_timeout_impl<W: Write + AsFd>(
     buf: &[u8],
     timeout_at: Instant,
     max_poll_window_ms: u16,
+    bytes_written: &mut usize,
 ) -> Result<(), PipeSendError> {
-    let mut bytes_written = 0;
-    while bytes_written < buf.len() {
-        match writer.write(&buf[bytes_written..]) {
+    *bytes_written = 0;
+    while *bytes_written < buf.len() {
+        match writer.write(&buf[*bytes_written..]) {
             // A pipe write only reports 0 when it can make no progress and
             // won't be able to; treat it as a broken stream rather than spin.
             Ok(0) => {
@@ -131,7 +181,7 @@ fn write_all_with_timeout_impl<W: Write + AsFd>(
                     std::io::ErrorKind::WriteZero,
                 )));
             }
-            Ok(n) => bytes_written += n,
+            Ok(n) => *bytes_written += n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Wait for buffer space using poll() instead of busy-waiting.
                 loop {
@@ -215,11 +265,13 @@ mod tests {
             raw_recver // keep the read end open until the write completes
         });
 
+        let mut bytes_written = 0;
         write_all_with_timeout_impl(
             &mut raw_sender,
             &[1u8, 2, 3, 4],
             Instant::now() + Duration::from_secs(5),
             /* max_poll_window_ms */ 20,
+            &mut bytes_written,
         )
         .expect("space freed after several poll windows must let the write complete");
         drop(reader.join().unwrap());
@@ -236,11 +288,13 @@ mod tests {
         fill_pipe_buffer(&mut raw_sender);
 
         let start = Instant::now();
+        let mut bytes_written = 0;
         let err = write_all_with_timeout_impl(
             &mut raw_sender,
             &[1u8, 2, 3, 4],
             start + Duration::from_millis(120),
             /* max_poll_window_ms */ 20,
+            &mut bytes_written,
         )
         .expect_err("buffer full with no reader must time out");
         let elapsed = start.elapsed();
