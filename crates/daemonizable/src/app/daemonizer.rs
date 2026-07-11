@@ -65,13 +65,15 @@ impl<A: Daemonizable> Daemonizer<A> {
     /// Because the daemon is created with fork+exec (not a bare `fork()`), it
     /// is safe to call this with a thread pool or async runtime already
     /// running — `execve` gives the child a fresh process image, so none of
-    /// the parent's threads or lock state carry over. The one caveat is a
-    /// narrow fd-inheritance race: the pipe fds get `FD_CLOEXEC` set
-    /// non-atomically just after creation, so if another thread performs its
-    /// own fork+exec in that brief window it can leak a copy of those fds into
-    /// an unrelated child. Spawning the daemon before the process starts
-    /// spawning other subprocesses avoids it entirely (a `pipe2(O_CLOEXEC)`
-    /// fix that closes the race outright is tracked in `lib.rs`).
+    /// the parent's threads or lock state carry over. On Linux/Android, the
+    /// *BSDs, and the other targets with `pipe2(O_CLOEXEC)`, the pipe fds are
+    /// created with `FD_CLOEXEC` already set, so there is no fd-inheritance
+    /// race regardless of what other threads are doing. macOS/iOS have no
+    /// `pipe2`, so there the flag is set in a separate step just after
+    /// creation and a narrow race remains: if another thread performs its own
+    /// fork+exec in that brief window it can leak a copy of those fds into an
+    /// unrelated child. On those targets, spawning the daemon before the
+    /// process starts spawning other subprocesses avoids it entirely.
     pub fn spawn_daemon(
         &self,
         payload: &A::BootstrapPayload,

@@ -69,8 +69,9 @@ where
             });
         }
     }
-    // TODO Restore FD_CLOEXEC on the claimed fds here (reuse ipc/pipe/mod.rs's
-    //   set_cloexec helper). The parent set it on all pipe ends at creation,
+    // TODO Restore FD_CLOEXEC on the claimed fds here (an fcntl(F_SETFD) pair,
+    //   as in the macOS fallback path of ipc/pipe/mod.rs). The parent set it on
+    //   all pipe ends at creation,
     //   but the dup2 onto fds 3/4 during the spawn necessarily cleared it so
     //   they survive the execve — and nothing re-sets it, so the fds stay
     //   inheritable for the daemon's whole lifetime. Every subprocess the
