@@ -7,13 +7,13 @@
 //! whole of your `main`, which is nothing but [`run::<MyApp>()`](run). The
 //! library handles the process mechanics only — daemon-child detection (via an
 //! environment marker, no argv flag), the `fork+exec` re-exec spawn, the
-//! build-id handshake, shipping one app-defined bootstrap payload, and the
-//! typed RPC channel. All policy (argument parsing, logging, panic hooks,
-//! banners) stays in the application.
+//! build-id handshake, and the typed RPC channel. All policy (argument parsing,
+//! logging, panic hooks, banners) stays in the application.
 //!
 //! The typed RPC channel between parent and daemon uses the app's own
-//! [`Daemonizable::Request`] / [`Daemonizable::Response`] types — framework
-//! messages travel out-of-band on the same pipe and are invisible to app code.
+//! [`Daemonizable::Request`] / [`Daemonizable::Response`] types — the
+//! framework's build-id handshake travels out-of-band on the same pipe, before
+//! the typed phase and invisible to app code.
 //!
 //! # Example
 //!
@@ -30,7 +30,6 @@
 //! impl Daemonizable for MyApp {
 //!     type Request = String;
 //!     type Response = String;
-//!     type BootstrapPayload = ();
 //!
 //!     fn build_id() -> String {
 //!         format!("my-app {}", env!("CARGO_PKG_VERSION"))
@@ -39,13 +38,13 @@
 //!     fn run_foreground(daemonizer: Daemonizer<Self>) -> ExitCode {
 //!         // This is your `main`: parse arguments however you like, then
 //!         // daemonize whenever (and only if) you decide to.
-//!         let mut rpc = daemonizer.spawn_daemon(&()).unwrap();
+//!         let mut rpc = daemonizer.spawn_daemon().unwrap();
 //!         rpc.send_request(&"hello".to_string()).unwrap();
 //!         println!("daemon says: {}", rpc.recv_response_blocking().unwrap());
 //!         ExitCode::SUCCESS
 //!     }
 //!
-//!     fn run_daemon(_payload: (), mut rpc: RpcServer<String, String>) -> ! {
+//!     fn run_daemon(mut rpc: RpcServer<String, String>) -> ! {
 //!         // Runs in the re-exec'd daemon child. Serve requests until the
 //!         // parent drops its client (EOF), then exit.
 //!         while let Ok(request) = rpc.next_request() {
@@ -79,20 +78,20 @@
 //! therefore leaves the caller no child and no zombie, whatever the caller's
 //! own lifetime.
 //!
-//! A **failed** spawn (handshake mismatch, bootstrap failure) is killed via its
+//! A **failed** spawn (handshake mismatch or spawn failure) is killed via its
 //! process group (`kill(-child_pid, SIGKILL)`, which reaches the grandchild;
 //! ESRCH falls back to a direct kill for a child that died before `setsid`) and
 //! the intermediate reaped before the error is returned. A grandchild the group
 //! signal somehow misses (it left the group via its own `setsid`/`setpgid`)
-//! still self-terminates via pipe EOF within ~10 s once the client is dropped,
-//! so failed-spawn teardown of the daemon is asynchronous, not synchronous with
+//! still self-terminates via pipe EOF once the client is dropped, so
+//! failed-spawn teardown of the daemon is asynchronous, not synchronous with
 //! the returned error.
 //!
 //! Two caveats. [`Daemonizer::spawn_daemon`] can block indefinitely if the
 //! intermediate is externally stopped (SIGSTOP/ptrace) in the instant before it
-//! exits, since it is reaped with a blocking `wait()` (the handshake, bootstrap
-//! send, and ack are all timeout-bounded, so a wedged child during those steps
-//! is not). And the caller must not concurrently reap arbitrary children (a
+//! exits, since it is reaped with a blocking `wait()` (the build-id handshake
+//! recv is timeout-bounded, so a wedged child during the handshake is not). And
+//! the caller must not concurrently reap arbitrary children (a
 //! `SIGCHLD` handler that calls `waitpid(-1)`, say) during the spawn, or it may
 //! reap the intermediate first and defeat the cleanup's pid bookkeeping.
 //!
@@ -147,7 +146,7 @@ pub use ipc::detach_stdio;
 
 // Lower-level handles for integration tests that substitute an external
 // helper binary for the re-execed self and drive the spawn machinery
-// directly, skipping handshake and bootstrap.
+// directly, skipping the handshake.
 //
 // Production app code should not reach for these — implement
 // [`Daemonizable`] and let [`run`] orchestrate the daemon side.
@@ -157,7 +156,7 @@ pub use ipc::detach_stdio;
 pub use ipc::{rpc_server_from_inherited_fds, send_handshake, start_background_process_with_exe};
 
 // Like `start_background_process_with_exe` but keeps the full handshake +
-// bootstrap + failed-spawn cleanup, against an arbitrary helper binary. Exists
+// failed-spawn cleanup, against an arbitrary helper binary. Exists
 // only so `daemonizable-e2e-tests` can cover the cleanup contract that
 // `spawn_daemon` promises (production always re-execs `/proc/self/exe`, which a
 // libtest binary cannot stand in for). Gated off the stable surface.

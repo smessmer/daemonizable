@@ -1,9 +1,9 @@
 //! Parent-side fork+exec machinery: re-exec the current binary (or a test
 //! helper) as a background child, wire up the IPC pipes, and — for the real
-//! daemon path — validate the handshake and ship the bootstrap payload. The
-//! validated daemon is a *grandchild*: the re-exec'd child forks once more so
-//! it is never a session leader, and the direct child this parent holds a
-//! `Child` handle for is a short-lived intermediate.
+//! daemon path — validate the build-id handshake. The validated daemon is a
+//! *grandchild*: the re-exec'd child forks once more so it is never a session
+//! leader, and the direct child this parent holds a `Child` handle for is a
+//! short-lived intermediate.
 
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
@@ -15,12 +15,11 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::handshake::validate_handshake_and_build_client;
 use super::{
-    BOOTSTRAP_TIMEOUT, CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_CHILD_ENV_VALUE,
-    DAEMON_CHILD_ENV_VAR,
+    CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR,
 };
 use crate::ipc::RpcClient;
 use crate::ipc::RpcConnection;
-use crate::ipc::error::{BootstrapAckError, SpawnDaemonError};
+use crate::ipc::error::SpawnDaemonError;
 
 /// Resolve the path to exec for the daemon child.
 ///
@@ -53,9 +52,7 @@ fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
 /// with the [`DAEMON_CHILD_ENV_VAR`] marker (no argv flag; the child
 /// receives its two pipe ends as fds `CHILD_REQUEST_RECV_FD` (3) and
 /// `CHILD_RESPONSE_SEND_FD` (4); every other parent fd is CLOEXEC so the
-/// kernel closes them during `execve`), validates the build-id handshake,
-/// ships `payload_bytes` as the raw bootstrap frame, and waits for the
-/// daemon's ack (= payload received and decoded).
+/// kernel closes them during `execve`) and validates the build-id handshake.
 ///
 /// The handshake is a raw (not postcard-encoded) frame *from* the daemon
 /// child, bounded by `HANDSHAKE_TIMEOUT`, and the spawn is rejected if the
@@ -72,13 +69,12 @@ fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
 /// The re-exec'd child forks a second time (see `run_as_daemon_child`) so the
 /// daemon is the grandchild; the direct child is a short-lived session-leader
 /// intermediate. On success the intermediate is reaped here (it has already
-/// `_exit(0)`d). On handshake/bootstrap failure the spawn is killed via its
+/// `_exit(0)`d). On handshake/spawn failure the spawn is killed via its
 /// process group — `kill(-child_pid, SIGKILL)`, which reaches the grandchild —
 /// and the intermediate reaped before the error is returned, so a failed spawn
 /// leaves no orphan and no unreapable zombie behind in a long-lived caller.
 pub(crate) fn spawn_daemon_process<Request, Response>(
     expected_build_id: &str,
-    payload_bytes: &[u8],
 ) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
 where
     Request: Serialize + DeserializeOwned,
@@ -102,16 +98,16 @@ where
         )],
     )?;
 
-    complete_spawn(client, child, expected_build_id, payload_bytes)
+    complete_spawn(client, child, expected_build_id)
 }
 
 /// Test-only variant of [`spawn_daemon_process`]: spawn an arbitrary helper
 /// binary instead of re-exec'ing the current one, but keep the full handshake
-/// validation, bootstrap shipping, and success/failure child cleanup. Exists
-/// so the documented failed-spawn cleanup contract is testable —
-/// [`spawn_daemon_process`] always re-execs `/proc/self/exe`, which is unusable
-/// from a libtest binary, and the raw [`start_background_process_with_exe`] path
-/// bypasses handshake validation and drops the `Child`.
+/// validation and success/failure child cleanup. Exists so the documented
+/// failed-spawn cleanup contract is testable — [`spawn_daemon_process`] always
+/// re-execs `/proc/self/exe`, which is unusable from a libtest binary, and the
+/// raw [`start_background_process_with_exe`] path bypasses handshake validation
+/// and drops the `Child`.
 ///
 /// `#[doc(hidden)]` and gated behind `test`/`testutils`: not part of the stable
 /// surface.
@@ -120,7 +116,6 @@ where
 pub fn spawn_daemon_process_with_exe<Request, Response>(
     exe: &Path,
     expected_build_id: &str,
-    payload_bytes: &[u8],
     extra_env: &[(&OsStr, &OsStr)],
 ) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
 where
@@ -128,21 +123,20 @@ where
     Response: Serialize + DeserializeOwned + Send,
 {
     let (client, child) = start_background_process_inner(exe, None, &[], extra_env)?;
-    complete_spawn(client, child, expected_build_id, payload_bytes)
+    complete_spawn(client, child, expected_build_id)
 }
 
 /// Drive the parent side of the spawn protocol to completion against an
-/// already-spawned `child`: validate the build-id handshake, ship the bootstrap
-/// payload, and — on any failure — kill and reap the child before returning the
-/// error, so a failed spawn leaves no orphan and no unreapable zombie behind in
-/// a long-lived caller. Shared by [`spawn_daemon_process`] and the test-only
+/// already-spawned `child`: validate the build-id handshake and — on any
+/// failure — kill and reap the child before returning the error, so a failed
+/// spawn leaves no orphan and no unreapable zombie behind in a long-lived
+/// caller. Shared by [`spawn_daemon_process`] and the test-only
 /// [`spawn_daemon_process_with_exe`] so the cleanup path has one home and one
 /// set of tests (`daemonizable-e2e-tests/tests/failed_spawn_cleanup.rs`).
 fn complete_spawn<Request, Response>(
     client: RpcClient<Request, Response>,
     mut child: std::process::Child,
     expected_build_id: &str,
-    payload_bytes: &[u8],
 ) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
 where
     Request: Serialize + DeserializeOwned,
@@ -153,7 +147,7 @@ where
     // pid before any wait() so it still names the (live or zombie) direct child.
     let child_pid = child.id() as libc::pid_t;
 
-    match handshake_and_ship_bootstrap(client, expected_build_id, payload_bytes) {
+    match validate_handshake_and_build_client(client, expected_build_id) {
         Ok(client) => {
             // The intermediate _exit(0)s before the handshake is sent, so a
             // successful handshake proves it is already dead; this reaps it
@@ -162,10 +156,10 @@ where
             //
             // Blocking wait(): an externally SIGSTOPped or ptraced intermediate
             // would block here indefinitely (documented on `spawn_daemon`). This
-            // is now the only unbounded step of the spawn — the handshake,
-            // bootstrap send, and ack are all timeout-bounded. Since this wait is
-            // only zombie hygiene — the real daemon is the orphaned grandchild —
-            // it could degrade to try_wait()+timeout if that ever mattered.
+            // is the only unbounded step of the spawn — the handshake recv is
+            // timeout-bounded. Since this wait is only zombie hygiene — the real
+            // daemon is the orphaned grandchild — it could degrade to
+            // try_wait()+timeout if that ever mattered.
             let _ = child.wait();
             Ok(client)
         }
@@ -191,45 +185,14 @@ where
             //     group, whose id is our pgid, not child_pid); the direct
             //     child.kill() gets it instead
             // A grandchild the group-kill somehow misses (it left the group via
-            // its own setsid/setpgid) still self-terminates via pipe EOF within
-            // BOOTSTRAP_TIMEOUT once the client is dropped on the error return.
+            // its own setsid/setpgid) still self-terminates via pipe EOF once
+            // the client is dropped on the error return.
             let _ = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
             let _ = child.kill();
             let _ = child.wait();
-            Err(err)
+            Err(SpawnDaemonError::Handshake(err))
         }
     }
-}
-
-fn handshake_and_ship_bootstrap<Request, Response>(
-    client: RpcClient<Request, Response>,
-    expected_build_id: &str,
-    payload_bytes: &[u8],
-) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
-where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned + Send,
-{
-    let mut client = validate_handshake_and_build_client(client, expected_build_id)?;
-    // Bound this send by BOOTSTRAP_TIMEOUT so it can't become the one unbounded
-    // step of the spawn protocol (the handshake recv and the ack recv below are
-    // already bounded). A blocking write_all would stall once the kernel pipe
-    // buffer fills (64 KiB default on Linux, 4 KiB under the pipe-user-pages-soft
-    // limit) while MAX_MESSAGE_SIZE permits payloads up to 1 MiB — so against a
-    // child that passed the handshake and was then stopped without executing
-    // (SIGSTOP/ptrace), spawn_daemon would hang forever and the kill+wait
-    // failure cleanup below would never run. On timeout we return an error, so
-    // that cleanup path runs.
-    client
-        .send_raw_bootstrap_with_timeout(payload_bytes, BOOTSTRAP_TIMEOUT)
-        .map_err(SpawnDaemonError::SendPayload)?;
-    client
-        .recv_raw_bootstrap_ack_with_timeout(BOOTSTRAP_TIMEOUT)
-        .map_err(|err| match err {
-            BootstrapAckError::NonEmptyAck { len } => SpawnDaemonError::MalformedAck { len },
-            BootstrapAckError::Recv(err) => SpawnDaemonError::RecvAck(err),
-        })?;
-    Ok(client)
 }
 
 /// Test-only variant: spawn an arbitrary helper binary instead of re-exec'ing

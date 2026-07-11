@@ -35,20 +35,6 @@ pub enum PipeSendError {
     #[error("Failed to encode message: {0}")]
     Encode(#[from] postcard::Error),
 
-    /// A timeout-bounded send (e.g. the bootstrap payload) did not complete
-    /// before its deadline — the kernel pipe buffer stayed full because the
-    /// peer wasn't draining it. Only the timeout-bounded send path
-    /// (`send_raw_with_timeout`) produces this; unbounded sends block instead.
-    #[error("Timed out writing to pipe")]
-    Timeout,
-
-    /// The sender is poisoned: a previous timeout-bounded send left a partial
-    /// message frame on the wire, so the stream is desynchronized and no
-    /// further sends are possible. Every send on a poisoned `Sender` fails with
-    /// this without touching the pipe. Abandon the connection.
-    #[error("Sender desynchronized by a prior partial send; connection must be abandoned")]
-    Desynchronized,
-
     /// Writing to the pipe failed. A receiver that closed its end surfaces
     /// here as [`std::io::ErrorKind::BrokenPipe`].
     #[error("Failed to write to pipe: {0}")]
@@ -136,23 +122,6 @@ pub enum SpawnDaemonError {
     /// The spawned child failed the build-id handshake.
     #[error(transparent)]
     Handshake(#[from] HandshakeError),
-
-    /// Serializing the bootstrap payload failed.
-    #[error("Failed to encode bootstrap payload: {0}")]
-    EncodePayload(#[source] postcard::Error),
-
-    /// Shipping the bootstrap payload to the daemon failed.
-    #[error("Failed to send bootstrap payload to daemon: {0}")]
-    SendPayload(#[source] PipeSendError),
-
-    /// Receiving the daemon's bootstrap ack failed (timeout, EOF because the
-    /// daemon died, or an I/O error).
-    #[error("Failed to receive bootstrap ack from daemon: {0}")]
-    RecvAck(#[source] PipeRecvError),
-
-    /// The daemon acked with a non-empty payload — a protocol violation.
-    #[error("Bootstrap ack carried {len} bytes; expected empty payload")]
-    MalformedAck { len: usize },
 }
 
 /// The daemon child couldn't claim the IPC fds inherited from its parent.
@@ -225,17 +194,4 @@ pub enum DetachStdioError {
         #[source]
         source: std::io::Error,
     },
-}
-
-/// Receiving the daemon's bootstrap ack failed.
-#[derive(Debug, Error)]
-pub(crate) enum BootstrapAckError {
-    /// The daemon sent a non-empty payload where the empty ack marker was
-    /// expected — a protocol violation.
-    #[error("Bootstrap ack carried {len} bytes; expected empty payload")]
-    NonEmptyAck { len: usize },
-
-    /// Receiving the ack failed (timeout, EOF, or I/O error).
-    #[error(transparent)]
-    Recv(#[from] PipeRecvError),
 }

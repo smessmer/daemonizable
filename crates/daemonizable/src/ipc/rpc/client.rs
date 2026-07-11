@@ -1,12 +1,12 @@
 //! [`RpcClient`]: the parent-side endpoint. Sends typed requests to the daemon
-//! and receives typed responses, plus the out-of-band framework frames
-//! (build-id handshake, bootstrap) that precede typed RPC.
+//! and receives typed responses, plus the out-of-band build-id handshake that
+//! precedes typed RPC.
 
 use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::ipc::error::{BootstrapAckError, PipeRecvError, PipeSendError};
+use crate::ipc::error::{PipeRecvError, PipeSendError};
 use crate::ipc::pipe::{Receiver, Sender};
 
 pub struct RpcClient<Request, Response>
@@ -78,37 +78,5 @@ where
         timeout: Duration,
     ) -> Result<Vec<u8>, PipeRecvError> {
         self.receiver.recv_raw_timeout(timeout)
-    }
-
-    /// Send the framework's bootstrap message — raw length-prefixed bytes
-    /// (typically postcard-encoded by the caller), bounded by `timeout`. Runs
-    /// after the build-id handshake is validated and before any typed RPC; the
-    /// typed channel stays clean.
-    ///
-    /// The timeout is the parent's safety net for a child that passed the
-    /// handshake and then wedged without draining the pipe: without it, a
-    /// payload larger than the kernel pipe buffer would block `spawn_daemon`
-    /// forever and its failure cleanup would never run.
-    pub(crate) fn send_raw_bootstrap_with_timeout(
-        &mut self,
-        bytes: &[u8],
-        timeout: Duration,
-    ) -> Result<(), PipeSendError> {
-        self.sender.send_raw_with_timeout(bytes, timeout)
-    }
-
-    /// Receive the daemon's empty-payload ack for the bootstrap, bounded by
-    /// `timeout`. Returns Ok on a zero-length payload, errors otherwise
-    /// (timeout, EOF, or a non-empty payload — all of which mean the daemon
-    /// didn't acknowledge bootstrap successfully).
-    pub(crate) fn recv_raw_bootstrap_ack_with_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<(), BootstrapAckError> {
-        let bytes = self.receiver.recv_raw_timeout(timeout)?;
-        if !bytes.is_empty() {
-            return Err(BootstrapAckError::NonEmptyAck { len: bytes.len() });
-        }
-        Ok(())
     }
 }

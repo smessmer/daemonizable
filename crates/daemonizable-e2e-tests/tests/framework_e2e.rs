@@ -4,11 +4,10 @@
 //! `#[daemonizable::main]`).
 //!
 //! Unlike the daemon-lifecycle tests (which drive the raw IPC primitives via
-//! `start_background_process_with_exe`, skipping handshake and bootstrap),
-//! these tests cover the full production path: the env-marker child
-//! dispatch, the real `/proc/self/exe` re-exec spawn, the build-id
-//! handshake, the bootstrap payload round-trip, and the typed RPC channel
-//! between parent and daemon.
+//! `start_background_process_with_exe`, skipping the handshake), these tests
+//! cover the full production path: the env-marker child dispatch, the real
+//! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
+//! channel between parent and daemon.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -27,7 +26,7 @@ fn run_test_app(args: &[&str], outfile: Option<&PathBuf>) -> std::process::Outpu
 }
 
 #[test]
-fn daemonize_dispatch_does_full_spawn_handshake_bootstrap_and_rpc_roundtrip() {
+fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
 
@@ -44,18 +43,15 @@ fn daemonize_dispatch_does_full_spawn_handshake_bootstrap_and_rpc_roundtrip() {
     // itself, the daemon passed the build-id handshake, and the typed echo+1
     // RPC round-tripped through `run_daemon`. "cwd:/" proves the framework
     // chdir'd the daemon to `/` instead of pinning the parent's cwd.
-    // "payload:tag-from-parent" proves the bootstrap payload was shipped,
-    // decoded, and handed to `run_daemon`. "marker:removed" proves the child
-    // env marker was dropped before `run_daemon` was entered, so the
-    // daemon's own children can't be misdetected as daemon children.
-    // (Note: "before run_daemon", not "before app code" — `build_id()` and
-    // the payload's `Deserialize` run earlier in the child arm; see the
+    // "marker:removed" proves the child env marker was dropped before
+    // `run_daemon` was entered, so the daemon's own children can't be
+    // misdetected as daemon children. (Note: "before run_daemon", not "before
+    // app code" — `build_id()` runs earlier in the child arm; see the
     // remove_var TODO in app/daemon_child.rs.)
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
     let fields = parse_outfile(&result);
     assert_eq!(fields["parent-got"], "43", "outfile: {result}");
     assert_eq!(fields["cwd"], "/", "outfile: {result}");
-    assert_eq!(fields["payload"], "tag-from-parent", "outfile: {result}");
     assert_eq!(fields["marker"], "removed", "outfile: {result}");
 
     // Session assertions — the payoff of the framework's `setsid` + second fork.

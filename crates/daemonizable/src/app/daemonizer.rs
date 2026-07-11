@@ -12,9 +12,8 @@ use crate::ipc::{RpcClient, SpawnDaemonError, spawn_daemon_process};
 /// The only way to obtain one is via [`run::<A>()`](super::run), which hands
 /// it to [`A::run_foreground`](Daemonizable::run_foreground) — so the type
 /// system guarantees the spawner and the daemon entry point agree on `A` (and
-/// with it the `Request`/`Response`/`BootstrapPayload` types and the build
-/// id). A `Copy` zero-sized token: store it in your CLI state, pass it around
-/// freely.
+/// with it the `Request`/`Response` types and the build id). A `Copy`
+/// zero-sized token: store it in your CLI state, pass it around freely.
 pub struct Daemonizer<A: Daemonizable> {
     // `fn() -> A` (not `A`) so the token is Copy/Send/Sync regardless of `A`.
     _private: PhantomData<fn() -> A>,
@@ -46,15 +45,16 @@ impl<A: Daemonizable> Daemonizer<A> {
     /// Spawn the current binary as a background daemon via fork+exec and
     /// return the typed RPC client connected to it.
     ///
-    /// Blocks until the daemon has passed the build-id handshake and acked
-    /// receipt of `payload` (ack means received and decoded; the daemon
-    /// *applies* it inside [`Daemonizable::run_daemon`] afterwards).
+    /// Blocks until the daemon has passed the build-id handshake. Any
+    /// configuration the daemon needs travels afterwards as an ordinary
+    /// request on the returned client (its argv is empty, so it can't parse
+    /// flags itself).
     ///
     /// The daemon is a **grandchild**: the re-exec'd child forks again after
     /// `setsid` so it is never a session leader (and can never acquire a
     /// controlling terminal). The short-lived intermediate is reaped here, so a
     /// successful spawn leaves the caller no child and no zombie. On handshake
-    /// or bootstrap failure the spawn is killed via its process group and the
+    /// or spawn failure the spawn is killed via its process group and the
     /// intermediate reaped before the error is returned. See the crate-level
     /// [Process contract](crate#process-contract) for the full detail, including
     /// two caveats: this call can block indefinitely if the intermediate is
@@ -74,13 +74,8 @@ impl<A: Daemonizable> Daemonizer<A> {
     /// fork+exec in that brief window it can leak a copy of those fds into an
     /// unrelated child. On those targets, spawning the daemon before the
     /// process starts spawning other subprocesses avoids it entirely.
-    pub fn spawn_daemon(
-        &self,
-        payload: &A::BootstrapPayload,
-    ) -> Result<RpcClient<A::Request, A::Response>, SpawnDaemonError> {
-        let payload_bytes =
-            postcard::to_stdvec(payload).map_err(SpawnDaemonError::EncodePayload)?;
-        spawn_daemon_process(&A::build_id(), &payload_bytes)
+    pub fn spawn_daemon(&self) -> Result<RpcClient<A::Request, A::Response>, SpawnDaemonError> {
+        spawn_daemon_process::<A::Request, A::Response>(&A::build_id())
     }
 }
 
@@ -99,14 +94,13 @@ mod tests {
     impl Daemonizable for StubApp {
         type Request = ();
         type Response = ();
-        type BootstrapPayload = ();
         fn build_id() -> String {
             String::new()
         }
         fn run_foreground(_daemonizer: Daemonizer<Self>) -> ExitCode {
             ExitCode::SUCCESS
         }
-        fn run_daemon(_payload: (), _rpc: RpcServer<(), ()>) -> ! {
+        fn run_daemon(_rpc: RpcServer<(), ()>) -> ! {
             unreachable!("this stub is never actually run")
         }
     }

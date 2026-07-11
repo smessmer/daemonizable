@@ -17,7 +17,7 @@ publish = false
 
 [dependencies]
 # `testutils` exposes `spawn_daemon_process_with_exe`, which the failed-spawn
-# cleanup tests use to drive the real handshake/bootstrap/cleanup path against a
+# cleanup tests use to drive the real handshake/cleanup path against a
 # controlled helper binary (production always re-execs `/proc/self/exe`).
 daemonizable = { path = "../daemonizable", features = ["testutils"] }
 libc.workspace = true
@@ -40,8 +40,8 @@ path = "src/bin/daemonizable_test_background.rs"
 # Minimal Daemonizable app used by the framework end-to-end test
 # (tests/framework_e2e.rs). Goes through the full production path —
 # run::<App>() env-marker dispatch, fork+exec re-exec spawn, build-id
-# handshake, bootstrap payload — where the test-background helper drives the
-# raw IPC primitives directly.
+# handshake — where the test-background helper drives the raw IPC primitives
+# directly.
 [[bin]]
 name = "daemonizable-test-app"
 path = "src/bin/daemonizable_test_app.rs"

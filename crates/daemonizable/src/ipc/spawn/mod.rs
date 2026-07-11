@@ -4,7 +4,7 @@
 //! The moving parts are split by responsibility:
 //! - [`mod@process`] — the fork+exec machinery on the parent side
 //!   ([`spawn_daemon_process`], [`start_background_process_with_exe`]) and the
-//!   bootstrap shipping that follows a validated handshake.
+//!   build-id handshake validation that completes a spawn.
 //! - [`mod@handshake`] — the build-id handshake both sides exchange
 //!   ([`send_handshake`] on the daemon side, validation on the parent side).
 //! - [`mod@inherited`] — the daemon child's one-time claim of the pipe fds it
@@ -39,10 +39,3 @@ pub(crate) const DAEMON_CHILD_ENV_VAR: &str = "DAEMONIZABLE_DAEMON_CHILD";
 /// The exact value `spawn_daemon_process` sets [`DAEMON_CHILD_ENV_VAR`] to.
 /// Dispatch matches this value exactly; anything else is not a daemon child.
 pub(crate) const DAEMON_CHILD_ENV_VALUE: &str = "1";
-
-/// How long the daemon child waits for the parent's bootstrap payload after
-/// sending its build-id handshake, and how long the parent waits for the
-/// child's ack after shipping the payload. Sub-millisecond on any healthy
-/// system (each side only serializes/acks a small message); generous bound
-/// so a slow CI doesn't flake.
-pub(crate) const BOOTSTRAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

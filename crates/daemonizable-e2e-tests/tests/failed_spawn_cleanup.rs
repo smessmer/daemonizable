@@ -1,6 +1,6 @@
 //! Coverage for the documented failed-spawn cleanup contract: when the
-//! handshake/bootstrap fails, `spawn_daemon` must kill and reap the child so a
-//! failed spawn leaves no orphan and no unreapable zombie behind.
+//! handshake fails, `spawn_daemon` must kill and reap the child so a failed
+//! spawn leaves no orphan and no unreapable zombie behind.
 //!
 //! This path can't be tested through `spawn_daemon` itself (it always re-execs
 //! `/proc/self/exe`, unusable from a libtest binary), so we drive the exact
@@ -118,7 +118,6 @@ fn failed_spawn_kills_and_reaps_a_live_child_on_handshake_mismatch() {
     let result = spawn_daemon_process_with_exe::<(), ()>(
         &helper_exe(),
         "the-build-id-the-parent-expects",
-        &[],
         &env,
     );
 
@@ -156,7 +155,6 @@ fn failed_spawn_reaps_a_child_that_died_before_the_handshake() {
     let result = spawn_daemon_process_with_exe::<(), ()>(
         &helper_exe(),
         "the-build-id-the-parent-expects",
-        &[],
         &env,
     );
 
@@ -204,7 +202,6 @@ fn failed_spawn_group_kill_reaches_the_grandchild() {
     let result = spawn_daemon_process_with_exe::<(), ()>(
         &helper_exe(),
         "the-build-id-the-parent-expects",
-        &[],
         &env,
     );
 

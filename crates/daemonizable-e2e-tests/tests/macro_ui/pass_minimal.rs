@@ -12,7 +12,6 @@ struct App;
 impl Daemonizable for App {
     type Request = ();
     type Response = ();
-    type BootstrapPayload = ();
 
     fn build_id() -> String {
         "pass-minimal 1.0.0".to_string()
@@ -22,7 +21,7 @@ impl Daemonizable for App {
         ExitCode::SUCCESS
     }
 
-    fn run_daemon(_payload: (), _rpc: RpcServer<(), ()>) -> ! {
+    fn run_daemon(_rpc: RpcServer<(), ()>) -> ! {
         std::process::exit(0)
     }
 }
