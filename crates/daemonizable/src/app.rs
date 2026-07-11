@@ -218,7 +218,7 @@ fn run_as_daemon_child<A: Daemonizable>() -> ! {
     //   must validate the final daemon, and EOF liveness must track the
     //   process that actually serves), and the planned pid-file battery
     //   must write its pid AFTER this fork. This change must land TOGETHER
-    //   with the matching cleanup TODO in ipc/spawn.rs (on the kill+wait in
+    //   with the matching cleanup TODO in ipc/spawn/process.rs (on the kill+wait in
     //   spawn_daemon_process): the parent's Child handle will point at the
     //   already-dead intermediate, so failed-spawn cleanup has to become
     //   process-group signaling — kill(-child_pid), race-free because
