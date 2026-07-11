@@ -22,6 +22,10 @@ where
     T: Serialize + DeserializeOwned,
 {
     recver: interprocess::unnamed_pipe::Recver,
+    /// Set once a receive consumes part of a message frame and then fails,
+    /// leaving the stream desynchronized (see [`PipeRecvError::Desynchronized`]).
+    /// Once set, every receive fails fast without touching the pipe.
+    poisoned: bool,
     _p: PhantomData<T>,
 }
 
@@ -32,6 +36,7 @@ where
     pub(super) fn new(recver: interprocess::unnamed_pipe::Recver) -> Self {
         Self {
             recver,
+            poisoned: false,
             _p: PhantomData,
         }
     }
@@ -51,6 +56,8 @@ where
 
     pub fn recv(&mut self) -> Result<T, PipeRecvError> {
         let buf = self.read_length_prefixed()?;
+        // A decode failure here does NOT poison: the whole frame was read off
+        // the wire correctly, so the stream is still synchronized.
         Ok(postcard::from_bytes(&buf)?)
     }
 
@@ -59,27 +66,79 @@ where
     /// wait for the daemon's build-id handshake — without a timeout,
     /// exec'ing a binary that opens fd 4 but never writes (or hangs) would
     /// hang the CLI forever.
+    ///
+    /// If a `Timeout` fires after part of a frame was already consumed, or the
+    /// length prefix declares an oversized payload that is then left unread, the
+    /// stream is desynchronized: the `Receiver` is poisoned and all subsequent
+    /// receives fail with [`PipeRecvError::Desynchronized`]. A clean idle
+    /// timeout (nothing consumed) does not poison, so polling an idle channel
+    /// with short timeouts keeps working.
     pub(crate) fn recv_raw_timeout(&mut self, timeout: Duration) -> Result<Vec<u8>, PipeRecvError> {
+        if self.poisoned {
+            return Err(PipeRecvError::Desynchronized);
+        }
         self.recver.set_nonblocking(true)?;
         let timeout_at = Instant::now() + timeout;
 
+        // Length prefix. A timeout that consumed 0 bytes is a clean idle poll
+        // and must not poison; a partial prefix (1–3 bytes) leaves the wire
+        // mid-frame and must.
         let mut len_bytes = [0u8; 4];
-        read_exact_with_timeout(&mut self.recver, &mut len_bytes, timeout_at)?;
+        let mut prefix_read = 0;
+        if let Err(err) = read_exact_with_timeout(
+            &mut self.recver,
+            &mut len_bytes,
+            timeout_at,
+            &mut prefix_read,
+        ) {
+            if matches!(err, PipeRecvError::Timeout) && prefix_read > 0 {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
 
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len > MAX_MESSAGE_SIZE {
+            // The prefix is consumed but the declared payload is still on the
+            // wire; a later read would misframe it. Poison.
+            self.poisoned = true;
             return Err(PipeRecvError::MessageTooLarge {
                 size: len,
                 max: MAX_MESSAGE_SIZE,
             });
         }
+
+        // Payload. The prefix was fully consumed, so any timeout here is
+        // mid-frame and poisons.
         let mut buf = vec![0u8; len];
-        read_exact_with_timeout(&mut self.recver, &mut buf, timeout_at)?;
+        let mut payload_read = 0;
+        if let Err(err) =
+            read_exact_with_timeout(&mut self.recver, &mut buf, timeout_at, &mut payload_read)
+        {
+            if matches!(err, PipeRecvError::Timeout) {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
 
         Ok(buf)
     }
 
+    /// Receive one postcard-decoded message, bounded by `timeout`. Framing (and
+    /// its poisoning contract) is shared with [`recv_raw_timeout`](Self::recv_raw_timeout);
+    /// this only adds the decode step, which never poisons.
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, PipeRecvError>
+    where
+        T: Send,
+    {
+        let buf = self.recv_raw_timeout(timeout)?;
+        Ok(postcard::from_bytes(&buf)?)
+    }
+
     fn read_length_prefixed(&mut self) -> Result<Vec<u8>, PipeRecvError> {
+        if self.poisoned {
+            return Err(PipeRecvError::Desynchronized);
+        }
         self.recver.set_nonblocking(false)?;
         let mut len_bytes = [0u8; 4];
         self.recver
@@ -87,6 +146,11 @@ where
             .map_err(normalize_blocking_read_err)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len > MAX_MESSAGE_SIZE {
+            // Prefix consumed, oversized payload left unread → desynced, same as
+            // the timeout path. (A blocking read can't time out mid-frame; a
+            // truncated frame surfaces as SenderClosed, which is terminal EOF
+            // and needs no poisoning.)
+            self.poisoned = true;
             return Err(PipeRecvError::MessageTooLarge {
                 size: len,
                 max: MAX_MESSAGE_SIZE,
@@ -97,51 +161,6 @@ where
             .read_exact(&mut buf)
             .map_err(normalize_blocking_read_err)?;
         Ok(buf)
-    }
-
-    // TODO A mid-frame error silently desynchronizes the stream: this (and
-    //   `recv_raw_timeout`) consumes wire bytes incrementally but keeps no
-    //   state across calls, so a `Timeout` that fires after the 4-byte length
-    //   prefix (or part of the payload) was already read — deterministically
-    //   constructible whenever the sender pauses between prefix and payload —
-    //   leaves the next call interpreting payload bytes as a new length
-    //   prefix: it can postcard-decode garbage into a syntactically valid but
-    //   WRONG value returned as Ok, or fail with spurious
-    //   MessageTooLarge/Decode, and every later message stays misframed. The
-    //   recv-side MessageTooLarge return has the same problem (prefix
-    //   consumed, declared payload left unread). No in-tree caller retries
-    //   after these errors (all treat them as terminal), but the public
-    //   timeout API invites poll-with-short-timeout retry loops. Fix,
-    //   preferred: poison the Receiver on any mid-frame Timeout /
-    //   MessageTooLarge (a `poisoned: bool` field checked at the top of every
-    //   recv; add a dedicated PipeRecvError::Desynchronized variant) — a
-    //   zero-bytes-read Timeout is clean and must NOT poison, so retries of
-    //   an idle channel keep working. Alternative: keep the partial frame
-    //   (length + buffer + offset) as Receiver state so a retry resumes the
-    //   same frame. At minimum: document on recv_timeout, recv_response and
-    //   the Timeout/MessageTooLarge variants that the connection must be
-    //   abandoned after these errors.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, PipeRecvError>
-    where
-        T: Send,
-    {
-        self.recver.set_nonblocking(true)?;
-        let timeout_at = Instant::now() + timeout;
-
-        let mut len_bytes = [0u8; 4];
-        read_exact_with_timeout(&mut self.recver, &mut len_bytes, timeout_at)?;
-
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        if len > MAX_MESSAGE_SIZE {
-            return Err(PipeRecvError::MessageTooLarge {
-                size: len,
-                max: MAX_MESSAGE_SIZE,
-            });
-        }
-        let mut buf = vec![0u8; len];
-        read_exact_with_timeout(&mut self.recver, &mut buf, timeout_at)?;
-
-        Ok(postcard::from_bytes(&buf)?)
     }
 }
 
@@ -157,16 +176,20 @@ fn normalize_blocking_read_err(e: std::io::Error) -> PipeRecvError {
     }
 }
 
+/// Reads exactly `buf.len()` bytes or fails. `*bytes_read` is updated with how
+/// many bytes were consumed; on a `Timeout` the caller inspects it to tell a
+/// clean idle timeout (0) from a mid-frame one (>0).
 fn read_exact_with_timeout<R: Read + AsFd>(
     reader: &mut R,
     buf: &mut [u8],
     timeout_at: Instant,
+    bytes_read: &mut usize,
 ) -> Result<(), PipeRecvError> {
     // `PollTimeout` holds milliseconds in a `u16`, so a single `poll` call can
     // wait at most ~65.5s; the impl loops across windows up to the real
     // deadline. `u16::MAX` is the production window; tests pass a small one to
     // drive the multi-window path without a 65s wait.
-    read_exact_with_timeout_impl(reader, buf, timeout_at, u16::MAX)
+    read_exact_with_timeout_impl(reader, buf, timeout_at, u16::MAX, bytes_read)
 }
 
 fn read_exact_with_timeout_impl<R: Read + AsFd>(
@@ -174,12 +197,13 @@ fn read_exact_with_timeout_impl<R: Read + AsFd>(
     buf: &mut [u8],
     timeout_at: Instant,
     max_poll_window_ms: u16,
+    bytes_read: &mut usize,
 ) -> Result<(), PipeRecvError> {
-    let mut bytes_read = 0;
-    while bytes_read < buf.len() {
-        match reader.read(&mut buf[bytes_read..]) {
+    *bytes_read = 0;
+    while *bytes_read < buf.len() {
+        match reader.read(&mut buf[*bytes_read..]) {
             Ok(0) => return Err(PipeRecvError::SenderClosed),
-            Ok(n) => bytes_read += n,
+            Ok(n) => *bytes_read += n,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 // Wait for data using poll() instead of busy-waiting
                 loop {
@@ -239,11 +263,13 @@ mod tests {
         });
 
         let mut buf = [0u8; 4];
+        let mut bytes_read = 0;
         read_exact_with_timeout_impl(
             &mut raw_recver,
             &mut buf,
             Instant::now() + Duration::from_secs(5),
             /* max_poll_window_ms */ 20,
+            &mut bytes_read,
         )
         .expect("data arriving after several poll windows must still be read");
         assert_eq!([1u8, 2, 3, 4], buf);
@@ -259,12 +285,14 @@ mod tests {
         recver.recver.set_nonblocking(true).unwrap();
 
         let mut buf = [0u8; 4];
+        let mut bytes_read = 0;
         let start = Instant::now();
         let err = read_exact_with_timeout_impl(
             &mut recver.recver,
             &mut buf,
             start + Duration::from_millis(120),
             /* max_poll_window_ms */ 20,
+            &mut bytes_read,
         )
         .expect_err("no data was sent, so this must time out");
         let elapsed = start.elapsed();

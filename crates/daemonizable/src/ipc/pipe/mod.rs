@@ -682,4 +682,90 @@ mod tests {
             assert!(!raw.is_empty());
         }
     }
+
+    /// Poisoning: a receive/send that consumes or emits part of a frame and then
+    /// fails must desynchronize the endpoint so the misframing surfaces as a
+    /// loud `Desynchronized` error rather than silent corruption — while a clean
+    /// idle timeout stays retryable.
+    mod poison {
+        use super::*;
+        use interprocess::unnamed_pipe::pipe as raw_pipe;
+        use std::io::Write;
+
+        #[test]
+        fn mid_frame_recv_timeout_poisons_receiver() {
+            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
+            let mut recver: Receiver<u32> = Receiver::new(raw_recver);
+            // Length prefix promises 100 payload bytes; send none of them.
+            raw_sender.write_all(&100u32.to_le_bytes()).unwrap();
+            let _keep_sender = raw_sender; // hold open so this is a timeout, not EOF
+
+            let err = recver
+                .recv_raw_timeout(Duration::from_millis(50))
+                .unwrap_err();
+            assert!(matches!(err, PipeRecvError::Timeout), "got {err:?}");
+            // The prefix is consumed; the receiver is now desynchronized and
+            // every later receive fails fast without touching the pipe.
+            let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
+            assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
+            // Poison is visible on the blocking path too.
+            let err = recver.recv().unwrap_err();
+            assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
+        }
+
+        #[test]
+        fn clean_idle_recv_timeout_does_not_poison() {
+            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            // Nothing sent yet: this timeout consumes 0 bytes and must not
+            // poison, so idle poll loops keep working.
+            let err = recver
+                .recv_raw_timeout(Duration::from_millis(50))
+                .unwrap_err();
+            assert!(matches!(err, PipeRecvError::Timeout), "got {err:?}");
+            sender.send_raw(b"ok").unwrap();
+            assert_eq!(
+                recver.recv_raw_timeout(Duration::from_secs(1)).unwrap(),
+                b"ok"
+            );
+        }
+
+        #[test]
+        fn message_too_large_poisons_receiver() {
+            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
+            let mut recver: Receiver<u32> = Receiver::new(raw_recver);
+            // Prefix consumed, oversized payload left unread → desynced.
+            let too_big = (MAX_MESSAGE_SIZE as u32) + 1;
+            raw_sender.write_all(&too_big.to_le_bytes()).unwrap();
+            let _keep_sender = raw_sender;
+
+            let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
+            assert!(
+                matches!(err, PipeRecvError::MessageTooLarge { .. }),
+                "got {err:?}"
+            );
+            let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
+            assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
+        }
+
+        #[test]
+        fn mid_frame_send_timeout_poisons_sender() {
+            // A payload larger than the kernel pipe buffer with no reader: the
+            // prefix and part of the payload are written, then the send times
+            // out mid-frame.
+            let (mut sender, _recver) = pipe::<u32>().unwrap();
+            let big = vec![0u8; 256 * 1024]; // > buffer, < MAX_MESSAGE_SIZE
+            let err = sender
+                .send_raw_with_timeout(&big, Duration::from_millis(100))
+                .unwrap_err();
+            assert!(matches!(err, PipeSendError::Timeout), "got {err:?}");
+            // Desynchronized: later sends fail fast on both paths.
+            let err = sender
+                .send_raw_with_timeout(b"x", Duration::from_secs(1))
+                .unwrap_err();
+            assert!(matches!(err, PipeSendError::Desynchronized), "got {err:?}");
+            let err = sender.send(&42).unwrap_err();
+            assert!(matches!(err, PipeSendError::Desynchronized), "got {err:?}");
+            // _recver stays open so the first send is a timeout, not EPIPE.
+        }
+    }
 }
