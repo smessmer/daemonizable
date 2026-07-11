@@ -18,7 +18,7 @@ publish = false
 [dependencies]
 daemonizable = { path = "../daemonizable" }
 libc.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 interprocess.workspace = true
