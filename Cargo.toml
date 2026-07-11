@@ -7,7 +7,7 @@ authors = ["Sebastian Messmer <messmer@cryfs.org>"]
 edition = "2024"
 repository = "https://github.com/smessmer/daemonizable"
 license = "MIT OR Apache-2.0"
-rust-version = "1.95"
+rust-version = "1.85"
 version = "0.0.1"
 
 [workspace.dependencies]
