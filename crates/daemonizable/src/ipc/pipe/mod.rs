@@ -80,9 +80,13 @@ where
     target_os = "openbsd",
     target_os = "cygwin",
 ))]
-fn create_pipe_ends()
--> Result<(interprocess::unnamed_pipe::Sender, interprocess::unnamed_pipe::Recver), PipeCreateError>
-{
+fn create_pipe_ends() -> Result<
+    (
+        interprocess::unnamed_pipe::Sender,
+        interprocess::unnamed_pipe::Recver,
+    ),
+    PipeCreateError,
+> {
     use nix::fcntl::OFlag;
     // `pipe2` returns (read end, write end); our `Sender` wraps the write end.
     let (read_fd, write_fd) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
@@ -110,9 +114,13 @@ fn create_pipe_ends()
     target_os = "openbsd",
     target_os = "cygwin",
 )))]
-fn create_pipe_ends()
--> Result<(interprocess::unnamed_pipe::Sender, interprocess::unnamed_pipe::Recver), PipeCreateError>
-{
+fn create_pipe_ends() -> Result<
+    (
+        interprocess::unnamed_pipe::Sender,
+        interprocess::unnamed_pipe::Recver,
+    ),
+    PipeCreateError,
+> {
     use std::os::fd::AsRawFd;
 
     fn set_cloexec(fd: std::os::fd::RawFd) -> Result<(), PipeCreateError> {
