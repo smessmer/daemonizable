@@ -1,3 +1,4 @@
+mod cloexec;
 mod error;
 mod pipe;
 mod rpc;
