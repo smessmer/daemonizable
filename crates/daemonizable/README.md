@@ -152,10 +152,11 @@ explicitly — the typed bootstrap payload — instead of implicitly through
 a memory snapshot.
 
 (The symmetric honesty: the *parent* can already have a tokio runtime
-running when it calls `spawn_daemon` — fork+exec makes that safe. The only
-residual constraint is a narrow race while the spawn's pipe fds get their
-CLOEXEC flag set non-atomically; it covers a moment at spawn time, not the
-daemon's whole life.)
+running when it calls `spawn_daemon` — fork+exec makes that safe. On the
+platforms with `pipe2(O_CLOEXEC)` there is no residual constraint at all;
+only on macOS/iOS, which lack it, does a narrow spawn-time race remain while
+the pipe fds get their CLOEXEC flag set non-atomically — and even there it
+covers a moment at spawn time, not the daemon's whole life.)
 
 ### cutting the cord at fork time: nobody hears the daemon fail
 
@@ -278,17 +279,18 @@ channel:
   `/proc/self/exe` itself). The fallback gives up the same-inode
   guarantee, but the build-id handshake already turns a swapped binary
   into a clean error rather than a wrong daemon.*
-- **Only a narrow spawn-time race remains.** Because the daemon is created
-  with fork+exec, a running tokio runtime (or any thread pool) is fine to
-  spawn under — the parent-side restriction is *not* "no tokio." The one
-  residual caveat is transient rather than permanent: the pipe fds get
-  `FD_CLOEXEC` a moment after creation instead of atomically, so a
-  concurrent fork on another thread in that window can leak them.
-  *TODO: fixable on Linux. Creating the pipes with `pipe2(O_CLOEXEC)`
-  closes that window (tracked in a TODO in `lib.rs`), and migrating from
-  `command-fds`' `pre_exec` to std's planned fd mappings
-  ([rust#145687](https://github.com/rust-lang/rust/pull/145687)) removes
-  the rest. macOS has no atomic equivalent and keeps the invariant.*
+- **At most a narrow spawn-time race on macOS.** Because the daemon is
+  created with fork+exec, a running tokio runtime (or any thread pool) is
+  fine to spawn under — the parent-side restriction is *not* "no tokio." On
+  Linux/Android, the *BSDs, and every other target with `pipe2(O_CLOEXEC)`,
+  the pipe fds are created with `FD_CLOEXEC` already set, so there is no
+  race at all. macOS/iOS have no `pipe2` (nor any atomic equivalent), so
+  there the flag is set a moment after creation and a concurrent fork on
+  another thread in that window can leak the fds; those targets keep the
+  spawn-at-startup invariant.
+  *TODO: migrating from `command-fds`' `pre_exec` to std's planned fd
+  mappings ([rust#145687](https://github.com/rust-lang/rust/pull/145687))
+  would drop the last bit of non-atomic fd handling in the spawn path.*
 - **No batteries (yet).** Pid files, privilege drop, chroot, umask,
   signal-mask reset, and log-file stdio redirection are currently the
   application's job.
@@ -356,10 +358,12 @@ faith into an operation that can fail loudly.
   fork+exec hands the daemon a fresh process image, so the fork-vs-threads
   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
   doesn't apply (the second fork runs in that fresh single-threaded image,
-  before any app code, so it is safe too). The only caveat is a narrow
-  fd-inheritance race if another thread forks while the spawn is setting
-  `FD_CLOEXEC` on its pipe fds; spawning before the process starts other
-  subprocesses avoids it.
+  before any app code, so it is safe too). On targets with `pipe2(O_CLOEXEC)`
+  (Linux/Android, the *BSDs, …) the pipe fds are `FD_CLOEXEC` from creation,
+  so there is no fd-inheritance race; only on macOS/iOS, which lack `pipe2`,
+  does a narrow race remain if another thread forks while the spawn sets
+  `FD_CLOEXEC` on its pipe fds, and spawning before the process starts other
+  subprocesses avoids it there.
 
 ## Features
 
