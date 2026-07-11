@@ -36,8 +36,7 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 ///
 /// Used by the test helper binary. Production applications go through the
 /// framework's daemon dispatch in [`crate::run`], which additionally sends
-/// the build-id handshake and consumes the bootstrap before handing the
-/// server to the app.
+/// the build-id handshake before handing the server to the app.
 ///
 /// [`start_background_process_with_exe`]: super::start_background_process_with_exe
 pub fn rpc_server_from_inherited_fds<Request, Response>()

@@ -1,9 +1,8 @@
 //! [`RpcServer`]: the daemon-side endpoint. Receives typed requests from the
-//! parent and sends typed responses back, plus the out-of-band framework
-//! frames (build-id handshake, bootstrap) that precede typed RPC.
+//! parent and sends typed responses back, plus the out-of-band build-id
+//! handshake that precedes typed RPC.
 
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
-use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -75,23 +74,5 @@ where
     /// [`RpcClient::recv_raw_handshake_with_timeout`]: super::RpcClient::recv_raw_handshake_with_timeout
     pub(crate) fn send_raw_handshake(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
         self.sender.send_raw(bytes)
-    }
-
-    /// Receive the framework's bootstrap message — raw length-prefixed bytes
-    /// (typically postcard-encoded by the caller of `send_raw_bootstrap` on
-    /// the parent side). Runs after the build-id handshake and before any
-    /// typed RPC; the typed channel is left untouched.
-    pub(crate) fn recv_raw_bootstrap_with_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<u8>, PipeRecvError> {
-        self.receiver.recv_raw_timeout(timeout)
-    }
-
-    /// Ack the framework's bootstrap message. Empty-payload raw send — the
-    /// parent's `recv_raw_bootstrap_ack_with_timeout` reads it as a marker
-    /// that the daemon has applied the bootstrap and is ready for typed RPC.
-    pub(crate) fn send_raw_bootstrap_ack(&mut self) -> Result<(), PipeSendError> {
-        self.sender.send_raw(&[])
     }
 }

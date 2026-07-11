@@ -26,10 +26,9 @@ static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 /// # impl Daemonizable for MyApp {
 /// #     type Request = ();
 /// #     type Response = ();
-/// #     type BootstrapPayload = ();
 /// #     fn build_id() -> String { String::new() }
 /// #     fn run_foreground(_: Daemonizer<Self>) -> ExitCode { ExitCode::SUCCESS }
-/// #     fn run_daemon(_: (), _: RpcServer<(), ()>) -> ! { std::process::exit(0) }
+/// #     fn run_daemon(_: RpcServer<(), ()>) -> ! { std::process::exit(0) }
 /// # }
 /// fn main() -> ExitCode {
 ///     daemonizable::run::<MyApp>()
@@ -99,11 +98,6 @@ mod tests {
     struct Req(u32);
     #[derive(Debug, Serialize, Deserialize)]
     struct Resp(u32);
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct Payload {
-        a: u32,
-        b: String,
-    }
 
     struct StubApp;
     static STUB_FOREGROUND_RUNS: AtomicU32 = AtomicU32::new(0);
@@ -111,7 +105,6 @@ mod tests {
     impl Daemonizable for StubApp {
         type Request = Req;
         type Response = Resp;
-        type BootstrapPayload = Payload;
         fn build_id() -> String {
             "stub-app 1.2.3".to_string()
         }
@@ -119,7 +112,7 @@ mod tests {
             STUB_FOREGROUND_RUNS.fetch_add(1, Ordering::SeqCst);
             ExitCode::SUCCESS
         }
-        fn run_daemon(_payload: Payload, _rpc: RpcServer<Req, Resp>) -> ! {
+        fn run_daemon(_rpc: RpcServer<Req, Resp>) -> ! {
             unreachable!("tests never take the daemon-child arm in-process")
         }
     }

@@ -11,9 +11,7 @@ pub use error::{
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
 #[cfg(any(test, feature = "testutils"))]
 pub use spawn::spawn_daemon_process_with_exe;
-pub(crate) use spawn::{
-    BOOTSTRAP_TIMEOUT, DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, spawn_daemon_process,
-};
+pub(crate) use spawn::{DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, spawn_daemon_process};
 pub use spawn::{rpc_server_from_inherited_fds, send_handshake, start_background_process_with_exe};
 
 /// Replace the calling process's stdin/stdout/stderr with `/dev/null` via

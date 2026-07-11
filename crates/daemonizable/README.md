@@ -18,12 +18,10 @@ startup banner on your application.
   disk was replaced mid-run).
 - **Build-id handshake**: the daemon proves it's the binary the parent meant
   to spawn before either side deserializes anything typed.
-- **Bootstrap payload**: one app-defined `serde` value shipped from parent to
-  daemon before the RPC phase (typical use: logging configuration — the
-  daemon child can't learn it from argv).
 - **Typed RPC**: `RpcClient<Request, Response>` / `RpcServer<Request,
   Response>` over pipes, postcard-encoded, with EOF-based liveness (a dead
-  peer is an error, not a hang).
+  peer is an error, not a hang). The daemon child's argv is empty, so any
+  config it needs (typically logging) travels as an ordinary first request.
 - **Daemon hygiene**: `setsid` + a second fork (so the daemon is never a
   session leader and can't acquire a controlling terminal), `chdir("/")`,
   single-claim guard on the inherited fds, `detach_stdio()` for when your
@@ -47,7 +45,6 @@ struct MyApp;
 impl Daemonizable for MyApp {
     type Request = String;
     type Response = String;
-    type BootstrapPayload = ();
 
     fn build_id() -> String {
         format!("my-app {}", env!("CARGO_PKG_VERSION"))
@@ -56,13 +53,13 @@ impl Daemonizable for MyApp {
     fn run_foreground(daemonizer: Daemonizer<Self>) -> ExitCode {
         // This is your `main`: parse arguments however you like, then
         // daemonize whenever (and only if) you decide to.
-        let mut rpc = daemonizer.spawn_daemon(&()).unwrap();
+        let mut rpc = daemonizer.spawn_daemon().unwrap();
         rpc.send_request(&"hello".to_string()).unwrap();
         println!("daemon says: {}", rpc.recv_response_blocking().unwrap());
         ExitCode::SUCCESS
     }
 
-    fn run_daemon(_payload: (), mut rpc: RpcServer<String, String>) -> ! {
+    fn run_daemon(mut rpc: RpcServer<String, String>) -> ! {
         // Runs in the re-exec'd daemon child. Serve requests until the
         // parent drops its client (EOF), then exit.
         while let Ok(request) = rpc.next_request() {
@@ -148,8 +145,8 @@ memory image and allocator state are rebuilt from scratch, and only file
 descriptors deliberately left inheritable survive. The re-exec'd daemon
 can start tokio, spawn threads, and generally behave like the freshly
 started process it actually is. State it needs from the parent arrives
-explicitly — the typed bootstrap payload — instead of implicitly through
-a memory snapshot.
+explicitly — as a typed request on the RPC channel — instead of implicitly
+through a memory snapshot.
 
 (The symmetric honesty: the *parent* can already have a tokio runtime
 running when it calls `spawn_daemon` — fork+exec makes that safe. On the
@@ -197,9 +194,9 @@ so the mounting parent stays alive until the mount actually succeeded and
 can report failure otherwise.
 
 daemonizable builds that handshake in as the core primitive instead of an
-afterthought. `spawn_daemon` blocks through the build-id handshake and the
-bootstrap ack; a child that fails either is killed, reaped, and surfaced
-as a typed error — your CLI prints a real message and exits non-zero. And
+afterthought. `spawn_daemon` blocks through the build-id handshake; a child
+that fails it is killed, reaped, and surfaced as a typed error — your CLI
+prints a real message and exits non-zero. And
 it doesn't stop at "started": the RPC channel stays open, so the parent
 can wait for whatever *its* definition of ready is before exiting (CryFS
 exits 0 only after the daemon reports the filesystem is actually mounted).
@@ -295,7 +292,9 @@ channel:
   signal-mask reset, and log-file stdio redirection are currently the
   application's job.
   *TODO (planned): add these as opt-in options, applied in the daemon
-  child between the handshake and the bootstrap ack, so that every
+  child before entering `run_daemon` — carried by a framework-owned
+  bootstrap frame reintroduced with the batteries (config-in, result-out),
+  distinct from the removed app-facing payload — so that every
   failure — an "already running" pid-file lock conflict, a failed
   `setuid`, an unwritable log path — surfaces as a typed error in the
   parent and a non-zero CLI exit. That is exactly what the fork-based
@@ -317,7 +316,7 @@ channel:
   Defaults stay policy-free: every battery is opt-in.*
 - **Initialization runs twice.** The daemon re-runs the dynamic loader and
   everything before `run` (with `#[daemonizable::main]`, that's nothing);
-  parent state must be shipped explicitly via the bootstrap payload.
+  parent state must be shipped explicitly via the typed RPC channel.
 - **If systemd manages your process, don't daemonize at all.**
   `daemon(7)`'s "new-style daemons" doctrine is that services should run
   in the foreground and report readiness via `sd_notify(3)`; SysV-style
@@ -341,7 +340,7 @@ faith into an operation that can fail loudly.
   nearest `PR_SET_CHILD_SUBREAPER` ancestor, e.g. a systemd user manager) at
   spawn time. A **successful** spawn leaves the caller no child and no zombie,
   regardless of the caller's own lifetime.
-- A **failed** spawn (handshake mismatch, bootstrap failure) is killed via its
+- A **failed** spawn (handshake mismatch or spawn failure) is killed via its
   process group (`kill(-child_pid, SIGKILL)`, which reaches the grandchild;
   ESRCH falls back to a direct kill for a child that died before `setsid`) and
   the intermediate reaped before the error is returned. A grandchild the group

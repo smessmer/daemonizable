@@ -4,9 +4,9 @@
 //! goes through the full production path: `#[daemonizable::main]` generates
 //! the `main` that calls `daemonizable::run::<TestApp>()`, so a
 //! `--daemonize` invocation exercises the env-marker dispatch, the real
-//! `/proc/self/exe` re-exec spawn, the build-id handshake, the bootstrap
-//! payload round-trip, and the typed RPC channel end-to-end — and dogfoods
-//! the attribute macro under that real fork+exec path.
+//! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
+//! channel end-to-end — and dogfoods the attribute macro under that real
+//! fork+exec path.
 //!
 //! Arguments are parsed by hand — the new API imposes no argument parser on
 //! applications, and this binary proves none is needed.
@@ -29,9 +29,6 @@ struct TestResponse {
     /// The daemon's working directory, so the test can assert the framework
     /// chdir'd it to `/` (it must not pin the parent's cwd).
     daemon_cwd: String,
-    /// Round-tripped from the bootstrap payload, proving it was shipped,
-    /// decoded, and handed to `run_daemon`.
-    payload_tag: String,
     /// Whether the daemon-child env marker is still set inside `run_daemon`.
     /// The framework must have removed it (so the daemon's own children
     /// aren't misdetected); the test asserts "removed".
@@ -44,11 +41,6 @@ struct TestResponse {
     /// `pid` (the daemon is not a session leader — the sid is the dead
     /// intermediate's pid, which only holds once the second fork has run).
     sid: i32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct TestPayload {
-    tag: String,
 }
 
 struct Args {
@@ -84,7 +76,6 @@ struct TestApp;
 impl Daemonizable for TestApp {
     type Request = TestRequest;
     type Response = TestResponse;
-    type BootstrapPayload = TestPayload;
 
     fn build_id() -> String {
         // Parent and daemon are the same binary, so any deterministic string
@@ -116,7 +107,7 @@ impl Daemonizable for TestApp {
         }
     }
 
-    fn run_daemon(payload: TestPayload, mut rpc: RpcServer<TestRequest, TestResponse>) -> ! {
+    fn run_daemon(mut rpc: RpcServer<TestRequest, TestResponse>) -> ! {
         // Report the daemon's cwd so the test can confirm the framework
         // chdir'd it to `/` rather than inheriting the parent's working
         // directory, and whether the child env marker was removed.
@@ -138,7 +129,6 @@ impl Daemonizable for TestApp {
             rpc.send_response(&TestResponse {
                 v: request.v + 1,
                 daemon_cwd: daemon_cwd.clone(),
-                payload_tag: payload.tag.clone(),
                 marker: marker.to_string(),
                 pid,
                 sid,
@@ -149,14 +139,11 @@ impl Daemonizable for TestApp {
     }
 }
 
-/// Parent side of the `--daemonize` path: spawn the daemon (shipping a
-/// payload tag it must echo back), do one typed RPC round-trip, and write
-/// everything observable into the outfile.
+/// Parent side of the `--daemonize` path: spawn the daemon, do one typed RPC
+/// round-trip, and write everything observable into the outfile.
 fn run_parent(daemonizer: Daemonizer<TestApp>, outfile: &Path) -> Result<(), String> {
     let mut rpc = daemonizer
-        .spawn_daemon(&TestPayload {
-            tag: "tag-from-parent".to_string(),
-        })
+        .spawn_daemon()
         .map_err(|err| format!("spawn_daemon failed: {err}"))?;
     rpc.send_request(&TestRequest { v: 42 })
         .map_err(|err| format!("send_request failed: {err}"))?;
@@ -170,14 +157,8 @@ fn run_parent(daemonizer: Daemonizer<TestApp>, outfile: &Path) -> Result<(), Str
     std::fs::write(
         outfile,
         format!(
-            "parent-got:{} cwd:{} payload:{} marker:{} sid:{} pid:{} zombies:{}",
-            response.v,
-            response.daemon_cwd,
-            response.payload_tag,
-            response.marker,
-            response.sid,
-            response.pid,
-            zombies,
+            "parent-got:{} cwd:{} marker:{} sid:{} pid:{} zombies:{}",
+            response.v, response.daemon_cwd, response.marker, response.sid, response.pid, zombies,
         ),
     )
     .map_err(|err| format!("failed to write outfile: {err}"))

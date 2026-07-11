@@ -25,13 +25,6 @@ pub trait Daemonizable: Sized {
     /// Typed response the daemon sends back.
     type Response: Serialize + DeserializeOwned + Send;
 
-    /// App-defined payload shipped from the parent to the daemon child
-    /// between the build-id handshake and the first typed RPC. Opaque to
-    /// this library. Typical content: logging configuration the daemon
-    /// should install before it starts serving (its argv is empty, so it
-    /// can't learn such things any other way).
-    type BootstrapPayload: Serialize + DeserializeOwned;
-
     /// The identity string exchanged in the parent↔daemon handshake.
     ///
     /// The daemon child sends it; the parent refuses the spawn on mismatch.
@@ -54,16 +47,14 @@ pub trait Daemonizable: Sized {
     /// By the time this is called the framework has claimed the inherited
     /// IPC fds, started a new session (`setsid`), forked again so this process
     /// is a grandchild that is *not* the session leader, changed the working
-    /// directory to `/`, passed the build-id handshake, and decoded `payload`.
-    /// The process is otherwise pristine: no logging, no panic hooks, stdio
-    /// still inherited from the parent — install whatever you need (typically
-    /// from `payload`) before serving requests.
+    /// directory to `/`, and passed the build-id handshake. The process is
+    /// otherwise pristine: no logging, no panic hooks, stdio still inherited
+    /// from the parent — install whatever you need before serving requests.
+    /// Any configuration the daemon needs (its argv is empty, so it can't
+    /// parse flags) travels as an ordinary first RPC request on `rpc`.
     ///
     /// Diverges: drive the request loop until [`RpcServer::next_request`]
     /// returns [`PipeRecvError::SenderClosed`](crate::PipeRecvError::SenderClosed)
     /// (the parent dropped its client), then exit.
-    fn run_daemon(
-        payload: Self::BootstrapPayload,
-        rpc: RpcServer<Self::Request, Self::Response>,
-    ) -> !;
+    fn run_daemon(rpc: RpcServer<Self::Request, Self::Response>) -> !;
 }

@@ -30,20 +30,19 @@ use syn::spanned::Spanned;
 /// impl Daemonizable for MyApp {
 ///     type Request = String;
 ///     type Response = String;
-///     type BootstrapPayload = ();
 ///
 ///     fn build_id() -> String {
 ///         format!("my-app {}", env!("CARGO_PKG_VERSION"))
 ///     }
 ///
 ///     fn run_foreground(daemonizer: Daemonizer<Self>) -> ExitCode {
-///         let mut rpc = daemonizer.spawn_daemon(&()).unwrap();
+///         let mut rpc = daemonizer.spawn_daemon().unwrap();
 ///         rpc.send_request(&"hello".to_string()).unwrap();
 ///         println!("daemon says: {}", rpc.recv_response_blocking().unwrap());
 ///         ExitCode::SUCCESS
 ///     }
 ///
-///     fn run_daemon(_payload: (), mut rpc: RpcServer<String, String>) -> ! {
+///     fn run_daemon(mut rpc: RpcServer<String, String>) -> ! {
 ///         while let Ok(request) = rpc.next_request() {
 ///             rpc.send_response(&format!("echo: {request}")).unwrap();
 ///         }

@@ -15,7 +15,6 @@ struct App<T>(PhantomData<T>);
 impl<T: 'static> Daemonizable for App<T> {
     type Request = ();
     type Response = ();
-    type BootstrapPayload = ();
 
     fn build_id() -> String {
         "fail-generic 1.0.0".to_string()
@@ -25,7 +24,7 @@ impl<T: 'static> Daemonizable for App<T> {
         ExitCode::SUCCESS
     }
 
-    fn run_daemon(_payload: (), _rpc: RpcServer<(), ()>) -> ! {
+    fn run_daemon(_rpc: RpcServer<(), ()>) -> ! {
         std::process::exit(0)
     }
 }

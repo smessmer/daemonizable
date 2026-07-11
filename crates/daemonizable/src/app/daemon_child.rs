@@ -1,23 +1,19 @@
 //! The re-exec'd daemon child's startup sequence, run straight from
 //! [`run`](super::run) before any app code: claim the inherited fds, start a
 //! new session, fork again so the daemon is never a session leader, detach the
-//! working directory, complete the build-id handshake, receive and ack the
-//! bootstrap payload, then hand off to the application's daemon entry point.
+//! working directory, complete the build-id handshake, then hand off to the
+//! application's daemon entry point.
 
 use super::Daemonizable;
-use crate::ipc::{
-    BOOTSTRAP_TIMEOUT, DAEMON_CHILD_ENV_VAR, RpcServer, rpc_server_from_inherited_fds,
-    send_handshake,
-};
+use crate::ipc::{DAEMON_CHILD_ENV_VAR, RpcServer, rpc_server_from_inherited_fds, send_handshake};
 
 /// The re-exec'd daemon child lands here, straight from [`run`](super::run) —
 /// before any app code. Order matters: drop the daemon-child marker (while
 /// still genuinely single-threaded) → claim fds (exit 2) → `setsid` (exit 1) →
 /// second fork (intermediate `_exit(0)`; fork failure exit 1) → `chdir("/")`
-/// (warn only) → send handshake (exit 127) → receive + decode payload → ack
-/// (exit 127) → hand off to the app. Exit codes 2 and 1 come from the direct
-/// child (pre-fork); the 127s and the chdir warning come from the surviving
-/// grandchild (post-fork).
+/// (warn only) → send handshake (exit 127) → hand off to the app. Exit codes 2
+/// and 1 come from the direct child (pre-fork); the 127 and the chdir warning
+/// come from the surviving grandchild (post-fork).
 pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // Drop the daemon-child marker before anything else runs. Its detection job
     // is done (`run` already read it to dispatch us here) and it must be gone
@@ -30,8 +26,8 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // TZ, getaddrinfo, ...). It is sound *here* precisely because this is the
     // FIRST statement of the daemon-child arm: we reached it from a fresh
     // post-exec image with no app-controlled code yet run — `A::build_id()`
-    // (in send_handshake) and the payload's `Deserialize` (in the recv below)
-    // both run later — and the application's `main` preamble is empty
+    // (in send_handshake) runs later — and the application's `main` preamble is
+    // empty
     // (guaranteed by `#[daemonizable::main]`; required of any hand-written
     // `main`, see [`run`](super::run)). So the process is genuinely
     // single-threaded at this point, and no other thread can observe `environ`
@@ -82,7 +78,7 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     //     pipe-EOF liveness must track — the process that actually serves.
     //   * BEFORE chdir("/") below: the chdir (and its warning) belongs to the
     //     grandchild, the process that keeps the cwd.
-    //   * The pid-file battery (planned, between handshake and ack) already
+    //   * The pid-file battery (planned, in the batteries block below) already
     //     sits after this fork, so it records the FINAL daemon pid.
     //
     // The intermediate must do NO work between fork and _exit — no subprocess,
@@ -146,93 +142,23 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     //   opt-in daemonization options — flock-locked pid file, privilege drop
     //   (initgroups/setgid/setuid), chroot, umask, signal-mask reset, fd
     //   hygiene (close_range), log-file stdio redirection — configured on the
-    //   parent side, shipped as a framework-level part of the bootstrap frame
-    //   below, and applied HERE, between handshake and ack, so every failure
-    //   can be reported to the parent as a typed error before it exits.
-    //   Requires extending the empty bootstrap ack into a result frame
-    //   (empty = ok, otherwise a framework error the parent maps into
-    //   SpawnDaemonError variants like AlreadyRunning / DropPrivileges).
-    //   Ordering within this block: umask → sigmask reset → close_range (must
-    //   NOT close the inherited pipe fds 3/4) → pid file (write the FINAL pid
-    //   — this runs in the grandchild, after the second fork above) → chown
-    //   pid file → open log files → chroot → initgroups/setgid → setuid → ack.
+    //   parent side and applied HERE, before entering `run_daemon`, so every
+    //   failure can be reported to the parent as a typed error before it exits.
+    //   This reintroduces a framework-owned bootstrap frame (config-in from the
+    //   parent, result-out back: empty = ok, otherwise a framework error the
+    //   parent maps into SpawnDaemonError variants like AlreadyRunning /
+    //   DropPrivileges) — a deliberate, framework-level addition, distinct from
+    //   the app-facing payload that once lived here. Ordering within this
+    //   block: umask → sigmask reset → close_range (must NOT close the
+    //   inherited pipe fds 3/4) → pid file (write the FINAL pid — this runs in
+    //   the grandchild, after the second fork above) → chown pid file → open
+    //   log files → chroot → initgroups/setgid → setuid → report result.
     //   Note: setuid must stay AFTER the second fork — dropping privileges
     //   before it could give the intermediate a different uid and make the
     //   parent's kill(-child_pid) cleanup hit EPERM.
-    let payload_bytes = match server.recv_raw_bootstrap_with_timeout(BOOTSTRAP_TIMEOUT) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            eprintln!("daemon child: failed to receive bootstrap payload from parent: {err}");
-            std::process::exit(127);
-        }
-    };
-    let payload: A::BootstrapPayload = match postcard::from_bytes(&payload_bytes) {
-        Ok(payload) => payload,
-        Err(err) => {
-            eprintln!("daemon child: failed to decode bootstrap payload: {err}");
-            std::process::exit(127);
-        }
-    };
-    // Ack = "received and decoded". The app applies the payload inside
-    // `run_daemon`; if that fails and the daemon exits, the parent's next
-    // (blocking) RPC receive sees EOF — that's the liveness backstop.
-    if let Err(err) = server.send_raw_bootstrap_ack() {
-        eprintln!("daemon child: failed to send bootstrap ack to parent: {err}");
-        std::process::exit(127);
-    }
 
     // The daemon-child marker was already dropped at the top of this function
     // (see the SAFETY note there), so processes spawned from `run_daemon` below
     // won't be misdetected as our daemon child.
-    A::run_daemon(payload, server)
-}
-
-// The bootstrap frame plumbing above (`recv_raw_bootstrap_with_timeout` /
-// `send_raw_bootstrap_ack`, and the parent-side `send_raw_bootstrap` /
-// `recv_raw_bootstrap_ack_with_timeout`) is exercised end-to-end here so a
-// regression in the raw-frame path is caught without spawning a real child.
-#[cfg(test)]
-mod tests {
-    use crate::ipc::RpcConnection;
-    use serde::{Deserialize, Serialize};
-    use std::time::Duration;
-
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Req(u32);
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Resp(u32);
-    #[derive(Debug, PartialEq, Serialize, Deserialize)]
-    struct Payload {
-        a: u32,
-        b: String,
-    }
-
-    #[test]
-    fn bootstrap_payload_round_trips_over_the_raw_frame_path() {
-        // The exact plumbing spawn_daemon and the child arm use: postcard
-        // encode → raw bootstrap frame → decode, then the empty ack back.
-        let (mut server, mut client) = RpcConnection::<Req, Resp>::new_pipe()
-            .unwrap()
-            .into_server_and_client();
-
-        let sent = Payload {
-            a: 42,
-            b: "hello".to_string(),
-        };
-        let bytes = postcard::to_stdvec(&sent).unwrap();
-        client
-            .send_raw_bootstrap_with_timeout(&bytes, Duration::from_secs(1))
-            .unwrap();
-
-        let received_bytes = server
-            .recv_raw_bootstrap_with_timeout(Duration::from_secs(1))
-            .unwrap();
-        let received: Payload = postcard::from_bytes(&received_bytes).unwrap();
-        assert_eq!(sent, received);
-
-        server.send_raw_bootstrap_ack().unwrap();
-        client
-            .recv_raw_bootstrap_ack_with_timeout(Duration::from_secs(1))
-            .unwrap();
-    }
+    A::run_daemon(server)
 }

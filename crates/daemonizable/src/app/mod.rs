@@ -5,8 +5,7 @@
 //! process mechanics: detecting whether this invocation *is* the re-exec'd
 //! daemon child (via an environment-variable marker — no argv flag, so apps
 //! aren't forced onto any particular argument parser), the fork+exec spawn,
-//! the build-id handshake, and shipping one app-defined bootstrap payload
-//! from parent to daemon. Everything else — CLI parsing, logging, panic
+//! and the build-id handshake. Everything else — CLI parsing, logging, panic
 //! hooks, banners — is the application's business, inside
 //! [`Daemonizable::run_foreground`] and [`Daemonizable::run_daemon`].
 //!
