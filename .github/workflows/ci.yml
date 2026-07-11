@@ -190,9 +190,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Semver: compare the public API of the publishable crates against the last
-  # release on crates.io and flag accidental breaking changes. Skips crates
-  # that are `publish = false` (the e2e-tests crate) and no-ops gracefully for
-  # a crate that has never been published.
+  # release on crates.io and flag accidental breaking changes. Crates that are
+  # `publish = false` (the e2e-tests crate) are ignored.
+  #
+  # NOTE: cargo-semver-checks needs a published baseline to diff against, so
+  # this job fails until the crates have had their first crates.io release.
+  # That is expected for now and starts passing automatically once published.
   # ---------------------------------------------------------------------------
   semver-checks:
     name: semver-checks
