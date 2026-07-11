@@ -268,7 +268,7 @@ channel:
   Double-fork crates rule this out structurally; here the daemon must
   simply not open ttys carelessly.
   *TODO (planned; implementation TODOs sit at the `setsid()` call in
-  `app.rs` and the failed-spawn cleanup in `ipc/spawn/process.rs`, and must land
+  `app/daemon_child.rs` and the failed-spawn cleanup in `ipc/spawn/process.rs`, and must land
   together): add the second fork. The daemon-child arm runs in a fresh
   single-threaded post-exec image, so it can safely fork once more right
   after `setsid()` and let the session-leader intermediate exit 0; the
