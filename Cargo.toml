@@ -12,6 +12,12 @@ version = "0.0.1"
 
 [workspace.dependencies]
 command-fds = "^0.3.3"
+# Internal companion crate. Declared here (like every other dependency) so its
+# path + published version requirement live in one place; consuming crates just
+# say `daemonizable-macros = { workspace = true }`. The `version` must match the
+# workspace `version` above on release — keep the two in sync (or bump both via
+# a release tool such as `cargo-release` / `release-plz`).
+daemonizable-macros = { path = "crates/daemonizable-macros", version = "0.0.1" }
 interprocess = "^2.2.3"
 libc = "^0.2.172"
 log = "^0.4.27"
