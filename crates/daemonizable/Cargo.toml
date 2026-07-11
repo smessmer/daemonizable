@@ -23,11 +23,7 @@ testutils = []
 
 [dependencies]
 command-fds.workspace = true
-# `version` is required in addition to `path` so the crate is publishable:
-# crates.io strips path dependencies, so without it `cargo publish` (and
-# `cargo semver-checks`) can't resolve the companion crate. Keep this in sync
-# with the workspace `version` on release.
-daemonizable-macros = { path = "../daemonizable-macros", version = "0.0.1", optional = true }
+daemonizable-macros = { workspace = true, optional = true }
 interprocess.workspace = true
 libc.workspace = true
 log.workspace = true
