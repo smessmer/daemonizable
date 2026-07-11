@@ -191,6 +191,20 @@ pub enum InheritedFdsError {
         label: &'static str,
         st_mode: libc::mode_t,
     },
+
+    /// Restoring `FD_CLOEXEC` on a claimed fd failed. The spawn's `dup2` cleared
+    /// the flag so the fd would survive `execve`; it must be re-set so the
+    /// daemon's own subprocesses don't inherit the RPC pipe ends and suppress
+    /// the EOF the parent relies on for liveness.
+    #[error("fcntl({operation}) failed restoring FD_CLOEXEC on fd {fd} ({label}): {source}")]
+    SetCloexec {
+        fd: i32,
+        label: &'static str,
+        /// Which fcntl operation failed (`"F_GETFD"` or `"F_SETFD"`).
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// Receiving the daemon's bootstrap ack failed.

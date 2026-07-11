@@ -7,6 +7,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::{CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD};
 use crate::ipc::RpcServer;
+use crate::ipc::cloexec::set_cloexec;
 use crate::ipc::error::InheritedFdsError;
 
 /// Guards the process-wide claim on the inherited daemon fds (3 and 4).
@@ -68,22 +69,24 @@ where
                 st_mode: statbuf.st_mode,
             });
         }
+        // Restore FD_CLOEXEC. The parent set it on every pipe end at creation,
+        // but the `dup2` onto fds 3/4 during the spawn necessarily cleared it so
+        // they'd survive the `execve` into this daemon. Nothing re-sets it, so
+        // without this the fds stay inheritable for the daemon's whole lifetime:
+        // every subprocess the daemon later spawns (`std::process::Command`
+        // inherits non-CLOEXEC fds across its own fork+exec) gets a duplicate of
+        // the response pipe's write end, and since EOF only fires once ALL write
+        // ends close, such a subprocess outliving the daemon suppresses the EOF
+        // the parent waits on — silently defeating the liveness of
+        // `recv_response_blocking`. (The symmetric effect on fd 3 delays the
+        // parent's `send_request` EPIPE.)
+        set_cloexec(fd).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
+            fd,
+            label,
+            operation,
+            source,
+        })?;
     }
-    // TODO Restore FD_CLOEXEC on the claimed fds here (an fcntl(F_SETFD) pair,
-    //   as in the macOS fallback path of ipc/pipe/mod.rs). The parent set it on
-    //   all pipe ends at creation,
-    //   but the dup2 onto fds 3/4 during the spawn necessarily cleared it so
-    //   they survive the execve — and nothing re-sets it, so the fds stay
-    //   inheritable for the daemon's whole lifetime. Every subprocess the
-    //   daemon spawns (std::process::Command inherits non-CLOEXEC fds) gets a
-    //   duplicate of the response pipe's write end; since EOF only fires once
-    //   ALL write ends close, such a subprocess that outlives the daemon
-    //   suppresses the EOF the parent is waiting on — silently defeating the
-    //   documented EOF liveness of recv_response_blocking (a parent can hang
-    //   on a dead daemon for as long as that subprocess lives). The symmetric
-    //   effect on fd 3 delays the parent's send_request EPIPE. cryfs is only
-    //   exposed for the milliseconds fusermount3 runs, but a published-crate
-    //   user whose run_daemon spawns a long-lived helper hits this fully.
     Ok(unsafe { RpcServer::from_raw_fds(CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD) })
 }
 

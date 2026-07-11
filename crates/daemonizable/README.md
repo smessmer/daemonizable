@@ -204,10 +204,10 @@ it doesn't stop at "started": the RPC channel stays open, so the parent
 can wait for whatever *its* definition of ready is before exiting (CryFS
 exits 0 only after the daemon reports the filesystem is actually mounted).
 If the daemon dies instead of answering, the parent gets an EOF error
-rather than a hang — provided the daemon hasn't leaked its inherited pipe
-fds to a longer-lived subprocess of its own (they are not currently
-re-marked close-on-exec after the daemon claims them; a known limitation
-tracked in a TODO in `ipc/spawn/inherited.rs`).
+rather than a hang. The inherited pipe fds are re-marked close-on-exec as
+soon as the daemon claims them, so subprocesses the daemon spawns don't
+inherit the RPC pipe ends and can't hold that EOF open past the daemon's
+own exit.
 
 ### The crates, specifically
 

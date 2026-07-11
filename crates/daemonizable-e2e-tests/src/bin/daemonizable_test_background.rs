@@ -91,6 +91,28 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
         }
+        "spawn_child_holding_fds_then_exit" => {
+            // Regression coverage for FD_CLOEXEC restoration on the inherited
+            // RPC fds (3/4). Spawn a long-lived grandchild via fork+exec, then
+            // exit this daemon. If the fds were left without FD_CLOEXEC, execve
+            // would NOT close them and the grandchild would inherit the response
+            // pipe's write end (fd 4) — keeping it open after we exit and
+            // starving the parent's EOF. With CLOEXEC restored the grandchild
+            // does not inherit them, so our exit closes the last write end and
+            // the parent's receive returns SenderClosed promptly.
+            let pid_file = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
+            );
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("daemon: spawn sleeper grandchild");
+            // Record the grandchild's pid so the test can kill it in cleanup
+            // (it is reparented to init once we exit).
+            std::fs::write(&pid_file, child.id().to_string()).expect("daemon: write sleeper pid");
+            drop(rpc); // close this daemon's own copies of fds 3/4
+            std::process::exit(0);
+        }
         "sentinel_loop" => {
             // Used by daemon_survives_parent_exit. Ignore RPC entirely;
             // loop writing the current monotonic timestamp to the path in

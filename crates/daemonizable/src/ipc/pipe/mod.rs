@@ -123,34 +123,14 @@ fn create_pipe_ends() -> Result<
 > {
     use std::os::fd::AsRawFd;
 
-    fn set_cloexec(fd: std::os::fd::RawFd) -> Result<(), PipeCreateError> {
-        // SAFETY: `fd` is an open file descriptor returned by `pipe()` and
-        // still owned by the `interprocess` wrapper, so it's valid for the
-        // duration of both fcntl calls. F_GETFD has no side effects beyond
-        // returning flags.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 {
-            return Err(PipeCreateError::SetCloexec {
-                operation: "F_GETFD",
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        // SAFETY: Same as above. F_SETFD only modifies the descriptor's flags
-        // (we OR in FD_CLOEXEC, preserving any others); it doesn't affect the
-        // underlying file or pipe state.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-            return Err(PipeCreateError::SetCloexec {
-                operation: "F_SETFD",
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        Ok(())
-    }
+    use crate::ipc::cloexec::set_cloexec;
 
     let (sender, recver) =
         interprocess::unnamed_pipe::pipe().map_err(PipeCreateError::CreatePipe)?;
-    set_cloexec(sender.as_raw_fd())?;
-    set_cloexec(recver.as_raw_fd())?;
+    for fd in [sender.as_raw_fd(), recver.as_raw_fd()] {
+        set_cloexec(fd)
+            .map_err(|(operation, source)| PipeCreateError::SetCloexec { operation, source })?;
+    }
     Ok((sender, recver))
 }
 
