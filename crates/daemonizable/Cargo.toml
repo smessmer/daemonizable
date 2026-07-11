@@ -27,7 +27,7 @@ daemonizable-macros = { workspace = true, optional = true }
 interprocess.workspace = true
 libc.workspace = true
 log.workspace = true
-nix = { workspace = true, features = ["poll"] }
+nix = { workspace = true, features = ["poll", "fs"] }
 postcard = { workspace = true, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true

@@ -6,8 +6,6 @@
 //! [`mod@receiver`] the read side (including the timeout-bounded read
 //! machinery). Both share the [`MAX_MESSAGE_SIZE`] wire-format cap defined here.
 
-use std::os::fd::AsRawFd;
-
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::error::PipeCreateError;
@@ -23,78 +21,129 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 /// Create a new pipe that can be used across forking for interprocess communication.
 ///
-/// Both ends are set CLOEXEC so they're closed by the kernel during `execve`.
-/// The fork+exec daemon spawn relies on this: only fds explicitly remapped via
+/// Both ends are CLOEXEC so they're closed by the kernel during `execve`. The
+/// fork+exec daemon spawn relies on this: only fds explicitly remapped via
 /// `posix_spawn_file_actions` / `pre_exec` (which clear CLOEXEC as a side
-/// effect of `dup2`) survive into the child. The underlying `interprocess`
-/// crate doesn't set CLOEXEC, so we have to.
+/// effect of `dup2`) survive into the child.
 ///
-/// # The CLOEXEC race
+/// # Closing the CLOEXEC race
 ///
-/// The CLOEXEC set is *not* atomic with pipe creation: there's a brief window
-/// between `interprocess::pipe()` returning and the `fcntl(F_SETFD)` call
-/// below where the fds exist but are still inheritable. If a concurrent thread
-/// `fork()`s (directly, or indirectly via `Command::spawn`) inside that
-/// window, the resulting child inherits the still-non-CLOEXEC pipe fds.
-/// Symptoms range from leaked fds in unrelated children to EOF never being
-/// delivered on the pipe (the rightful owner can't detect the other end being
-/// dropped because the unrelated child holds a duplicate).
+/// CLOEXEC has to be established *atomically* with pipe creation. Were it set
+/// in a second step (`fcntl(F_SETFD)` after `pipe()`), a concurrent thread that
+/// `fork()`s — directly, or indirectly via `Command::spawn` — in the window
+/// between the two calls would leak the still-inheritable pipe fds into an
+/// unrelated child. Symptoms range from leaked fds to EOF never being delivered
+/// on the pipe (the rightful owner can't detect the far end being dropped while
+/// a stranger holds a duplicate write end).
 ///
-/// On Linux/FreeBSD/OpenBSD/NetBSD≥6, `pipe2(O_CLOEXEC)` creates the pipe
-/// atomically with CLOEXEC set and the race doesn't exist. **macOS has no
-/// `pipe2`, no `SOCK_CLOEXEC` for `socketpair`, and no equivalent atomic
-/// primitive.** The standard workaround on macOS would be a process-wide fork
-/// lock that every fork site honors (CPython's `subprocess` does this with
-/// `_posixsubprocess._fork_lock`), but Rust's `std::process::Command` doesn't
-/// expose or honor any such lock, so we can't enforce it across our
-/// dependencies.
+/// On Linux/Android, the *BSDs, and every other target that provides it, we
+/// create the pipe with `pipe2(O_CLOEXEC)`, which sets CLOEXEC in the same
+/// syscall — the window doesn't exist and the race is closed outright.
 ///
-/// We therefore rely on a usage-level invariant rather than atomicity: no
-/// other thread may `fork()`/`Command::spawn()` while a pipe is being created.
-/// A running thread pool or async runtime is not itself a problem — only an
-/// actual concurrent fork in the CLOEXEC-set window is — but the simplest way
-/// to guarantee that is to spawn the daemon at startup, before the process
-/// begins spawning other subprocesses. This is a documented caller contract,
-/// not something the library enforces at runtime.
-///
-/// Closing the race outright would mean switching to `pipe2(O_CLOEXEC)` on the
-/// platforms that have it (leaving macOS reliant on the single-threaded
-/// invariant), and/or serializing pipe creation behind a process-wide fork
-/// lock. See the TODO in `lib.rs`.
+/// **macOS/iOS have no `pipe2`** (nor `SOCK_CLOEXEC` for `socketpair`, nor any
+/// equivalent atomic primitive), so there we fall back to `pipe()` +
+/// `fcntl(F_SETFD)` and the window reopens. The standard workaround would be a
+/// process-wide fork lock that every fork site honors (CPython's `subprocess`
+/// does this with `_posixsubprocess._fork_lock`), but Rust's
+/// `std::process::Command` exposes no such lock we could take, so on those
+/// targets we rely on a usage-level invariant instead: no other thread may
+/// `fork()`/`Command::spawn()` while a pipe is being created. A running thread
+/// pool or async runtime is not itself a problem — only an actual concurrent
+/// fork in the CLOEXEC-set window is — but the simplest way to guarantee that
+/// is to spawn the daemon at startup, before the process begins spawning other
+/// subprocesses. This is a documented caller contract, not something the
+/// library can enforce at runtime on those platforms.
 ///
 /// T: The type of the data that will be sent through the pipe.
 pub fn pipe<T>() -> Result<(Sender<T>, Receiver<T>), PipeCreateError>
 where
     T: Serialize + DeserializeOwned,
 {
+    let (sender, recver) = create_pipe_ends()?;
+    Ok((Sender::new(sender), Receiver::new(recver)))
+}
+
+/// Atomic path: `pipe2(O_CLOEXEC)` creates both ends with CLOEXEC already set,
+/// so there is no window in which the fds are inheritable. Compiled on exactly
+/// the targets for which `nix::unistd::pipe2` is available.
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "emscripten",
+    target_os = "hurd",
+    target_os = "redox",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "cygwin",
+))]
+fn create_pipe_ends()
+-> Result<(interprocess::unnamed_pipe::Sender, interprocess::unnamed_pipe::Recver), PipeCreateError>
+{
+    use nix::fcntl::OFlag;
+    // `pipe2` returns (read end, write end); our `Sender` wraps the write end.
+    let (read_fd, write_fd) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
+        .map_err(|errno| PipeCreateError::CreatePipe(std::io::Error::from(errno)))?;
+    Ok((
+        interprocess::unnamed_pipe::Sender::from(write_fd),
+        interprocess::unnamed_pipe::Recver::from(read_fd),
+    ))
+}
+
+/// Fallback path for targets without `pipe2` (macOS/iOS): create the pipe, then
+/// set CLOEXEC in a separate `fcntl` call. This reopens the create-vs-fork race
+/// documented on [`pipe`], mitigated by the caller's spawn-at-startup contract.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "emscripten",
+    target_os = "hurd",
+    target_os = "redox",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "cygwin",
+)))]
+fn create_pipe_ends()
+-> Result<(interprocess::unnamed_pipe::Sender, interprocess::unnamed_pipe::Recver), PipeCreateError>
+{
+    use std::os::fd::AsRawFd;
+
+    fn set_cloexec(fd: std::os::fd::RawFd) -> Result<(), PipeCreateError> {
+        // SAFETY: `fd` is an open file descriptor returned by `pipe()` and
+        // still owned by the `interprocess` wrapper, so it's valid for the
+        // duration of both fcntl calls. F_GETFD has no side effects beyond
+        // returning flags.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(PipeCreateError::SetCloexec {
+                operation: "F_GETFD",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        // SAFETY: Same as above. F_SETFD only modifies the descriptor's flags
+        // (we OR in FD_CLOEXEC, preserving any others); it doesn't affect the
+        // underlying file or pipe state.
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
+            return Err(PipeCreateError::SetCloexec {
+                operation: "F_SETFD",
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        Ok(())
+    }
+
     let (sender, recver) =
         interprocess::unnamed_pipe::pipe().map_err(PipeCreateError::CreatePipe)?;
     set_cloexec(sender.as_raw_fd())?;
     set_cloexec(recver.as_raw_fd())?;
-    Ok((Sender::new(sender), Receiver::new(recver)))
-}
-
-fn set_cloexec(fd: std::os::fd::RawFd) -> Result<(), PipeCreateError> {
-    // SAFETY: `fd` is an open file descriptor returned by `pipe()` and still
-    // owned by the `interprocess` wrapper, so it's valid for the duration of
-    // both fcntl calls. F_GETFD has no side effects beyond returning flags.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(PipeCreateError::SetCloexec {
-            operation: "F_GETFD",
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    // SAFETY: Same as above. F_SETFD only modifies the descriptor's flags
-    // (we OR in FD_CLOEXEC, preserving any others); it doesn't affect the
-    // underlying file or pipe state.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(PipeCreateError::SetCloexec {
-            operation: "F_SETFD",
-            source: std::io::Error::last_os_error(),
-        });
-    }
-    Ok(())
+    Ok((sender, recver))
 }
 
 #[cfg(test)]
