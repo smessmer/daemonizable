@@ -46,6 +46,12 @@ where
     /// Receive the next request from the parent. Blocks until a request
     /// arrives; returns [`PipeRecvError::SenderClosed`] once the parent drops
     /// its client — the daemon's signal to shut down its request loop.
+    ///
+    /// A parent frame that exceeds the wire-format cap returns
+    /// [`PipeRecvError::MessageTooLarge`] and desynchronizes the stream; every
+    /// later call then returns [`PipeRecvError::Desynchronized`]. Both are
+    /// terminal — the daemon should exit its loop, just as it does on
+    /// `SenderClosed`.
     pub fn next_request(&mut self) -> Result<Request, PipeRecvError> {
         self.receiver.recv()
     }

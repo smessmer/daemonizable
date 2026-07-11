@@ -53,6 +53,11 @@ where
     /// [`PipeRecvError::SenderClosed`] immediately rather than hanging. A
     /// daemon that is alive but wedged will block the caller; the caller stays
     /// interruptible via signals.
+    ///
+    /// A daemon response that exceeds the wire-format cap returns
+    /// [`PipeRecvError::MessageTooLarge`] and poisons the receiver; every later
+    /// receive (here or via [`recv_response`](Self::recv_response)) then returns
+    /// [`PipeRecvError::Desynchronized`]. Both are terminal — abandon the client.
     pub fn recv_response_blocking(&mut self) -> Result<Response, PipeRecvError> {
         self.receiver.recv()
     }
