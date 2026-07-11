@@ -90,10 +90,11 @@
 //!
 //! Two caveats. [`Daemonizer::spawn_daemon`] can block indefinitely if the
 //! intermediate is externally stopped (SIGSTOP/ptrace) in the instant before it
-//! exits — the same failure class as a wedged child during bootstrap. And the
-//! caller must not concurrently reap arbitrary children (a `SIGCHLD` handler
-//! that calls `waitpid(-1)`, say) during the spawn, or it may reap the
-//! intermediate first and defeat the cleanup's pid bookkeeping.
+//! exits, since it is reaped with a blocking `wait()` (the handshake, bootstrap
+//! send, and ack are all timeout-bounded, so a wedged child during those steps
+//! is not). And the caller must not concurrently reap arbitrary children (a
+//! `SIGCHLD` handler that calls `waitpid(-1)`, say) during the spawn, or it may
+//! reap the intermediate first and defeat the cleanup's pid bookkeeping.
 //!
 //! Because the daemon is spawned with fork+exec (not a bare `fork()`), a
 //! running thread pool or async runtime is fine — `execve` hands the child a
