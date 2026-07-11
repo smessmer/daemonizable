@@ -52,10 +52,16 @@ impl<A: Daemonizable> Daemonizer<A> {
     /// handshake or bootstrap failure the child is killed and reaped
     /// (best-effort) before the error is returned.
     ///
-    /// # Panics
-    ///
-    /// Panics if a tokio runtime is running — daemonize before initializing
-    /// tokio (see <https://github.com/tokio-rs/tokio/issues/4301>).
+    /// Because the daemon is created with fork+exec (not a bare `fork()`), it
+    /// is safe to call this with a thread pool or async runtime already
+    /// running — `execve` gives the child a fresh process image, so none of
+    /// the parent's threads or lock state carry over. The one caveat is a
+    /// narrow fd-inheritance race: the pipe fds get `FD_CLOEXEC` set
+    /// non-atomically just after creation, so if another thread performs its
+    /// own fork+exec in that brief window it can leak a copy of those fds into
+    /// an unrelated child. Spawning the daemon before the process starts
+    /// spawning other subprocesses avoids it entirely (a `pipe2(O_CLOEXEC)`
+    /// fix that closes the race outright is tracked in `lib.rs`).
     pub fn spawn_daemon(
         &self,
         payload: &A::BootstrapPayload,

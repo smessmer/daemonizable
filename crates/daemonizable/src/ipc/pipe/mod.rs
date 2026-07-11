@@ -9,7 +9,6 @@
 use std::os::fd::AsRawFd;
 
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::runtime::Handle;
 
 use super::error::PipeCreateError;
 
@@ -30,7 +29,7 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// effect of `dup2`) survive into the child. The underlying `interprocess`
 /// crate doesn't set CLOEXEC, so we have to.
 ///
-/// # The CLOEXEC race and why we panic if tokio is running
+/// # The CLOEXEC race
 ///
 /// The CLOEXEC set is *not* atomic with pipe creation: there's a brief window
 /// between `interprocess::pipe()` returning and the `fcntl(F_SETFD)` call
@@ -50,33 +49,24 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// expose or honor any such lock, so we can't enforce it across our
 /// dependencies.
 ///
-/// We therefore rely on a usage-level invariant rather than atomicity: pipe
-/// creation must be single-threaded. We enforce this by panicking if a tokio
-/// runtime is already initialized, since tokio's worker threads are the
-/// realistic source of "another thread that might fork" in this codebase. The
-/// daemon spawn path naturally satisfies this — pipes are created at startup,
-/// before tokio is constructed.
+/// We therefore rely on a usage-level invariant rather than atomicity: no
+/// other thread may `fork()`/`Command::spawn()` while a pipe is being created.
+/// A running thread pool or async runtime is not itself a problem — only an
+/// actual concurrent fork in the CLOEXEC-set window is — but the simplest way
+/// to guarantee that is to spawn the daemon at startup, before the process
+/// begins spawning other subprocesses. This is a documented caller contract,
+/// not something the library enforces at runtime.
 ///
-/// If we ever want to move pipe creation after tokio init, we have to either
-/// reach a process-wide fork-lock arrangement, or accept the race on macOS.
-/// Switching to `pipe2(O_CLOEXEC)` would close the race on Linux but leaves
-/// macOS unchanged.
+/// Closing the race outright would mean switching to `pipe2(O_CLOEXEC)` on the
+/// platforms that have it (leaving macOS reliant on the single-threaded
+/// invariant), and/or serializing pipe creation behind a process-wide fork
+/// lock. See the TODO in `lib.rs`.
 ///
 /// T: The type of the data that will be sent through the pipe.
 pub fn pipe<T>() -> Result<(Sender<T>, Receiver<T>), PipeCreateError>
 where
     T: Serialize + DeserializeOwned,
 {
-    if Handle::try_current().is_ok() {
-        panic!(
-            "Cannot create an IPC pipe while a tokio runtime is running. \
-             Pipe creation must be single-threaded because the CLOEXEC flag \
-             is not set atomically with pipe creation (and macOS has no \
-             portable atomic alternative); a concurrent fork would inherit \
-             the not-yet-CLOEXEC fds. Create the pipe before initializing \
-             tokio."
-        );
-    }
     let (sender, recver) =
         interprocess::unnamed_pipe::pipe().map_err(PipeCreateError::CreatePipe)?;
     set_cloexec(sender.as_raw_fd())?;
