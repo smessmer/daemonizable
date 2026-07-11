@@ -29,6 +29,11 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Must be called at most once per process (it takes ownership of fds 3/4); a
 /// second call returns an error rather than aliasing the descriptors.
 ///
+/// Also re-sets `FD_CLOEXEC` on the two fds: the spawn's `dup2` cleared it so
+/// they'd survive `execve`, and without restoring it the daemon's own
+/// subprocesses would inherit the RPC pipe ends and hold the parent's EOF open
+/// past the daemon's exit.
+///
 /// Used by the test helper binary. Production applications go through the
 /// framework's daemon dispatch in [`crate::run`], which additionally sends
 /// the build-id handshake and consumes the bootstrap before handing the
