@@ -49,7 +49,7 @@ fn daemonize_dispatch_does_full_spawn_handshake_bootstrap_and_rpc_roundtrip() {
     // daemon's own children can't be misdetected as daemon children.
     // (Note: "before run_daemon", not "before app code" — `build_id()` and
     // the payload's `Deserialize` run earlier in the child arm; see the
-    // remove_var TODO in app.rs.)
+    // remove_var TODO in app/daemon_child.rs.)
     //
     // TODO This test doesn't assert the framework's `setsid` (the single
     //   most important line for daemon survival) — no test does; the

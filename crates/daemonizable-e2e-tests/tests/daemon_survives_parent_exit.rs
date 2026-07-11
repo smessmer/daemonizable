@@ -15,7 +15,7 @@
 //!   framework's child arm entirely — the `setsid` this test observes via
 //!   `getsid()` is one the HELPER BINARY performs itself
 //!   (daemonizable_test_background.rs `sentinel_loop`), not the framework's
-//!   `setsid` in `run_as_daemon_child` (app.rs), which currently has zero
+//!   `setsid` in `run_as_daemon_child` (app/daemon_child.rs), which currently has zero
 //!   regression coverage. A refactor dropping that production setsid would
 //!   keep the whole suite green while shipped daemons stay in the user's
 //!   terminal session (SIGHUP on shell close kills background mounts). Fix:

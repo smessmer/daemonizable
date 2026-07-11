@@ -131,7 +131,7 @@ where
             //   AND the child was reaped (libc::kill(pid, 0) == ESRCH,
             //   waitpid == ECHILD).
             // TODO When the double-fork lands in run_as_daemon_child (see
-            //   the TODO at its setsid() call in app.rs), this cleanup must
+            //   the TODO at its setsid() call in app/daemon_child.rs), this cleanup must
             //   switch to process-group signaling: the direct child will be
             //   a long-dead session-leader intermediate, so kill() here
             //   would hit a corpse while the real daemon (its forked child)
