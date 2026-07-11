@@ -33,6 +33,13 @@ serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
+# serde's derive macro is used only by the in-crate `#[cfg(test)]` modules;
+# the library itself references serde solely through trait bounds
+# (`Serialize`/`DeserializeOwned`), so `derive` stays out of the published
+# build and lives here as a dev-only feature.
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+
 # Integration tests and their helper binaries live in the unpublished
 # sibling crate `daemonizable-e2e-tests`, keeping this package lib-only
 # for publishing.
