@@ -207,6 +207,30 @@ fn run_as_daemon_child<A: Daemonizable>() -> ! {
         std::process::exit(1);
     }
 
+    // TODO Double-fork: fork once more right here and let this
+    //   session-leader intermediate _exit(0), so the surviving grandchild
+    //   can never acquire a controlling terminal (daemon(7) step 7; per
+    //   POSIX XBD 11.1.3 a ctty-less session leader that open()s a tty
+    //   without O_NOCTTY may acquire it as controlling terminal). Safe at
+    //   this point: we are a fresh single-threaded post-exec image, and the
+    //   claimed pipe fds are inherited across the fork. Ordering: the
+    //   second fork must happen BEFORE send_handshake below (the parent
+    //   must validate the final daemon, and EOF liveness must track the
+    //   process that actually serves), and the planned pid-file battery
+    //   must write its pid AFTER this fork. This change must land TOGETHER
+    //   with the matching cleanup TODO in ipc/spawn.rs (on the kill+wait in
+    //   spawn_daemon_process): the parent's Child handle will point at the
+    //   already-dead intermediate, so failed-spawn cleanup has to become
+    //   process-group signaling — kill(-child_pid), race-free because
+    //   setsid() above made our pid the pgid and a pid is not recycled
+    //   while it names a live process group; ESRCH falls back to
+    //   kill(child_pid) for deaths before setsid. On success the parent
+    //   should wait() the intermediate immediately, which removes the
+    //   zombie caveat from the process contract. Update the README
+    //   ("Process contract" + the session-leader cost bullet), the crate
+    //   docs, and the process-tree expectations in
+    //   daemon_survives_parent_exit.rs / daemon_child_lifecycle.rs.
+
     // Drop the inherited working directory (chdir to `/`) so the daemon doesn't
     // pin the parent's cwd filesystem for its whole lifetime — otherwise
     // unmounting e.g. the USB stick the user launched from would fail with
@@ -228,6 +252,20 @@ fn run_as_daemon_child<A: Daemonizable>() -> ! {
         std::process::exit(127);
     }
 
+    // TODO Batteries (see the full plan in README.md, "No batteries (yet)"):
+    //   opt-in daemonization options — flock-locked pid file, privilege drop
+    //   (initgroups/setgid/setuid), chroot, umask, signal-mask reset, fd
+    //   hygiene (close_range), log-file stdio redirection — configured on the
+    //   parent side, shipped as a framework-level part of the bootstrap frame
+    //   below, and applied HERE, between handshake and ack, so every failure
+    //   can be reported to the parent as a typed error before it exits.
+    //   Requires extending the empty bootstrap ack into a result frame
+    //   (empty = ok, otherwise a framework error the parent maps into
+    //   SpawnDaemonError variants like AlreadyRunning / DropPrivileges).
+    //   Ordering within this block: umask → sigmask reset → close_range →
+    //   pid file (write the FINAL pid — after the planned double fork above)
+    //   → chown pid file → open log files → chroot → initgroups/setgid →
+    //   setuid → ack.
     let payload_bytes = match server.recv_raw_bootstrap_with_timeout(BOOTSTRAP_TIMEOUT) {
         Ok(bytes) => bytes,
         Err(err) => {

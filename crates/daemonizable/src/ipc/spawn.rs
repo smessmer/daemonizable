@@ -154,6 +154,16 @@ where
             //   pid to a file) and assert the error is HandshakeError::Mismatch
             //   AND the child was reaped (libc::kill(pid, 0) == ESRCH,
             //   waitpid == ECHILD).
+            // TODO When the double-fork lands in run_as_daemon_child (see
+            //   the TODO at its setsid() call in app.rs), this cleanup must
+            //   switch to process-group signaling: the direct child will be
+            //   a long-dead session-leader intermediate, so kill() here
+            //   would hit a corpse while the real daemon (its forked child)
+            //   survives. Replacement: libc::kill(-child_pid, SIGKILL)
+            //   (valid because the child's setsid() made its pid the pgid,
+            //   and the pid is not recycled while the group has members),
+            //   tolerate ESRCH (child died before setsid), then keep the
+            //   direct kill()+wait() below as fallback and reaper.
             let _ = child.kill();
             let _ = child.wait();
             Err(err)
