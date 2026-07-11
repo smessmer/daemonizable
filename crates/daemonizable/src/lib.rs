@@ -65,31 +65,25 @@
 //! pattern), the daemon is reparented to init; a long-lived parent will see a
 //! zombie once the daemon exits (reap it, or accept it). A **failed** spawn
 //! (handshake mismatch, bootstrap failure) is killed and reaped by
-//! [`Daemonizer::spawn_daemon`] itself before the error is returned. Spawning
-//! must happen **before** a tokio runtime is started (`spawn_daemon` panics
-//! otherwise; fork and threads don't mix — see
-//! <https://github.com/tokio-rs/tokio/issues/4301>).
+//! [`Daemonizer::spawn_daemon`] itself before the error is returned. Because
+//! the daemon is spawned with fork+exec (not a bare `fork()`), a running
+//! thread pool or async runtime is fine — `execve` hands the child a fresh
+//! process image, so the fork-vs-threads hazard of traditional daemonization
+//! (see <https://github.com/tokio-rs/tokio/issues/4301>) doesn't apply.
 
-// TODO The "spawn_daemon panics if a tokio runtime is started" promise above
-//   (also in spawn_daemon's `# Panics` rustdoc and README.md) overstates the
-//   guard: `tokio::runtime::Handle::try_current()` is runtime-CONTEXT-local —
-//   it only fires when the calling thread is inside block_on or an entered
-//   handle; a runtime running on other threads (or plain non-tokio threads)
-//   is invisible to it. And the real invariant is broader than tokio: the
-//   pipe fds get FD_CLOEXEC set non-atomically after creation (see the race
-//   discussion in ipc/pipe/mod.rs), so ANY concurrent fork/Command::spawn on
-//   another thread during that window — including a second spawn_daemon from
-//   another thread, an advertised use of the Copy+Send+Sync Daemonizer —
-//   leaks duplicate pipe ends into an unrelated child across execve, which
-//   silently defeats the documented EOF liveness (EOF only fires once ALL
-//   write ends close). Fix: (a) reword the three public doc sites (this
-//   contract, spawn_daemon's # Panics, README) to state the guard is
-//   best-effort and the actual requirement is "no concurrent forks/threads
-//   while spawning"; (b) close the race outright on Linux by creating pipes
-//   with pipe2(O_CLOEXEC) (nix::unistd::pipe2, nix is already a dependency),
-//   leaving only macOS reliant on the documented invariant; (c) optionally
-//   serialize pipe-creation + spawn behind a private static Mutex to close
-//   the spawn-vs-spawn instance of the race on every platform.
+// TODO The one residual hazard is a narrow fd-inheritance race, unrelated to
+//   any particular runtime: the pipe fds get FD_CLOEXEC set non-atomically
+//   after creation (see the race discussion in ipc/pipe/mod.rs), so a
+//   concurrent fork/Command::spawn on another thread during that window —
+//   including a second spawn_daemon from another thread, an advertised use of
+//   the Copy+Send+Sync Daemonizer — can leak duplicate pipe ends into an
+//   unrelated child across execve, which silently defeats the documented EOF
+//   liveness (EOF only fires once ALL write ends close). To close the race
+//   rather than only document it: (a) create pipes with pipe2(O_CLOEXEC)
+//   (nix::unistd::pipe2, nix is already a dependency) on the platforms that
+//   have it, leaving only macOS reliant on the documented invariant;
+//   (b) optionally serialize pipe-creation + spawn behind a private static
+//   Mutex to close the spawn-vs-spawn instance of the race on every platform.
 
 mod app;
 mod ipc;

@@ -9,7 +9,6 @@ use std::process::Command;
 
 use command_fds::{CommandFdExt, FdMapping};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::runtime::Handle;
 
 use super::handshake::validate_handshake_and_build_client;
 use super::{
@@ -78,13 +77,6 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    if Handle::try_current().is_ok() {
-        panic!(
-            "Cannot daemonize a process if tokio is running. Please daemonize \
-             before initializing tokio. See https://github.com/tokio-rs/tokio/issues/4301"
-        );
-    }
-
     let exe = daemon_exe_path()?;
     // The execve path is `/proc/self/exe` on Linux (kernel magic-link, see
     // `daemon_exe_path`), but that string would also become argv[0] by
@@ -199,12 +191,6 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    if Handle::try_current().is_ok() {
-        panic!(
-            "Cannot spawn a background process if tokio is running. \
-             Spawn before initializing tokio."
-        );
-    }
     let (client, _child) = start_background_process_inner(exe, None, &[], extra_env)?;
     Ok(client)
 }

@@ -31,7 +31,6 @@ nix = { workspace = true, features = ["poll"] }
 postcard = { workspace = true, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt"] }
 
 # serde's derive macro is used only by the in-crate `#[cfg(test)]` modules;
 # the library itself references serde solely through trait bounds

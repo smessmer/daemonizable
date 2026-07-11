@@ -137,10 +137,11 @@ started process it actually is. State it needs from the parent arrives
 explicitly — the typed bootstrap payload — instead of implicitly through
 a memory snapshot.
 
-(The symmetric honesty: `spawn_daemon` must still be called before the
-*parent* starts its tokio runtime, because pipe creation and fd remapping
-touch the same fork machinery. But that constraint covers a moment at
-spawn time, not the daemon's whole life.)
+(The symmetric honesty: the *parent* can already have a tokio runtime
+running when it calls `spawn_daemon` — fork+exec makes that safe. The only
+residual constraint is a narrow race while the spawn's pipe fds get their
+CLOEXEC flag set non-atomically; it covers a moment at spawn time, not the
+daemon's whole life.)
 
 ### cutting the cord at fork time: nobody hears the daemon fail
 
@@ -283,16 +284,17 @@ channel:
   the spawner — which also removes the zombie caveat for long-lived
   parents. (A Linux-only variant could even keep direct parenthood via
   `clone3(CLONE_PARENT)`.)*
-- **Spawn before tokio, still.** The parent-side restriction remains (see
-  the process contract below) — it's just transient instead of permanent.
-  *TODO: fixable on Linux. The restriction exists because the pipe fds
-  get `FD_CLOEXEC` a moment after creation instead of atomically, so a
-  concurrent fork on another thread can leak them; creating the pipes
-  with `pipe2(O_CLOEXEC)` closes that window (tracked in a TODO in
-  `lib.rs`), and migrating from `command-fds`' `pre_exec` to std's
-  planned fd mappings
+- **Only a narrow spawn-time race remains.** Because the daemon is created
+  with fork+exec, a running tokio runtime (or any thread pool) is fine to
+  spawn under — the parent-side restriction is *not* "no tokio." The one
+  residual caveat is transient rather than permanent: the pipe fds get
+  `FD_CLOEXEC` a moment after creation instead of atomically, so a
+  concurrent fork on another thread in that window can leak them.
+  *TODO: fixable on Linux. Creating the pipes with `pipe2(O_CLOEXEC)`
+  closes that window (tracked in a TODO in `lib.rs`), and migrating from
+  `command-fds`' `pre_exec` to std's planned fd mappings
   ([rust#145687](https://github.com/rust-lang/rust/pull/145687)) removes
-  the rest. macOS has no atomic equivalent and keeps the rule.*
+  the rest. macOS has no atomic equivalent and keeps the invariant.*
 - **No batteries (yet).** Pid files, privilege drop, chroot, umask,
   signal-mask reset, and log-file stdio redirection are currently the
   application's job.
@@ -341,9 +343,12 @@ faith into an operation that can fail loudly.
   zombie once the daemon exits (reap it, or accept it).
 - A **failed** spawn (handshake mismatch, bootstrap failure) is killed and
   reaped by `spawn_daemon` itself before the error is returned.
-- `spawn_daemon` must be called **before** starting a tokio runtime (it
-  panics otherwise; fork and threads don't mix — see
-  [tokio#4301](https://github.com/tokio-rs/tokio/issues/4301)).
+- `spawn_daemon` is safe to call with a tokio runtime already running —
+  fork+exec hands the daemon a fresh process image, so the fork-vs-threads
+  hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
+  doesn't apply. The only caveat is a narrow fd-inheritance race if another
+  thread forks while the spawn is setting `FD_CLOEXEC` on its pipe fds;
+  spawning before the process starts other subprocesses avoids it.
 
 ## Features
 
