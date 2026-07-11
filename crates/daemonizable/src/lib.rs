@@ -106,14 +106,10 @@ pub use app::{Daemonizable, Daemonizer, run};
 #[cfg(feature = "macros")]
 pub use daemonizable_macros::main;
 
-// Re-exported so applications can name the typed handles they receive in
-// `run_parent` / `run_daemon`, and so test code can construct in-process
+// Re-exported so applications can name the typed handles they receive: the
+// client handle from `Daemonizer::spawn_daemon` and the server handle passed
+// to `Daemonizable::run_daemon`, and so test code can construct in-process
 // connections for unit testing.
-//
-// TODO Stale name from the deleted legacy framework: no `run_parent` exists
-//   in this API. The client handle comes from `Daemonizer::spawn_daemon`,
-//   the server handle is passed to `Daemonizable::run_daemon` — reword the
-//   comment above accordingly.
 pub use ipc::{RpcClient, RpcConnection, RpcServer};
 
 // Typed errors returned by the IPC layer (thiserror, not anyhow) so callers
