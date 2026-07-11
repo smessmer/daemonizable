@@ -161,11 +161,11 @@ where
             // a zombie intermediate in a long-lived caller.
             //
             // Blocking wait(): an externally SIGSTOPped or ptraced intermediate
-            // would block here indefinitely (documented on `spawn_daemon`, and
-            // the same failure class as the unbounded bootstrap send above).
-            // Since this wait is only zombie hygiene — the real daemon is the
-            // orphaned grandchild — it could degrade to try_wait()+timeout if
-            // that ever mattered.
+            // would block here indefinitely (documented on `spawn_daemon`). This
+            // is now the only unbounded step of the spawn — the handshake,
+            // bootstrap send, and ack are all timeout-bounded. Since this wait is
+            // only zombie hygiene — the real daemon is the orphaned grandchild —
+            // it could degrade to try_wait()+timeout if that ever mattered.
             let _ = child.wait();
             Ok(client)
         }
