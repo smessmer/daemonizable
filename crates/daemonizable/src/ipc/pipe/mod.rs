@@ -590,6 +590,57 @@ mod tests {
         }
 
         #[test]
+        fn send_raw_with_timeout_roundtrip() {
+            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            sender
+                .send_raw_with_timeout(b"hello", Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(
+                recver.recv_raw_timeout(Duration::from_secs(1)).unwrap(),
+                b"hello"
+            );
+        }
+
+        #[test]
+        fn send_raw_with_timeout_rejects_oversized() {
+            // Enforces the same MAX_MESSAGE_SIZE cap as the blocking path,
+            // bailing before touching the fd (so a peer-less sender suffices).
+            let (sender, _recver) = interprocess::unnamed_pipe::pipe().unwrap();
+            let mut sender: Sender<u32> = Sender::new(sender);
+            let oversized = vec![0u8; MAX_MESSAGE_SIZE + 1];
+            let err = sender
+                .send_raw_with_timeout(&oversized, Duration::from_secs(1))
+                .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    PipeSendError::MessageTooLarge {
+                        size,
+                        max: MAX_MESSAGE_SIZE,
+                    } if size == MAX_MESSAGE_SIZE + 1
+                ),
+                "Unexpected error: {err:?}",
+            );
+        }
+
+        #[test]
+        fn blocking_send_after_timeout_send_still_works() {
+            // A timeout-bounded send leaves the fd nonblocking; the next
+            // blocking send must reset it (via write_length_prefixed) and
+            // succeed rather than spuriously report WouldBlock.
+            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            sender
+                .send_raw_with_timeout(b"a", Duration::from_secs(1))
+                .unwrap();
+            assert_eq!(
+                recver.recv_raw_timeout(Duration::from_secs(1)).unwrap(),
+                b"a"
+            );
+            sender.send(&42).unwrap();
+            assert_eq!(recver.recv().unwrap(), 42);
+        }
+
+        #[test]
         fn length_prefix_is_four_bytes_little_endian() {
             // Pin the wire format: a `send_raw` of N bytes writes exactly
             // 4+N bytes total, with the leading 4 bytes being the

@@ -211,26 +211,17 @@ where
     Response: Serialize + DeserializeOwned + Send,
 {
     let mut client = validate_handshake_and_build_client(client, expected_build_id)?;
-    // TODO This send is the only unbounded step of the spawn protocol: the
-    //   handshake recv and the ack recv below are timeout-bounded, but
-    //   send_raw_bootstrap goes through a blocking write_all, which blocks
-    //   once the kernel pipe buffer is full (64 KiB default on Linux, 4 KiB
-    //   under the pipe-user-pages-soft limit) while MAX_MESSAGE_SIZE allows
-    //   payloads up to 1 MiB. Against a child that passed the handshake and
-    //   is then stopped without executing (SIGSTOP/ptrace targeting just the
-    //   child — a merely slow child unblocks us or times out and exits →
-    //   EPIPE), spawn_daemon hangs forever and the kill+wait failure cleanup
-    //   below never runs, contradicting the documented bounded-failure
-    //   contract. Irrelevant for cryfs (the LoggingConfig payload is tiny),
-    //   but the published API allows app-defined payloads. Fix: set the
-    //   sender nonblocking and mirror read_exact_with_timeout with a
-    //   poll(POLLOUT)-based write_all_with_timeout bounded by
-    //   BOOTSTRAP_TIMEOUT, mapped to a new PipeSendError::Timeout variant so
-    //   the cleanup path runs; or at minimum document that payloads above
-    //   the OS pipe capacity may block spawn_daemon indefinitely against a
-    //   wedged child.
+    // Bound this send by BOOTSTRAP_TIMEOUT so it can't become the one unbounded
+    // step of the spawn protocol (the handshake recv and the ack recv below are
+    // already bounded). A blocking write_all would stall once the kernel pipe
+    // buffer fills (64 KiB default on Linux, 4 KiB under the pipe-user-pages-soft
+    // limit) while MAX_MESSAGE_SIZE permits payloads up to 1 MiB — so against a
+    // child that passed the handshake and was then stopped without executing
+    // (SIGSTOP/ptrace), spawn_daemon would hang forever and the kill+wait
+    // failure cleanup below would never run. On timeout we return an error, so
+    // that cleanup path runs.
     client
-        .send_raw_bootstrap(payload_bytes)
+        .send_raw_bootstrap_with_timeout(payload_bytes, BOOTSTRAP_TIMEOUT)
         .map_err(SpawnDaemonError::SendPayload)?;
     client
         .recv_raw_bootstrap_ack_with_timeout(BOOTSTRAP_TIMEOUT)

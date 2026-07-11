@@ -73,11 +73,20 @@ where
     }
 
     /// Send the framework's bootstrap message — raw length-prefixed bytes
-    /// (typically postcard-encoded by the caller). Runs after the build-id
-    /// handshake is validated and before any typed RPC; the typed channel
-    /// stays clean.
-    pub(crate) fn send_raw_bootstrap(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
-        self.sender.send_raw(bytes)
+    /// (typically postcard-encoded by the caller), bounded by `timeout`. Runs
+    /// after the build-id handshake is validated and before any typed RPC; the
+    /// typed channel stays clean.
+    ///
+    /// The timeout is the parent's safety net for a child that passed the
+    /// handshake and then wedged without draining the pipe: without it, a
+    /// payload larger than the kernel pipe buffer would block `spawn_daemon`
+    /// forever and its failure cleanup would never run.
+    pub(crate) fn send_raw_bootstrap_with_timeout(
+        &mut self,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<(), PipeSendError> {
+        self.sender.send_raw_with_timeout(bytes, timeout)
     }
 
     /// Receive the daemon's empty-payload ack for the bootstrap, bounded by

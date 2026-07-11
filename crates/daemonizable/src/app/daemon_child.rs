@@ -227,7 +227,9 @@ mod tests {
             b: "hello".to_string(),
         };
         let bytes = postcard::to_stdvec(&sent).unwrap();
-        client.send_raw_bootstrap(&bytes).unwrap();
+        client
+            .send_raw_bootstrap_with_timeout(&bytes, Duration::from_secs(1))
+            .unwrap();
 
         let received_bytes = server
             .recv_raw_bootstrap_with_timeout(Duration::from_secs(1))
