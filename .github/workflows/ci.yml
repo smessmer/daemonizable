@@ -56,6 +56,31 @@ jobs:
         run: cargo test --workspace ${{ matrix.features }} ${{ matrix.profile }}
 
   # ---------------------------------------------------------------------------
+  # Per-crate check: `cargo check` each workspace crate on its own, across
+  # every feature set. The `test` job builds the whole workspace, where Cargo
+  # unifies features — so a crate that only compiles because a sibling turned a
+  # feature on still passes there. Checking each crate in isolation catches
+  # that, which matters here because `daemonizable` is meant to stay lib-only
+  # and publishable with a minimal feature surface.
+  # ---------------------------------------------------------------------------
+  check-crates:
+    name: check / ${{ matrix.crate }} / ${{ matrix.features || 'default' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: ["daemonizable", "daemonizable-macros", "daemonizable-e2e-tests"]
+        features: ["", "--no-default-features", "--all-features"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: check-${{ matrix.crate }}-${{ matrix.features }}
+      - run: cargo check -p ${{ matrix.crate }} --all-targets ${{ matrix.features }}
+
+  # ---------------------------------------------------------------------------
   # Minimal-versions: resolve every dependency to the lowest version its
   # requirement allows and make sure the workspace still builds and tests. This
   # catches version constraints in Cargo.toml that are actually too loose.
@@ -232,6 +257,7 @@ jobs:
     if: always()
     needs:
       - test
+      - check-crates
       - minimal-versions
       - macos
       - clippy
