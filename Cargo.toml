@@ -11,7 +11,7 @@ rust-version = "1.85"
 version = "0.0.1"
 
 [workspace.dependencies]
-command-fds = "^0.3.3"
+command-fds = "^0.3.0"
 # Internal companion crate. Declared here (like every other dependency) so its
 # path + published version requirement live in one place; consuming crates just
 # say `daemonizable-macros = { workspace = true }`. The `version` must match the
@@ -20,14 +20,14 @@ command-fds = "^0.3.3"
 daemonizable-macros = { path = "crates/daemonizable-macros", version = "0.0.1" }
 interprocess = "^2.3.0"
 libc = "^0.2.182"
-log = "^0.4.27"
+log = "^0.4.4"
 nix = "^0.31.2"
-postcard = { version = "^1", default-features = false }
-proc-macro2 = "^1.0.95"
-quote = "^1.0.40"
+postcard = { version = "^1.0.0", default-features = false }
+proc-macro2 = "^1.0.83"
+quote = "^1.0.35"
 rustversion = "^1.0.20"
-serde = "^1.0.219"
-syn = "^2.0.101"
+serde = "^1.0.194"
+syn = "^2.0.87"
 tempfile = "^3.27"
-thiserror = "^2.0.18"
+thiserror = "^2.0.0"
 trybuild = "^1.0.105"
