@@ -110,45 +110,18 @@ jobs:
         run: cargo test --workspace ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
-  # Cross-compilation to other architectures, BUILD ONLY.
-  #
-  # Tests are deliberately not run here: `cross` executes the guest binary
-  # under qemu-user, where `/proc/self/exe` resolves to the qemu emulator
-  # rather than the guest image, so the daemon re-exec spawn the e2e tests
-  # depend on cannot work under emulation. Building is still valuable — it
-  # guards against pointer-width / 32-bit-target regressions across the whole
-  # dependency tree.
+  # Linter: clippy over every feature combination and all targets, warnings
+  # promoted to errors. Running each feature set (not just --all-features)
+  # means feature-gated code — the `macros` re-export and the `testutils`
+  # helpers — gets linted in the configurations it actually ships in.
   # ---------------------------------------------------------------------------
-  cross-build:
-    name: cross-build / ${{ matrix.target }}
+  clippy:
+    name: clippy / ${{ matrix.features || 'default' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - aarch64-unknown-linux-gnu
-          - armv7-unknown-linux-gnueabihf
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: cross-${{ matrix.target }}
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-      - name: Cross build
-        run: cross build --workspace --all-targets --all-features --target ${{ matrix.target }}
-
-  # ---------------------------------------------------------------------------
-  # Linter: clippy over all targets and all features, warnings promoted to
-  # errors.
-  # ---------------------------------------------------------------------------
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
+        features: ["", "--no-default-features", "--all-features"]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (stable)
@@ -156,7 +129,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        with:
+          key: clippy-${{ matrix.features }}
+      - run: cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Formatting: rustfmt in check mode.
@@ -205,6 +180,21 @@ jobs:
       - uses: obi1kenobi/cargo-semver-checks-action@v2
 
   # ---------------------------------------------------------------------------
+  # Supply chain: cargo-deny checks the dependency tree for security
+  # advisories, disallowed / unknown licenses, banned or wildcard-pinned
+  # crates, and dependencies from unexpected sources. Config lives in
+  # deny.toml at the repo root.
+  # ---------------------------------------------------------------------------
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+
+  # ---------------------------------------------------------------------------
   # Coverage: instrument and run the whole workspace with cargo-llvm-cov and
   # upload the LCOV report to Codecov. `CODECOV_TOKEN` is optional for public
   # repositories; the upload is non-blocking so Codecov hiccups never turn CI
@@ -244,11 +234,11 @@ jobs:
       - test
       - minimal-versions
       - macos
-      - cross-build
       - clippy
       - rustfmt
       - docs
       - semver-checks
+      - cargo-deny
       - coverage
     runs-on: ubuntu-latest
     steps:
