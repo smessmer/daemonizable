@@ -8,6 +8,8 @@ pub use error::{
     SpawnDaemonError,
 };
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
+#[cfg(any(test, feature = "testutils"))]
+pub use spawn::spawn_daemon_process_with_exe;
 pub(crate) use spawn::{
     BOOTSTRAP_TIMEOUT, DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, spawn_daemon_process,
 };

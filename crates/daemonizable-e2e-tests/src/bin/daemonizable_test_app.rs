@@ -36,6 +36,14 @@ struct TestResponse {
     /// The framework must have removed it (so the daemon's own children
     /// aren't misdetected); the test asserts "removed".
     marker: String,
+    /// The daemon's own pid (`std::process::id()`). With `sid` below it proves
+    /// the daemon is a grandchild, not a session leader.
+    pid: u32,
+    /// The daemon's session id (`getsid(0)`). The test asserts it differs from
+    /// the test's own session (the framework `setsid` took effect) AND from
+    /// `pid` (the daemon is not a session leader — the sid is the dead
+    /// intermediate's pid, which only holds once the second fork has run).
+    sid: i32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,6 +128,11 @@ impl Daemonizable for TestApp {
         } else {
             "removed"
         };
+        // `run_daemon` runs in the surviving grandchild (post second fork), so
+        // these report the FINAL daemon identity: pid is the grandchild's, sid
+        // is the (dead) intermediate's pid.
+        let pid = std::process::id();
+        let sid = unsafe { libc::getsid(0) };
         // Echo+1 until the parent drops its client (EOF), then exit cleanly.
         while let Ok(request) = rpc.next_request() {
             rpc.send_response(&TestResponse {
@@ -127,6 +140,8 @@ impl Daemonizable for TestApp {
                 daemon_cwd: daemon_cwd.clone(),
                 payload_tag: payload.tag.clone(),
                 marker: marker.to_string(),
+                pid,
+                sid,
             })
             .expect("daemon: failed to send response");
         }
@@ -148,12 +163,63 @@ fn run_parent(daemonizer: Daemonizer<TestApp>, outfile: &Path) -> Result<(), Str
     let response = rpc
         .recv_response(Duration::from_secs(10))
         .map_err(|err| format!("recv_response failed: {err}"))?;
+    // After a successful spawn, this process must have no zombie children: the
+    // double-fork intermediate was reaped by `spawn_daemon`'s success-path
+    // wait(), and the daemon itself is a grandchild orphaned away from us.
+    let zombies = count_own_zombie_children();
     std::fs::write(
         outfile,
         format!(
-            "parent-got:{} cwd:{} payload:{} marker:{}",
-            response.v, response.daemon_cwd, response.payload_tag, response.marker
+            "parent-got:{} cwd:{} payload:{} marker:{} sid:{} pid:{} zombies:{}",
+            response.v,
+            response.daemon_cwd,
+            response.payload_tag,
+            response.marker,
+            response.sid,
+            response.pid,
+            zombies,
         ),
     )
     .map_err(|err| format!("failed to write outfile: {err}"))
+}
+
+/// Count this process's zombie (`State: Z`) children by scanning `/proc`. Used
+/// to prove `spawn_daemon` reaped the second-fork intermediate on success.
+/// Linux-only; on other platforms the framework_e2e hang-canary is the
+/// remaining guard, so this reports 0 (nothing to assert).
+#[cfg(target_os = "linux")]
+fn count_own_zombie_children() -> usize {
+    let me = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut count = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{name}/status")) else {
+            continue;
+        };
+        let mut is_zombie = false;
+        let mut ppid: Option<u32> = None;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("State:") {
+                is_zombie = rest.trim_start().starts_with('Z');
+            } else if let Some(rest) = line.strip_prefix("PPid:") {
+                ppid = rest.trim().parse().ok();
+            }
+        }
+        if is_zombie && ppid == Some(me) {
+            count += 1;
+        }
+    }
+    count
+}
+
+#[cfg(not(target_os = "linux"))]
+fn count_own_zombie_children() -> usize {
+    0
 }

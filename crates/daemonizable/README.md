@@ -24,9 +24,10 @@ startup banner on your application.
 - **Typed RPC**: `RpcClient<Request, Response>` / `RpcServer<Request,
   Response>` over pipes, postcard-encoded, with EOF-based liveness (a dead
   peer is an error, not a hang).
-- **Daemon hygiene**: `setsid`, `chdir("/")`, single-claim guard on the
-  inherited fds, `detach_stdio()` for when your daemon is ready to let go of
-  the terminal.
+- **Daemon hygiene**: `setsid` + a second fork (so the daemon is never a
+  session leader and can't acquire a controlling terminal), `chdir("/")`,
+  single-claim guard on the inherited fds, `detach_stdio()` for when your
+  daemon is ready to let go of the terminal.
 - **`#[daemonizable::main]`**: put it on your `impl Daemonizable` block and the
   correct `main` — a single `run::<MyApp>()` call and nothing else — is
   generated for you.
@@ -97,7 +98,11 @@ deliberately rejects:
    initialization, so daemon startup failures are invisible to whoever
    launched it.
 
-Both are real, documented problems, not stylistic gripes.
+Both are real, documented problems, not stylistic gripes. (What this library
+keeps from the classic ritual is the *second* fork — it performs `daemon(7)`'s
+second fork itself, but *after* `exec`, in the fresh single-threaded child,
+where it is unconditionally safe. What it rejects is fork-without-exec and
+cord-cutting, not the second fork.)
 
 ### fork without exec: the daemon inherits a broken process image
 
@@ -225,8 +230,7 @@ daemon is a session leader"), and Apple deprecated it two decades ago.
 To be fair to the fork-based crates: several carry battle-tested SysV
 batteries this library doesn't have yet — locked pid files, setuid/
 setgid privilege drop, chroot, umask control (planned as opt-in options;
-see the TODO in the costs list below) — and their second fork means
-the daemon is not a session leader (see the tradeoffs below). If you need
+see the TODO in the costs list below). If you need
 fire-and-forget backgrounding with those knobs, and you can guarantee the
 fork happens before any thread exists, `fork` (the crate) is a reasonable
 minimal choice. What none of them can do is tell you whether your daemon
@@ -274,27 +278,6 @@ channel:
   `/proc/self/exe` itself). The fallback gives up the same-inode
   guarantee, but the build-id handshake already turns a swapped binary
   into a clean error rather than a wrong daemon.*
-- **The daemon is a session leader.** There is no second fork, so — per
-  [POSIX XBD 11.1.3](https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap11.html)
-  — a tty opened without `O_NOCTTY` could become its controlling terminal.
-  Double-fork crates rule this out structurally; here the daemon must
-  simply not open ttys carelessly.
-  *TODO (planned; implementation TODOs sit at the `setsid()` call in
-  `app/daemon_child.rs` and the failed-spawn cleanup in `ipc/spawn/process.rs`, and must land
-  together): add the second fork. The daemon-child arm runs in a fresh
-  single-threaded post-exec image, so it can safely fork once more right
-  after `setsid()` and let the session-leader intermediate exit 0; the
-  surviving grandchild can never acquire a controlling terminal. The
-  parent's `Child` handle then points at the already-dead intermediate,
-  so the failed-spawn cleanup must signal the process group instead —
-  `kill(-child_pid)`, which stays race-free because `setsid()` made the
-  intermediate's pid the group id and a pid is not recycled while it
-  names a live process group (`ESRCH` fallback to `kill(child_pid)`
-  covers deaths before `setsid`). The process contract flips too: the
-  daemon is orphaned to init immediately instead of remaining a child of
-  the spawner — which also removes the zombie caveat for long-lived
-  parents. (A Linux-only variant could even keep direct parenthood via
-  `clone3(CLONE_PARENT)`.)*
 - **Only a narrow spawn-time race remains.** Because the daemon is created
   with fork+exec, a running tokio runtime (or any thread pool) is fine to
   spawn under — the parent-side restriction is *not* "no tokio." The one
@@ -321,8 +304,8 @@ channel:
   kernel drops the lock on process death, so stale pid files are
   harmless; the lock can even be taken in the parent before spawning —
   `flock` belongs to the open file description, which the daemon inherits
-  across the exec — so "already running" fails before a child is ever
-  spawned), `initgroups`/`setgid`/`setuid` privilege drop, optional
+  across the exec and the second fork — so "already running" fails before a
+  child is ever spawned), `initgroups`/`setgid`/`setuid` privilege drop, optional
   `chroot`, explicit `umask` (currently silently inherited — it survives
   `execve`), signal-mask reset (the mask, unlike handlers, also survives
   `execve`), fd hygiene for non-CLOEXEC fds inherited from the CLI's own
@@ -348,18 +331,35 @@ faith into an operation that can fail loudly.
 
 ## Process contract
 
-- There is **no double-fork**: a successfully spawned daemon remains a child
-  of the spawning process. If the parent exits promptly (the typical CLI
-  pattern), the daemon is reparented to init; a long-lived parent will see a
-  zombie once the daemon exits (reap it, or accept it).
-- A **failed** spawn (handshake mismatch, bootstrap failure) is killed and
-  reaped by `spawn_daemon` itself before the error is returned.
+- The daemon is a **grandchild**: the re-exec'd child forks a second time
+  after `setsid` (the classic double fork, `daemon(7)` step 7). The
+  session-leader intermediate exits immediately and is reaped by
+  `spawn_daemon` itself, and the surviving daemon — never a session leader, so
+  it can never acquire a controlling terminal — is orphaned to init (or the
+  nearest `PR_SET_CHILD_SUBREAPER` ancestor, e.g. a systemd user manager) at
+  spawn time. A **successful** spawn leaves the caller no child and no zombie,
+  regardless of the caller's own lifetime.
+- A **failed** spawn (handshake mismatch, bootstrap failure) is killed via its
+  process group (`kill(-child_pid, SIGKILL)`, which reaches the grandchild;
+  ESRCH falls back to a direct kill for a child that died before `setsid`) and
+  the intermediate reaped before the error is returned. A grandchild the group
+  signal misses (it left the group via its own `setsid`/`setpgid`) still
+  self-terminates via pipe EOF within ~10 s once the client is dropped — so
+  failed-spawn teardown of the daemon is asynchronous, not synchronous with the
+  returned error.
+- Two caveats on `spawn_daemon` itself: it can block indefinitely if the
+  intermediate is externally SIGSTOPped/ptraced in the instant before it exits,
+  and the caller must not concurrently reap arbitrary children (e.g. a
+  `SIGCHLD` handler that calls `waitpid(-1)`) during the spawn, which could reap
+  the intermediate first and defeat the cleanup's pid bookkeeping.
 - `spawn_daemon` is safe to call with a tokio runtime already running —
   fork+exec hands the daemon a fresh process image, so the fork-vs-threads
   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
-  doesn't apply. The only caveat is a narrow fd-inheritance race if another
-  thread forks while the spawn is setting `FD_CLOEXEC` on its pipe fds;
-  spawning before the process starts other subprocesses avoids it.
+  doesn't apply (the second fork runs in that fresh single-threaded image,
+  before any app code, so it is safe too). The only caveat is a narrow
+  fd-inheritance race if another thread forks while the spawn is setting
+  `FD_CLOEXEC` on its pipe fds; spawning before the process starts other
+  subprocesses avoids it.
 
 ## Features
 

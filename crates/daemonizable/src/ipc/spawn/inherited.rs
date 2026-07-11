@@ -76,10 +76,10 @@ where
     //   inheritable for the daemon's whole lifetime. Every subprocess the
     //   daemon spawns (std::process::Command inherits non-CLOEXEC fds) gets a
     //   duplicate of the response pipe's write end; since EOF only fires once
-    //   ALL write ends close, a grandchild that outlives the daemon
+    //   ALL write ends close, such a subprocess that outlives the daemon
     //   suppresses the EOF the parent is waiting on — silently defeating the
     //   documented EOF liveness of recv_response_blocking (a parent can hang
-    //   on a dead daemon for as long as the grandchild lives). The symmetric
+    //   on a dead daemon for as long as that subprocess lives). The symmetric
     //   effect on fd 3 delays the parent's send_request EPIPE. cryfs is only
     //   exposed for the milliseconds fusermount3 runs, but a published-crate
     //   user whose run_daemon spawns a long-lived helper hits this fully.

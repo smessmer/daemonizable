@@ -34,9 +34,11 @@ fn helper_exe() -> PathBuf {
 /// a 2 s grace period. Never panics from Drop.
 ///
 /// Unlike `daemon_survives_parent_exit`, here the daemon is our *direct
-/// child* — fork+exec with no double-fork — so we must `waitpid` to reap it.
-/// `kill(pid, 0)` would report a zombie child as "still alive", so polling
-/// with that would always hit the SIGTERM timeout.
+/// child*: this raw helper-spawn path does not go through the framework's
+/// child arm (`run_as_daemon_child`), and hence not through its second fork —
+/// so we must `waitpid` to reap it. `kill(pid, 0)` would report a zombie child
+/// as "still alive", so polling with that would always hit the SIGTERM
+/// timeout.
 struct DaemonGuard(i32);
 
 impl Drop for DaemonGuard {

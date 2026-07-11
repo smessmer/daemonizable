@@ -69,16 +69,39 @@
 //!
 //! # Process contract
 //!
-//! There is **no double-fork**: a successfully spawned daemon remains a child
-//! of the spawning process. If the parent exits promptly (the typical CLI
-//! pattern), the daemon is reparented to init; a long-lived parent will see a
-//! zombie once the daemon exits (reap it, or accept it). A **failed** spawn
-//! (handshake mismatch, bootstrap failure) is killed and reaped by
-//! [`Daemonizer::spawn_daemon`] itself before the error is returned. Because
-//! the daemon is spawned with fork+exec (not a bare `fork()`), a running
-//! thread pool or async runtime is fine — `execve` hands the child a fresh
-//! process image, so the fork-vs-threads hazard of traditional daemonization
-//! (see <https://github.com/tokio-rs/tokio/issues/4301>) doesn't apply.
+//! The re-exec'd child forks a **second time** after `setsid()` (the classic
+//! double fork, daemon(7) step 7): the session-leader intermediate exits
+//! immediately and is reaped by [`Daemonizer::spawn_daemon`] itself, and the
+//! surviving daemon — a grandchild, never a session leader, so it can never
+//! acquire a controlling terminal — is orphaned to init (or the nearest
+//! [`PR_SET_CHILD_SUBREAPER`](https://man7.org/linux/man-pages/man2/prctl.2.html)
+//! ancestor, e.g. a systemd user manager) at spawn time. A **successful** spawn
+//! therefore leaves the caller no child and no zombie, whatever the caller's
+//! own lifetime.
+//!
+//! A **failed** spawn (handshake mismatch, bootstrap failure) is killed via its
+//! process group (`kill(-child_pid, SIGKILL)`, which reaches the grandchild;
+//! ESRCH falls back to a direct kill for a child that died before `setsid`) and
+//! the intermediate reaped before the error is returned. A grandchild the group
+//! signal somehow misses (it left the group via its own `setsid`/`setpgid`)
+//! still self-terminates via pipe EOF within ~10 s once the client is dropped,
+//! so failed-spawn teardown of the daemon is asynchronous, not synchronous with
+//! the returned error.
+//!
+//! Two caveats. [`Daemonizer::spawn_daemon`] can block indefinitely if the
+//! intermediate is externally stopped (SIGSTOP/ptrace) in the instant before it
+//! exits — the same failure class as a wedged child during bootstrap. And the
+//! caller must not concurrently reap arbitrary children (a `SIGCHLD` handler
+//! that calls `waitpid(-1)`, say) during the spawn, or it may reap the
+//! intermediate first and defeat the cleanup's pid bookkeeping.
+//!
+//! Because the daemon is spawned with fork+exec (not a bare `fork()`), a
+//! running thread pool or async runtime is fine — `execve` hands the child a
+//! fresh process image, so the fork-vs-threads hazard of traditional
+//! daemonization (see <https://github.com/tokio-rs/tokio/issues/4301>) doesn't
+//! apply. (The second fork above runs in that fresh, single-threaded post-exec
+//! image, before any application code, so it is not exposed to that hazard
+//! either.)
 
 // TODO The one residual hazard is a narrow fd-inheritance race, unrelated to
 //   any particular runtime: the pipe fds get FD_CLOEXEC set non-atomically
@@ -134,5 +157,16 @@ pub use ipc::detach_stdio;
 //
 // Production app code should not reach for these — implement
 // [`Daemonizable`] and let [`run`] orchestrate the daemon side.
+// `send_handshake` is the daemon-side primitive the child arm uses; helper
+// binaries need it to stand in for a (correct or deliberately wrong) daemon.
 #[doc(hidden)]
-pub use ipc::{rpc_server_from_inherited_fds, start_background_process_with_exe};
+pub use ipc::{rpc_server_from_inherited_fds, send_handshake, start_background_process_with_exe};
+
+// Like `start_background_process_with_exe` but keeps the full handshake +
+// bootstrap + failed-spawn cleanup, against an arbitrary helper binary. Exists
+// only so `daemonizable-e2e-tests` can cover the cleanup contract that
+// `spawn_daemon` promises (production always re-execs `/proc/self/exe`, which a
+// libtest binary cannot stand in for). Gated off the stable surface.
+#[cfg(any(test, feature = "testutils"))]
+#[doc(hidden)]
+pub use ipc::spawn_daemon_process_with_exe;

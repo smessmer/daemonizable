@@ -123,6 +123,69 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
+        "wrong_handshake_then_idle" => {
+            // Used by failed_spawn_cleanup. Drives the parent's handshake
+            // validation to a Mismatch, then idles (blocks forever) so the
+            // parent's failed-spawn cleanup has a LIVE child to kill and reap.
+            // Writes its pid first so the test can assert it was reaped.
+            let pid_file = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
+            );
+            std::fs::write(&pid_file, std::process::id().to_string())
+                .expect("daemon: write pid file");
+            daemonizable::send_handshake(&mut rpc, "deliberately-wrong-build-id")
+                .expect("daemon: send wrong handshake");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
+        "double_fork_wrong_handshake_then_idle" => {
+            // Mimics the real framework child arm (setsid → second fork →
+            // intermediate _exit(0) → grandchild serves), but the grandchild
+            // sends a WRONG build id. Proves the parent's failed-spawn cleanup
+            // group-kill (`kill(-child_pid)`) reaches the GRANDCHILD — the real
+            // daemon, reparented away from the parent — not merely the direct
+            // child. The grandchild writes ITS pid so the test can assert it
+            // was killed.
+            let pid_file = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
+            );
+            if unsafe { libc::setsid() } < 0 {
+                eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
+                std::process::exit(1);
+            }
+            match unsafe { libc::fork() } {
+                -1 => {
+                    eprintln!("daemon: fork failed: {}", std::io::Error::last_os_error());
+                    std::process::exit(1);
+                }
+                0 => {
+                    // Grandchild: the "daemon". Owns the inherited fds 3/4.
+                    std::fs::write(&pid_file, std::process::id().to_string())
+                        .expect("daemon: write pid file");
+                    daemonizable::send_handshake(&mut rpc, "deliberately-wrong-build-id")
+                        .expect("daemon: send wrong handshake");
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    }
+                }
+                _ => unsafe { libc::_exit(0) }, // intermediate session leader
+            }
+        }
+        "write_pid_then_exit" => {
+            // Used by failed_spawn_cleanup. Dies immediately — before any
+            // handshake and before setsid — so the parent's handshake recv
+            // sees EOF (SenderClosed) and the cleanup has an already-dead child
+            // to reap (the wait()-reaps-a-zombie path). Writes its pid first so
+            // the test can assert no zombie survives.
+            let pid_file = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
+            );
+            std::fs::write(&pid_file, std::process::id().to_string())
+                .expect("daemon: write pid file");
+            drop(rpc);
+            std::process::exit(0);
+        }
         other => {
             panic!("daemon: unknown DAEMONIZABLE_TEST_BEHAVIOR={other:?}");
         }
