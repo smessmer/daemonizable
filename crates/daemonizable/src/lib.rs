@@ -194,13 +194,36 @@
 //!   dbus instead."
 //!
 //! The pipe handshake that `daemon(7)` demands is what serious daemons end up
-//! hand-rolling. nginx binds its listen sockets *before* daemonizing so
-//! port-in-use errors still reach your terminal. libfuse — this library's
-//! home turf, it was extracted from [CryFS](https://www.cryfs.org) — grew a
-//! whole new API for it
+//! hand-rolling, because fork-based self-daemonization — the classic Unix
+//! pattern — otherwise loses every startup error. `sshd` backgrounds itself
+//! with the libc [`daemon(3)`](https://man7.org/linux/man-pages/man3/daemon.3.html)
+//! call, but only *after* it has bound its listen sockets, so "address already
+//! in use" still reaches your terminal
+//! ([`sshd.c`](https://github.com/openssh/openssh-portable/blob/master/sshd.c);
+//! `-D` skips the backgrounding entirely). nginx does the same bind-before-fork,
+//! and its [`ngx_daemon()`](https://github.com/nginx/nginx/blob/master/src/os/unix/ngx_daemon.c)
+//! deliberately leaves stderr attached — it `dup2`s stdin/stdout to `/dev/null`
+//! but the stderr redirect sits under `#if 0` — so config errors still print;
+//! [`daemon off;`](https://nginx.org/en/docs/faq/daemon_master_process_off.html)
+//! drops backgrounding entirely for a supervisor or container. PostgreSQL
+//! splits the roles: the `postgres` server never daemonizes, and the
+//! [`pg_ctl`](https://www.postgresql.org/docs/current/app-pg-ctl.html) wrapper
+//! backgrounds it and then polls `postmaster.pid` until it reads "ready to
+//! accept connections" before returning (the `-w` wait is the default since
+//! PostgreSQL 10) — the same readiness handshake through a status file instead
+//! of a pipe. Even [Apache httpd](https://httpd.apache.org/docs/current/programs/httpd.html)
+//! only detaches (`fork` + `setsid`) once its config is parsed, and ships
+//! `-DNO_DETACH` / `-DFOREGROUND` to suppress each half for a supervisor. And
+//! libfuse — this library's home turf, it was extracted from
+//! [CryFS](https://www.cryfs.org) — grew a whole new API for it
 //! ([`fuse_daemonize_early_start` / `_success` / `_fail`](https://github.com/libfuse/libfuse))
 //! so the mounting parent stays alive until the mount actually succeeded and
-//! can report failure otherwise.
+//! can report failure otherwise. The modern answer is to skip self-daemonization
+//! altogether: under systemd the recommended shape is a foreground process
+//! reporting readiness via [`sd_notify(3)`](https://man7.org/linux/man-pages/man3/sd_notify.html),
+//! with the self-backgrounding
+//! [`Type=forking`](https://man7.org/linux/man-pages/man5/systemd.service.5.html)
+//! discouraged (see the last entry in the costs list below).
 //!
 //! daemonizable builds that handshake in as the core primitive instead of an
 //! afterthought. [`Daemonizer::spawn_daemon`] blocks through the build-id handshake; a child
@@ -214,60 +237,6 @@
 //! soon as the daemon claims them, so subprocesses the daemon spawns don't
 //! inherit the RPC pipe ends and can't hold that EOF open past the daemon's
 //! own exit.
-//!
-//! ## How real system services daemonize
-//!
-//! The two patterns above aren't strawmen — fork-based self-daemonization is
-//! *the* classic Unix pattern, and the workarounds for its downsides are
-//! written directly into how the well-known daemons are built. A field survey
-//! (verified against current sources):
-//!
-//! - **`sshd` (OpenSSH)** backgrounds itself with the libc
-//!   [`daemon(3)`](https://man7.org/linux/man-pages/man3/daemon.3.html) call
-//!   (single fork + `setsid`), but only *after* parsing its config and
-//!   **binding the listen sockets** — so "address already in use" reaches your
-//!   terminal with a non-zero exit rather than `/dev/null`. `-D` keeps it in
-//!   the foreground for a supervisor. (The per-connection `setsid()` elsewhere
-//!   in `sshd` is login-session isolation, a different mechanism from the
-//!   startup daemonization.)
-//! - **nginx** daemonizes in
-//!   [`ngx_daemon()`](https://github.com/nginx/nginx/blob/master/src/os/unix/ngx_daemon.c)
-//!   — a *single* fork, `setsid`, `umask(0)`, and `dup2` of stdin/stdout to
-//!   `/dev/null` — but deliberately **leaves stderr attached** (the third
-//!   `dup2` sits under `#if 0`) and **opens its listen sockets before
-//!   forking**, so config and bind errors still print. `daemon off;` (safe in
-//!   production
-//!   [since 1.0.9](https://nginx.org/en/docs/faq/daemon_master_process_off.html))
-//!   turns backgrounding off entirely — the recommended mode under a
-//!   supervisor or in a container.
-//! - **PostgreSQL** splits the two roles: the `postgres` server process **does
-//!   not daemonize at all** — it runs in the foreground. Backgrounding lives in
-//!   the [`pg_ctl`](https://www.postgresql.org/docs/current/app-pg-ctl.html)
-//!   wrapper, which fork/execs the server and then, with `-w` (the default
-//!   since PostgreSQL 10), **polls `postmaster.pid`** until it reports "ready
-//!   to accept connections," yielding an accurate exit code. That is exactly
-//!   the `daemon(7)` readiness handshake, done through a status file instead of
-//!   a pipe.
-//! - **Apache httpd** reads its config, then detaches via `apr_proc_detach()`
-//!   (fork, parent exits, `setsid`) unless started with `-DNO_DETACH` /
-//!   `-DFOREGROUND`.
-//!
-//! The through-line: the fork-based self-daemonization this library rejects
-//! *is* the norm, and every daemon that cares about startup failures had to
-//! hand-roll a readiness mechanism on top of it — bind-before-fork (`sshd`,
-//! nginx), pidfile polling (`pg_ctl`), the explicit pipe `daemon(7)` mandates,
-//! or libfuse's `fuse_daemonize_*` API above. daemonizable makes that
-//! readiness channel the primitive rather than the bolt-on.
-//!
-//! And the modern trend is to stop self-daemonizing altogether: under systemd
-//! the recommended shape is a foreground process that reports readiness with
-//! `sd_notify(3)` (`Type=notify`), with the old self-backgrounding
-//! `Type=forking` [documented as discouraged](https://man7.org/linux/man-pages/man5/systemd.service.5.html).
-//! The distro service files bear this out — nginx runs with `daemon off`,
-//! httpd with `-DFOREGROUND`. If systemd (or any service manager) supervises
-//! your process, you shouldn't be self-daemonizing at all — see the last entry
-//! in the costs list below; daemonizable is for the processes a *user* launches
-//! from a shell.
 //!
 //! ## The crates, specifically
 //!
