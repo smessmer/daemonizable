@@ -1,38 +1,29 @@
-//! Run your CLI application as a foreground process or have it fork+exec itself
-//! into a background daemon — with a typed RPC channel between the spawning
-//! parent and the daemon.
+//! The `daemonizable` library turns a single command-line binary into both a
+//! foreground program *and* the background daemon it launches — and keeps a
+//! typed, two-way channel open between the two.
 //!
-//! Implement [`Daemonizable`] for your app type and let [`run`] drive the
-//! process-role dispatch. The library is deliberately policy-free: it handles
-//! only the process mechanics and imposes no argument parser, logging
-//! framework, panic hook, or startup banner on your application.
+//! You write an ordinary CLI. At some point it decides to go into the
+//! background: it calls one method, and the library launches a fresh copy of
+//! your *same* binary as a detached daemon, hands you back a channel for
+//! talking to it, and — the part that most daemonizing tools get wrong — waits
+//! to learn whether that daemon actually came up before your foreground
+//! process continues. If the daemon fails to start, your CLI gets a real error
+//! and can exit non-zero, instead of reporting success for a daemon that died
+//! on startup.
 //!
-//! The typed RPC channel between parent and daemon carries the app's own
-//! [`Daemonizable::Request`] / [`Daemonizable::Response`] types; the framework's
-//! build-id handshake travels out-of-band on the same pipe, before the typed
-//! phase and invisible to app code.
+//! To use it, implement one trait — [`Daemonizable`] — on your app type. You
+//! provide the request and response types the two sides exchange, a `build_id`
+//! string, a foreground entry point (this is your real `main`), and a daemon
+//! entry point. [`run`] looks at how the process was started and calls the
+//! right one for you. The library is deliberately policy-free: it does the
+//! process plumbing and nothing else. It imposes no argument parser, no logging
+//! framework, no panic hook, and no startup banner on your application.
 //!
-//! # What it does
-//!
-//! - **Daemon-child dispatch** via an environment marker (no argv flag — your
-//!   CLI surface stays entirely yours; the daemon child's argv is just
-//!   `[argv0]`).
-//! - **fork+exec re-exec** of the current binary (`/proc/self/exe` on Linux, so
-//!   the daemon runs the exact same inode as the parent even if the binary on
-//!   disk was replaced mid-run).
-//! - **Build-id handshake**: the daemon proves it's the binary the parent meant
-//!   to spawn before either side deserializes anything typed.
-//! - **Typed RPC**: [`RpcClient`] / [`RpcServer`] over pipes, postcard-encoded,
-//!   with EOF-based liveness (a dead peer is an error, not a hang). The daemon
-//!   child's argv is empty, so any config it needs (typically logging) travels
-//!   as an ordinary first request.
-//! - **Daemon hygiene**: `setsid` + a second fork (so the daemon is never a
-//!   session leader and can't acquire a controlling terminal), `chdir("/")`,
-//!   single-claim guard on the inherited fds, [`detach_stdio`] for when your
-//!   daemon is ready to let go of the terminal.
-//! - **`#[daemonizable::main]`**: put it on your `impl Daemonizable` block and
-//!   the correct `main` — a single [`run`]`::<MyApp>()` call and nothing else —
-//!   is generated for you.
+//! The channel between the two processes carries your own
+//! [`Daemonizable::Request`] / [`Daemonizable::Response`] values, serialized
+//! and framed for you. (An internal handshake also rides the same channel to
+//! confirm both processes are the same build, but that happens before any of
+//! your types are touched and is invisible to your code.)
 //!
 //! # Example
 //!
@@ -87,6 +78,55 @@
 //! and the
 //! macro's expansion is covered by the trybuild snapshots in
 //! `daemonizable-e2e-tests/tests/macro_ui/`.)
+//!
+//! # Why use this library?
+//!
+//! - **You find out whether the daemon started.**
+//!   [`Daemonizer::spawn_daemon`] blocks until the daemon is confirmed up. A
+//!   daemon that fails to launch surfaces as a typed error in the parent, not
+//!   a silent success — this is the single biggest thing the traditional Unix
+//!   daemonization dance gets wrong (spelled out below).
+//! - **A live channel, not a fire-and-forget fork.** The parent keeps talking
+//!   to the daemon over a typed request/response channel: send it configuration
+//!   as a first request, wait until it reports *its* notion of "ready" before
+//!   exiting, and so on. If the daemon dies, the next call returns an error
+//!   rather than hanging forever.
+//! - **One binary, no version skew.** The daemon is a relaunch of the exact
+//!   same executable, so there is no separate `myapp-daemon` binary to build,
+//!   ship, and accidentally mismatch against the CLI that spawned it.
+//! - **Safe to daemonize from an async program.** Because the daemon starts as
+//!   a fresh process rather than a frozen copy of yours, you can spawn it with
+//!   a tokio runtime or thread pool already running — something a plain
+//!   `fork()` cannot do safely.
+//! - **Clean daemon by default.** The daemon runs in its own session, detached
+//!   from any controlling terminal, with its working directory at `/` and no
+//!   accidentally-inherited file descriptors; call [`detach_stdio`] to let go
+//!   of the terminal's stdio once you are ready. Nothing else is installed that
+//!   you did not ask for.
+//! - **A one-line `main`.** `#[daemonizable::main]` writes the whole `main` for
+//!   you; there is no boilerplate to get subtly wrong.
+//!
+//! # When to reach for something else
+//!
+//! This library is a good fit for daemons a *user* launches from a shell —
+//! mount helpers, agents, and the like. It is not always the right tool:
+//!
+//! - **A service manager already supervises your process.** If systemd,
+//!   launchd, or a container runtime runs you, don't self-daemonize at all: run
+//!   in the foreground and report readiness the way the manager expects (e.g.
+//!   `sd_notify`). Self-backgrounding actively gets in such a manager's way.
+//! - **You want fire-and-forget backgrounding with batteries included.** Crates
+//!   such as `daemonize` and `fork` ship pid-file locking, privilege dropping,
+//!   `chroot`, and `umask` control that this library does not have yet. If you
+//!   don't need to know whether the daemon came up, and you can guarantee no
+//!   thread has started before you fork, one of those can be a smaller choice.
+//! - **Your `main` can't cooperate.** Relaunching the binary needs your
+//!   executable to be the entry point (a wrapper script breaks it) and, on
+//!   Linux, needs `/proc` mounted.
+//!
+//! The sections below make the case in full: why relaunching the binary
+//! (fork+exec) beats a plain fork, why the readiness handshake matters, how the
+//! specific alternative crates compare, and what this approach costs.
 //!
 //! # Why fork+exec? A comparison with the alternatives
 //!
