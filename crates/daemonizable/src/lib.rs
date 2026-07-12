@@ -27,19 +27,34 @@
 //!
 //! # Example
 //!
-//! `src/main.rs` — the attribute generates `main`, so this is the whole file:
+//! A typical daemon: the foreground process hands the daemon its startup
+//! configuration, waits until the daemon confirms it came up, and then exits —
+//! leaving the daemon running in the background. `src/main.rs` in full (the
+//! attribute generates `main`, so this is the whole file):
 //!
 //! ```ignore
 //! use std::process::ExitCode;
+//! use std::time::Duration;
 //!
-//! use daemonizable::{Daemonizable, Daemonizer, RpcServer};
+//! use daemonizable::{detach_stdio, Daemonizable, Daemonizer, RpcServer};
+//! use serde::{Deserialize, Serialize};
 //!
 //! struct MyApp;
 //!
+//! /// Startup configuration the foreground process hands to the daemon.
+//! /// The daemon's argv is empty, so this is how it learns what to do.
+//! #[derive(Serialize, Deserialize)]
+//! struct Config {
+//!     workdir: String,
+//!     poll_interval_secs: u64,
+//! }
+//!
 //! #[daemonizable::main]
 //! impl Daemonizable for MyApp {
-//!     type Request = String;
-//!     type Response = String;
+//!     type Request = Config;
+//!     // The daemon reports whether its startup succeeded, so the foreground
+//!     // can exit non-zero if the daemon failed to come up.
+//!     type Response = Result<(), String>;
 //!
 //!     fn build_id() -> String {
 //!         format!("my-app {}", env!("CARGO_PKG_VERSION"))
@@ -47,20 +62,63 @@
 //!
 //!     fn run_foreground(daemonizer: Daemonizer<Self>) -> ExitCode {
 //!         // This is your `main`: parse arguments however you like, then
-//!         // daemonize whenever (and only if) you decide to.
+//!         // start the daemon once you know what it should do.
 //!         let mut rpc = daemonizer.spawn_daemon().unwrap();
-//!         rpc.send_request(&"hello".to_string()).unwrap();
-//!         println!("daemon says: {}", rpc.recv_response_blocking().unwrap());
-//!         ExitCode::SUCCESS
+//!
+//!         // Hand the daemon its startup configuration...
+//!         rpc.send_request(&Config {
+//!             workdir: "/var/lib/my-app".to_string(),
+//!             poll_interval_secs: 30,
+//!         })
+//!         .unwrap();
+//!
+//!         // ...and wait for it to confirm it actually started before we exit.
+//!         match rpc.recv_response_blocking() {
+//!             Ok(Ok(())) => {
+//!                 println!("daemon is up; leaving it running in the background");
+//!                 // Returning drops `rpc`, closing our end of the channel. The
+//!                 // daemon has stopped listening on it, so it keeps running.
+//!                 ExitCode::SUCCESS
+//!             }
+//!             Ok(Err(err)) => {
+//!                 eprintln!("daemon failed to start: {err}");
+//!                 ExitCode::FAILURE
+//!             }
+//!             Err(err) => {
+//!                 eprintln!("daemon died during startup: {err}");
+//!                 ExitCode::FAILURE
+//!             }
+//!         }
 //!     }
 //!
-//!     fn run_daemon(mut rpc: RpcServer<String, String>) -> ! {
-//!         // Runs in the re-exec'd daemon child. Serve requests until the
-//!         // parent drops its client (EOF), then exit.
-//!         while let Ok(request) = rpc.next_request() {
-//!             rpc.send_response(&format!("echo: {request}")).unwrap();
+//!     fn run_daemon(mut rpc: RpcServer<Config, Result<(), String>>) -> ! {
+//!         // Runs in the re-exec'd daemon child. First receive the startup
+//!         // configuration the foreground process sent.
+//!         let config = rpc
+//!             .next_request()
+//!             .expect("parent closed before sending config");
+//!
+//!         // Do whatever setup the config asks for. If it fails, report the
+//!         // failure so the foreground's `spawn_daemon` caller can exit non-zero.
+//!         if let Err(err) = std::env::set_current_dir(&config.workdir) {
+//!             let _ = rpc.send_response(&Err(format!("bad workdir: {err}")));
+//!             std::process::exit(1);
 //!         }
-//!         std::process::exit(0)
+//!
+//!         // Setup succeeded — tell the foreground it's safe to exit.
+//!         rpc.send_response(&Ok(())).unwrap();
+//!
+//!         // The foreground can now leave. Detach from its terminal so our
+//!         // output doesn't land on the user's shell, and drop `rpc`: from here
+//!         // on we no longer depend on the parent being alive.
+//!         detach_stdio().unwrap();
+//!         drop(rpc);
+//!
+//!         // Our real work: a long-lived loop that outlives the foreground.
+//!         loop {
+//!             // ...do periodic work using `config`...
+//!             std::thread::sleep(Duration::from_secs(config.poll_interval_secs));
+//!         }
 //!     }
 //! }
 //! ```
