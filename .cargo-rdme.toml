@@ -1,0 +1,21 @@
+# Configuration for cargo-rdme (https://github.com/orium/cargo-rdme), which
+# generates crates/daemonizable/README.md from the crate-root documentation in
+# crates/daemonizable/src/lib.rs. The repo-root README.md is a symlink to that
+# generated file, so lib.rs is the single source of truth for the docs.rs front
+# page and for the GitHub / crates.io READMEs alike.
+#
+# One-time setup (needed to rewrite the crate's intra-doc links into docs.rs
+# URLs — cargo-rdme runs rustdoc's JSON output on a pinned nightly for this; the
+# crate itself still builds only on stable):
+#
+#   cargo install cargo-rdme --version 2.1.0
+#   cargo rdme install-rust-toolchain-for-intralinks
+#
+# Then:
+#
+#   Regenerate after editing the lib.rs module docs:   cargo rdme
+#   Verify it is in sync (also enforced in CI):        cargo rdme --check
+#
+# `workspace-project` selects which workspace member cargo-rdme reads from; it
+# is required because this workspace has no root package.
+workspace-project = "daemonizable"

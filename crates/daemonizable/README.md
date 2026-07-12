@@ -1,12 +1,20 @@
 # daemonizable
 
+<!-- cargo-rdme start -->
+
 Run your CLI application as a foreground process or have it fork+exec itself
 into a background daemon — with a typed RPC channel between the spawning
 parent and the daemon.
 
-The library is deliberately policy-free: it handles only the process
-mechanics and imposes no argument parser, logging framework, panic hook, or
-startup banner on your application.
+Implement [`Daemonizable`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizable/trait.Daemonizable.html) for your app type and let [`run`](https://docs.rs/daemonizable/latest/daemonizable/app/run/fn.run.html) drive the
+process-role dispatch. The library is deliberately policy-free: it handles
+only the process mechanics and imposes no argument parser, logging
+framework, panic hook, or startup banner on your application.
+
+The typed RPC channel between parent and daemon carries the app's own
+[`Daemonizable::Request`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizable/trait.Daemonizable.html#associatedtype.Request) / [`Daemonizable::Response`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizable/trait.Daemonizable.html#associatedtype.Response) types; the framework's
+build-id handshake travels out-of-band on the same pipe, before the typed
+phase and invisible to app code.
 
 ## What it does
 
@@ -18,23 +26,23 @@ startup banner on your application.
   disk was replaced mid-run).
 - **Build-id handshake**: the daemon proves it's the binary the parent meant
   to spawn before either side deserializes anything typed.
-- **Typed RPC**: `RpcClient<Request, Response>` / `RpcServer<Request,
-  Response>` over pipes, postcard-encoded, with EOF-based liveness (a dead
-  peer is an error, not a hang). The daemon child's argv is empty, so any
-  config it needs (typically logging) travels as an ordinary first request.
+- **Typed RPC**: [`RpcClient`](https://docs.rs/daemonizable/latest/daemonizable/ipc/rpc/client/struct.RpcClient.html) / [`RpcServer`](https://docs.rs/daemonizable/latest/daemonizable/ipc/rpc/server/struct.RpcServer.html) over pipes, postcard-encoded,
+  with EOF-based liveness (a dead peer is an error, not a hang). The daemon
+  child's argv is empty, so any config it needs (typically logging) travels
+  as an ordinary first request.
 - **Daemon hygiene**: `setsid` + a second fork (so the daemon is never a
   session leader and can't acquire a controlling terminal), `chdir("/")`,
-  single-claim guard on the inherited fds, `detach_stdio()` for when your
+  single-claim guard on the inherited fds, [`detach_stdio`](https://docs.rs/daemonizable/latest/daemonizable/ipc/fn.detach_stdio.html) for when your
   daemon is ready to let go of the terminal.
-- **`#[daemonizable::main]`**: put it on your `impl Daemonizable` block and the
-  correct `main` — a single `run::<MyApp>()` call and nothing else — is
-  generated for you.
+- **`#[daemonizable::main]`**: put it on your `impl Daemonizable` block and
+  the correct `main` — a single [`run`](https://docs.rs/daemonizable/latest/daemonizable/app/run/fn.run.html)`::<MyApp>()` call and nothing else —
+  is generated for you.
 
 ## Example
 
 `src/main.rs` — the attribute generates `main`, so this is the whole file:
 
-```rust,no_run
+```rust
 use std::process::ExitCode;
 
 use daemonizable::{Daemonizable, Daemonizer, RpcServer};
@@ -72,13 +80,17 @@ impl Daemonizable for MyApp {
 
 `#[daemonizable::main]` comes from the default-on `macros` feature. It leaves
 the impl untouched and appends
-`fn main() -> ExitCode { daemonizable::run::<MyApp>() }` — the entire `main` an
-application on this library should have. Build with `default-features = false`
-and the attribute is gone; write that one line yourself, and keep `main` to
-exactly that one line: the re-exec'd daemon child runs the same `main`, so
-anything in front of `run` runs in the daemon too (a thread spawned there
-exists in the child as well). The attribute guarantees an empty preamble by
-construction.
+`fn main() -> ExitCode { daemonizable::run::<MyApp>() }` — the entire `main`
+an application on this library should have. Build with
+`default-features = false` and the attribute is gone; write that one line
+yourself, and keep `main` to exactly that one line: the re-exec'd daemon
+child runs the same `main`, so anything in front of [`run`](https://docs.rs/daemonizable/latest/daemonizable/app/run/fn.run.html) runs in the
+daemon too (a thread spawned there exists in the child as well). The
+attribute guarantees an empty preamble by construction. (The example above
+is shown, not compiled; the compiled equivalent is the doctest on [`run`](https://docs.rs/daemonizable/latest/daemonizable/app/run/fn.run.html),
+and the
+macro's expansion is covered by the trybuild snapshots in
+`daemonizable-e2e-tests/tests/macro_ui/`.)
 
 ## Why fork+exec? A comparison with the alternatives
 
@@ -96,10 +108,10 @@ deliberately rejects:
    launched it.
 
 Both are real, documented problems, not stylistic gripes. (What this library
-keeps from the classic ritual is the *second* fork — it performs `daemon(7)`'s
-second fork itself, but *after* `exec`, in the fresh single-threaded child,
-where it is unconditionally safe. What it rejects is fork-without-exec and
-cord-cutting, not the second fork.)
+keeps from the classic ritual is the *second* fork — it performs
+`daemon(7)`'s second fork itself, but *after* `exec`, in the fresh
+single-threaded child, where it is unconditionally safe. What it rejects is
+fork-without-exec and cord-cutting, not the second fork.)
 
 ### fork without exec: the daemon inherits a broken process image
 
@@ -137,7 +149,8 @@ daemon *is* the forked image. The fork-based crates leave this assumption
 implicit.
 
 fork+exec is the escape hatch POSIX itself names: the async-signal-safe
-restriction applies only *until the exec*. [`execve(2)`](https://man7.org/linux/man-pages/man2/execve.2.html)
+restriction applies only *until the exec*.
+[`execve(2)`](https://man7.org/linux/man-pages/man2/execve.2.html)
 resets the process image — all other threads are gone by construction
 ("mutexes, condition variables, and other pthreads objects are not
 preserved"), caught signal dispositions revert to their defaults, the
@@ -194,7 +207,7 @@ so the mounting parent stays alive until the mount actually succeeded and
 can report failure otherwise.
 
 daemonizable builds that handshake in as the core primitive instead of an
-afterthought. `spawn_daemon` blocks through the build-id handshake; a child
+afterthought. [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) blocks through the build-id handshake; a child
 that fails it is killed, reaped, and surfaced as a typed error — your CLI
 prints a real message and exits non-zero. And
 it doesn't stop at "started": the RPC channel stays open, so the parent
@@ -262,7 +275,7 @@ here; and `systemctl daemon-reexec` re-execs PID 1 itself.
 An honest comparison cuts both ways. The price of fork+exec plus a typed
 channel:
 
-- **The binary must cooperate.** `run::<App>()` has to be the whole of
+- **The binary must cooperate.** [`run`](https://docs.rs/daemonizable/latest/daemonizable/app/run/fn.run.html)`::<App>()` has to be the whole of
   `main` — `#[daemonizable::main]` guarantees that by construction, but the
   binary being re-exec'd must still be *your* binary, so a wrapper-script
   entry point breaks re-exec. Fork-based crates work on any code with zero
@@ -292,7 +305,7 @@ channel:
   signal-mask reset, and log-file stdio redirection are currently the
   application's job.
   *TODO (planned): add these as opt-in options, applied in the daemon
-  child before entering `run_daemon` — carried by a framework-owned
+  child before entering [`Daemonizable::run_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizable/trait.Daemonizable.html#tymethod.run_daemon) — carried by a framework-owned
   bootstrap frame reintroduced with the batteries (config-in, result-out),
   distinct from the removed app-facing payload — so that every
   failure — an "already running" pid-file lock conflict, a failed
@@ -306,21 +319,21 @@ channel:
   harmless; the lock can even be taken in the parent before spawning —
   `flock` belongs to the open file description, which the daemon inherits
   across the exec and the second fork — so "already running" fails before a
-  child is ever spawned), `initgroups`/`setgid`/`setuid` privilege drop, optional
-  `chroot`, explicit `umask` (currently silently inherited — it survives
-  `execve`), signal-mask reset (the mask, unlike handlers, also survives
-  `execve`), fd hygiene for non-CLOEXEC fds inherited from the CLI's own
-  environment (`close_range(5, ~0)` on Linux, sparing the pipe fds 3/4),
-  and `detach_stdio` gaining redirect-to-log-file targets (log files
-  opened before the privilege drop, so root-owned log directories work).
-  Defaults stay policy-free: every battery is opt-in.*
+  child is ever spawned), `initgroups`/`setgid`/`setuid` privilege drop,
+  optional `chroot`, explicit `umask` (currently silently inherited — it
+  survives `execve`), signal-mask reset (the mask, unlike handlers, also
+  survives `execve`), fd hygiene for non-CLOEXEC fds inherited from the
+  CLI's own environment (`close_range(5, ~0)` on Linux, sparing the pipe
+  fds 3/4), and `detach_stdio` gaining redirect-to-log-file targets (log
+  files opened before the privilege drop, so root-owned log directories
+  work). Defaults stay policy-free: every battery is opt-in.*
 - **Initialization runs twice.** The daemon re-runs the dynamic loader and
   everything before `run` (with `#[daemonizable::main]`, that's nothing);
   parent state must be shipped explicitly via the typed RPC channel.
 - **If systemd manages your process, don't daemonize at all.**
   `daemon(7)`'s "new-style daemons" doctrine is that services should run
   in the foreground and report readiness via `sd_notify(3)`; SysV-style
-  self-daemonization "interfere[s] with process monitoring, file
+  self-daemonization "interfere\[s\] with process monitoring, file
   descriptor passing, and other functionality of the service manager".
   That applies to this library too. daemonizable is for processes a *user*
   launches — mount helpers, agents started from a shell — which is exactly
@@ -335,25 +348,28 @@ faith into an operation that can fail loudly.
 - The daemon is a **grandchild**: the re-exec'd child forks a second time
   after `setsid` (the classic double fork, `daemon(7)` step 7). The
   session-leader intermediate exits immediately and is reaped by
-  `spawn_daemon` itself, and the surviving daemon — never a session leader, so
-  it can never acquire a controlling terminal — is orphaned to init (or the
-  nearest `PR_SET_CHILD_SUBREAPER` ancestor, e.g. a systemd user manager) at
-  spawn time. A **successful** spawn leaves the caller no child and no zombie,
-  regardless of the caller's own lifetime.
+  [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) itself, and the surviving daemon — never a session leader,
+  so it can never acquire a controlling terminal — is orphaned to init (or
+  the nearest `PR_SET_CHILD_SUBREAPER` ancestor, e.g. a systemd user
+  manager) at spawn time. A **successful** spawn leaves the caller no child
+  and no zombie, regardless of the caller's own lifetime.
 - A **failed** spawn (handshake mismatch or spawn failure) is killed via its
   process group (`kill(-child_pid, SIGKILL)`, which reaches the grandchild;
-  ESRCH falls back to a direct kill for a child that died before `setsid`) and
-  the intermediate reaped before the error is returned. A grandchild the group
-  signal misses (it left the group via its own `setsid`/`setpgid`) still
-  self-terminates via pipe EOF within ~10 s once the client is dropped — so
-  failed-spawn teardown of the daemon is asynchronous, not synchronous with the
-  returned error.
-- Two caveats on `spawn_daemon` itself: it can block indefinitely if the
-  intermediate is externally SIGSTOPped/ptraced in the instant before it exits,
-  and the caller must not concurrently reap arbitrary children (e.g. a
-  `SIGCHLD` handler that calls `waitpid(-1)`) during the spawn, which could reap
-  the intermediate first and defeat the cleanup's pid bookkeeping.
-- `spawn_daemon` is safe to call with a tokio runtime already running —
+  ESRCH falls back to a direct kill for a child that died before `setsid`)
+  and the intermediate reaped before the error is returned. A grandchild the
+  group signal misses (it left the group via its own `setsid`/`setpgid`)
+  still self-terminates via pipe EOF within ~10 s once the client is dropped
+  — so failed-spawn teardown of the daemon is asynchronous, not synchronous
+  with the returned error.
+- Two caveats on [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) itself: it can block
+  indefinitely if the intermediate is externally SIGSTOPped/ptraced in the
+  instant before it exits, since it is reaped with a blocking `wait()` (the
+  build-id handshake recv is timeout-bounded, so a wedged child during the
+  handshake is not); and the caller must not concurrently reap arbitrary
+  children (e.g. a `SIGCHLD` handler that calls `waitpid(-1)`) during the
+  spawn, which could reap the intermediate first and defeat the cleanup's
+  pid bookkeeping.
+- [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) is safe to call with a tokio runtime already running —
   fork+exec hands the daemon a fresh process image, so the fork-vs-threads
   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
   doesn't apply (the second fork runs in that fresh single-threaded image,
@@ -369,14 +385,16 @@ faith into an operation that can fail loudly.
 - `macros` *(default)*: re-exports `#[daemonizable::main]` from the
   `daemonizable-macros` companion crate — the recommended way to write your
   `main`. Disable it and you hand-write
-  `fn main() -> ExitCode { daemonizable::run::<MyApp>() }` instead; nothing else
-  about the API changes.
-- `testutils`: test-only helpers (e.g. `RpcConnection::into_server_and_client`)
-  so downstream crates can drive the IPC primitives in their own unit tests.
-  Not part of the stable surface.
+  `fn main() -> ExitCode { daemonizable::run::<MyApp>() }` instead; nothing
+  else about the API changes.
+- `testutils`: test-only helpers (e.g.
+  `RpcConnection::into_server_and_client`) so downstream crates can drive the
+  IPC primitives in their own unit tests. Not part of the stable surface.
 
 Unix-only (Linux is the primary target; macOS works with caveats documented
 in the source).
+
+<!-- cargo-rdme end -->
 
 ## License
 
