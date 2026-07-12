@@ -45,3 +45,11 @@ path = "src/bin/daemonizable_test_background.rs"
 [[bin]]
 name = "daemonizable-test-app"
 path = "src/bin/daemonizable_test_app.rs"
+
+# Helper for tests/detach_stdio_severs_inherited_stdio.rs. Writes sentinels to
+# stdout/stderr on either side of a `detach_stdio` call so the test can assert
+# pre-detach output reaches the inherited stdio and post-detach output is
+# swallowed by /dev/null.
+[[bin]]
+name = "daemonizable-test-detach-stdio"
+path = "src/bin/daemonizable_test_detach_stdio.rs"
