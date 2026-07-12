@@ -182,6 +182,20 @@ jobs:
   # ---------------------------------------------------------------------------
   # Documentation: build the docs with intra-doc-link and other rustdoc
   # warnings treated as errors, so dead links and broken doc examples fail CI.
+  #
+  # Also verify README.md is in sync with the crate docs. The crate-root docs in
+  # crates/daemonizable/src/lib.rs are the single source of truth; cargo-rdme
+  # generates crates/daemonizable/README.md (the repo-root README.md is a
+  # symlink to it) between the `<!-- cargo-rdme -->` markers, rewriting the
+  # crate's intra-doc links (`[`Type`]`) into docs.rs URLs. `cargo rdme --check`
+  # (config in .cargo-rdme.toml) exits non-zero if the committed README no longer
+  # matches the docs, i.e. someone edited lib.rs without running `cargo rdme`.
+  #
+  # NOTE: the crate itself only ever builds on stable. cargo-rdme uses a pinned
+  # nightly toolchain SOLELY to run rustdoc's JSON output when resolving those
+  # intra-doc links; that nightly never compiles or tests daemonizable. Both the
+  # cargo-rdme version and its nightly are pinned so the generated README (and
+  # therefore --check) stays reproducible.
   # ---------------------------------------------------------------------------
   docs:
     name: docs
@@ -194,6 +208,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --all-features --no-deps
+      - name: Install cargo-rdme
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-rdme@2.1.0
+      - name: Install cargo-rdme's pinned nightly (for intra-doc link resolution only)
+        run: cargo rdme install-rust-toolchain-for-intralinks
+      - name: Check README is in sync with the crate docs
+        run: cargo rdme --check
 
   # ---------------------------------------------------------------------------
   # Semver: compare the public API of the publishable crates against the last
