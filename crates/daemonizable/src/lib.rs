@@ -27,10 +27,11 @@
 //!
 //! # Example
 //!
-//! Implement [`Daemonizable`] on your app type and attach
-//! `#[daemonizable::main]`, which writes the whole `main` for you. Two methods
-//! carry the entire model: a foreground entry point (your real `main`) that
-//! launches the daemon, and the daemon's own entry point.
+//! This `#[daemonizable::main] impl` block takes the place of a traditional
+//! `main` function: attach the attribute to your `impl Daemonizable for MyApp`
+//! and it generates the `main` for you. Two methods carry the entire model — a
+//! foreground entry point (your real `main`) that launches the daemon, and the
+//! daemon's own entry point.
 //!
 //! ```ignore
 //! use std::process::ExitCode;
