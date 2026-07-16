@@ -8,17 +8,25 @@
 //! relocates `/dev/null` above the std range first; this helper proves the
 //! std fd ends up open and pointing at `/dev/null`.
 //!
-//! Usage: `argv[1]` is the std fd to pre-close (`0`, `1`, or `2`). The helper
-//! closes it, calls `detach_stdio`, then checks that *every* std fd (0/1/2) is
-//! open and is a character device (as `/dev/null` is), not closed.
+//! Usage: `argv[1]` is the std fd to pre-close (`0`, `1`, or `2`). Because
+//! `open` hands back the lowest-numbered *closed* descriptor, the helper first
+//! makes sure every std fd *below* the target is open (whatever stdio the test
+//! harness happened to inherit), so `/dev/null` deterministically reopens onto
+//! the target fd rather than some lower hole. It then closes the target, calls
+//! `detach_stdio`, and checks that *every* std fd (0/1/2) ends up open and is
+//! specifically `/dev/null` — a character device whose `st_rdev` matches the
+//! `/dev/null` device node — not closed and not some other stream.
 //!
 //! It reports only through its exit code — it must not write to stdout/stderr,
 //! since one of those may be the fd under test:
-//!   0  success: all std fds open and char devices after detach
+//!   0  success: all std fds reopened onto /dev/null after detach
 //!   2  bad arguments
 //!   3  `detach_stdio` itself returned an error
 //!   4  a std fd is still closed after detach (the bug this guards against)
-//!   5  a std fd is open but not a character device (unexpected)
+//!   5  a std fd is open but is not /dev/null (unexpected)
+//!   6  test setup failed to normalize the inherited std fds
+
+use std::os::fd::AsRawFd;
 
 fn main() {
     let Some(arg) = std::env::args().nth(1) else {
@@ -29,6 +37,25 @@ fn main() {
         _ => std::process::exit(2),
     };
 
+    // The device identity of `/dev/null`, read before we disturb any std fd.
+    // Each fd's `st_rdev` is compared against this so "open" specifically means
+    // "reopened onto /dev/null", not merely "some character device" (an
+    // inherited terminal is also a char device). Probed at runtime rather than
+    // hard-coded, since the (major, minor) of /dev/null differs across OSes.
+    let Some(devnull_rdev) = devnull_rdev() else {
+        std::process::exit(6);
+    };
+
+    // `open` returns the lowest-numbered *closed* fd, so `/dev/null` only lands
+    // on `to_close` inside `detach_stdio` if every lower std fd is already open.
+    // Normalize that here, independent of whatever stdio the harness inherited,
+    // so each iteration truly exercises its intended loop position.
+    for fd in 0..to_close {
+        if !ensure_open(fd) {
+            std::process::exit(6);
+        }
+    }
+
     // Pre-close the chosen std fd, so `/dev/null` will reopen onto that low
     // number inside `detach_stdio`.
     // SAFETY: closing a raw fd is always safe; a bad fd just returns EBADF.
@@ -38,18 +65,56 @@ fn main() {
         std::process::exit(3);
     }
 
-    // After detaching, all three std fds must be open and point at /dev/null
-    // (a character device). A closed fd (fstat → EBADF) is the bug.
+    // After detaching, all three std fds must be open and point at /dev/null.
+    // A closed fd (fstat → EBADF) is the bug; a live fd with a different
+    // identity means detach redirected it somewhere other than /dev/null.
     for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `fstat` reads into a valid out-param; a closed fd is EBADF.
         if unsafe { libc::fstat(fd, &mut st) } < 0 {
             // Not open — detach left it closed.
             std::process::exit(4);
         }
-        if st.st_mode & libc::S_IFMT != libc::S_IFCHR {
+        if st.st_mode & libc::S_IFMT != libc::S_IFCHR || st.st_rdev != devnull_rdev {
             std::process::exit(5);
         }
     }
 
     std::process::exit(0);
+}
+
+/// `st_rdev` of the `/dev/null` device node, or `None` if it can't be stat'd.
+/// The probe fd is opened and dropped within this call, so it never perturbs
+/// the std fds the rest of the helper manages.
+fn devnull_rdev() -> Option<libc::dev_t> {
+    let devnull = std::fs::File::open("/dev/null").ok()?;
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: `fstat` on a live fd, reading into a valid out-param.
+    if unsafe { libc::fstat(devnull.as_raw_fd(), &mut st) } < 0 {
+        return None;
+    }
+    Some(st.st_rdev)
+}
+
+/// Ensure std fd `fd` is open, parking `/dev/null` on it if the harness left it
+/// closed. Returns `false` on an unexpected failure. The parked descriptor is
+/// intentionally left as a bare fd number (like the std fds themselves) — this
+/// short-lived helper never owns or closes it.
+fn ensure_open(fd: i32) -> bool {
+    // SAFETY: `F_GETFD` only reads the descriptor flags (EBADF if closed).
+    if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
+        return true; // already open
+    }
+    // Closed — open /dev/null and move it onto `fd` if it didn't land there.
+    // SAFETY: `open` with a valid C path; `dup2`/`close` on live raw fds.
+    let opened = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
+    if opened < 0 {
+        return false;
+    }
+    if opened == fd {
+        return true;
+    }
+    let moved = unsafe { libc::dup2(opened, fd) };
+    unsafe { libc::close(opened) };
+    moved >= 0
 }

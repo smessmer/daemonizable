@@ -32,8 +32,11 @@ fn detach_stdio_redirects_a_preclosed_std_fd_to_dev_null() {
             .expect("spawn the pre-closed detach_stdio helper");
         assert!(
             status.success(),
-            "helper for pre-closed fd {fd} exited with {status:?} (exit 4 = the fd was \
-             left closed): detach_stdio must leave all std fds open and pointing at /dev/null"
+            "helper for pre-closed fd {fd} exited with {status:?}: detach_stdio must leave \
+             all std fds open and pointing at /dev/null. Exit codes: 3 = detach_stdio \
+             returned an error; 4 = a std fd was left closed (the bug this guards against); \
+             5 = a std fd is open but not /dev/null; 6 = test setup failed to normalize the \
+             inherited std fds"
         );
     }
 }
