@@ -51,7 +51,8 @@
 //!     }
 //!
 //!     fn run_daemon(rpc: RpcServer<Request, Response>) -> ! {
-//!         // implement the daemon: serve requests on the typed RPC channel
+//!         // implement the daemon: serve requests on the typed RPC channel, and
+//!         // keep running in the background long after the foreground has exited
 //!     }
 //! }
 //! ```
