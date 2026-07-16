@@ -4,7 +4,6 @@
 use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use nix::sys::stat::fstat;
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD};
@@ -76,26 +75,32 @@ where
         ("request-recv", CHILD_REQUEST_RECV_FD),
         ("response-send", CHILD_RESPONSE_SEND_FD),
     ] {
-        // Borrow the raw fd number once for both the pipe-validation `fstat` and
-        // the CLOEXEC restore below. A `BorrowedFd` closes nothing, so if the fd
-        // turns out not to be open or not a pipe we can reject it without
-        // disturbing it — and without adopting an fd we don't want to own.
+        // Probe the raw fd number with a bare `fstat` BEFORE building any fd
+        // wrapper. A hand-invoked daemon may have closed 3/4, and a `BorrowedFd`
+        // / `OwnedFd` must point at an *open* fd — whereas `libc::fstat` on a
+        // bare descriptor is defined for any int (EBADF for a closed one), so it
+        // can reject a bad fd without an I/O-safety-contract violation.
         //
-        // SAFETY: this is single-threaded daemon startup; the borrow lives only
-        // for the two `nix` calls below, during which nothing closes or reuses
-        // the fd. `borrow_raw` requires a non-`-1` descriptor, which the fixed
-        // constants 3/4 satisfy.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        let stat = fstat(borrowed).map_err(|errno| InheritedFdsError::NotOpen {
-            fd,
-            label,
-            source: errno.into(),
-        })?;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
+        // SAFETY: `std::mem::zeroed()` yields a valid `libc::stat` — a `repr(C)`
+        // struct of integer fields with no niche/validity constraints — used
+        // only as the out-buffer that `fstat` fills before any field is read.
+        let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `fstat` writes through `&mut statbuf`, a live, correctly
+        // aligned, writable `libc::stat`. `fd` is a bare int — a closed/invalid
+        // descriptor yields EBADF (handled below as `NotOpen`), never UB — and
+        // `fstat` neither takes ownership of nor closes it.
+        if unsafe { libc::fstat(fd, &mut statbuf) } < 0 {
+            return Err(InheritedFdsError::NotOpen {
+                fd,
+                label,
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        if statbuf.st_mode & libc::S_IFMT != libc::S_IFIFO {
             return Err(InheritedFdsError::NotAPipe {
                 fd,
                 label,
-                st_mode: stat.st_mode,
+                st_mode: statbuf.st_mode,
             });
         }
         // Restore FD_CLOEXEC. The parent set it on every pipe end at creation,
@@ -109,6 +114,15 @@ where
         // the parent waits on — silently defeating the liveness of
         // `recv_response_blocking`. (The symmetric effect on fd 3 delays the
         // parent's `send_request` EPIPE.)
+        //
+        // SAFETY: `fd` was just `fstat`ed as open, and `BorrowedFd` requires the
+        // fd to remain open for the borrow's duration. A concurrent close in
+        // the fstat→borrow window is ruled out by this function's `# Safety`
+        // contract, not by this code: the caller guarantees fds 3/4 are the
+        // daemon's *exclusively owned* pipe ends, so nothing else in the
+        // process may close or reuse them. (The framework path reinforces this
+        // by calling us at single-threaded daemon startup.)
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
         set_cloexec(borrowed).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
             fd,
             label,
@@ -124,8 +138,11 @@ where
     // 3/4 are the daemon's exclusively-owned inherited pipe ends;
     // `DAEMON_FDS_CLAIMED` made this the sole claim in the process, and each was
     // just `fstat`ed as an open FIFO, so each `OwnedFd` (which closes on drop) is
-    // the one and only owner. The two fd numbers are distinct (3 vs 4), so the
-    // pair does not alias each other either.
+    // the one and only owner. The same exclusive-ownership contract rules out a
+    // concurrent close/reuse between those checks and this adoption (there is an
+    // unavoidable check→adopt window when starting from a raw fd number — it is
+    // part of why this fn is `unsafe`). The two fd numbers are distinct (3 vs
+    // 4), so the pair does not alias each other either.
     let (request_recv, response_send) = unsafe {
         (
             OwnedFd::from_raw_fd(CHILD_REQUEST_RECV_FD),

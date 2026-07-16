@@ -28,7 +28,7 @@ pub(crate) fn set_cloexec(fd: BorrowedFd<'_>) -> Result<(), (&'static str, std::
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::fd::{AsFd, AsRawFd};
+    use std::os::fd::AsFd;
 
     #[test]
     fn sets_cloexec_on_a_fd_that_lacks_it() {
@@ -56,22 +56,5 @@ mod tests {
                 .contains(FdFlag::FD_CLOEXEC),
             "set_cloexec must leave FD_CLOEXEC set"
         );
-    }
-
-    #[test]
-    fn errors_on_a_closed_fd() {
-        // Grab a pipe end's fd number, then close it so the number is stale;
-        // `fcntl(F_GETFD)` on it fails with EBADF, exercising set_cloexec's
-        // error path.
-        let (sender, _recver) = interprocess::unnamed_pipe::pipe().unwrap();
-        let raw = sender.as_raw_fd();
-        drop(sender); // closes `raw`
-        // SAFETY: single-threaded test; `raw` was just closed and nothing reopens
-        // a descriptor before the call, so this borrow only drives `fcntl` to a
-        // defined EBADF. A `BorrowedFd` never closes on drop, so there is no
-        // double-close, and `raw` is a real (non-`-1`) fd number.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(raw) };
-        let err = set_cloexec(borrowed).expect_err("a bad fd must error");
-        assert_eq!(err.0, "F_GETFD");
     }
 }
