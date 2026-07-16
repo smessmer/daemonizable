@@ -184,6 +184,16 @@ pub enum DetachStdioError {
     #[error("Failed to open /dev/null while detaching daemon stdio: {0}")]
     OpenDevNull(#[source] std::io::Error),
 
+    /// Relocating the `/dev/null` descriptor off the std-fd range (0/1/2)
+    /// failed. This only arises when `/dev/null` opened *onto* one of those
+    /// numbers — i.e. that std fd was already closed when `detach_stdio` was
+    /// called — and the `fcntl(F_DUPFD_CLOEXEC)` used to move it above the
+    /// range failed. The inherited stdio is left untouched.
+    #[error(
+        "fcntl(F_DUPFD_CLOEXEC) failed relocating /dev/null off the std-fd range while detaching daemon stdio: {0}"
+    )]
+    Relocate(#[source] std::io::Error),
+
     /// `dup2(/dev/null, target)` failed for one of stdin/stdout/stderr. Any
     /// earlier targets in the stdin→stdout→stderr order were already
     /// redirected before this one failed.
