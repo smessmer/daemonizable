@@ -153,6 +153,13 @@ macro's expansion is covered by the trybuild snapshots in
   as a first request, wait until it reports *its* notion of "ready" before
   exiting, and so on. If the daemon dies, the next call returns an error
   rather than hanging forever.
+- **One foreground, many daemons.** The daemon is a *separate* fork+exec'd
+  process, not the foreground turning itself into the daemon, so one CLI can
+  launch several independent daemons and hold a live typed channel to each —
+  spawning even concurrently from multiple threads, since [`Daemonizer`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html) is
+  `Copy + Send + Sync`. The fork-based daemonizers can't: they turn the
+  *calling* process into the daemon (fork, parent exits), a one-shot,
+  no-channel operation that leaves no foreground behind to spawn another.
 - **One binary, no version skew.** The daemon is a relaunch of the exact
   same executable, so there is no separate `myapp-daemon` binary to build,
   ship, and accidentally mismatch against the CLI that spawned it.
