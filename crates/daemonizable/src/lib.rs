@@ -179,8 +179,11 @@
 //!   don't need to know whether the daemon came up, and you can guarantee no
 //!   thread has started before you fork, one of those can be a smaller choice.
 //! - **Your `main` can't cooperate.** Relaunching the binary needs your
-//!   executable to be the entry point (a wrapper script breaks it) and, on
-//!   Linux, needs `/proc` mounted.
+//!   executable to be the entry point (a wrapper script breaks it). On Linux
+//!   it prefers `/proc/self/exe` for an exact same-inode re-exec, but falls
+//!   back to `AT_EXECFN` / `argv[0]` when `/proc` isn't mounted, so a bare
+//!   chroot or minimal container still works (losing only the same-inode
+//!   guarantee, which the build-id handshake backstops).
 //!
 //! The sections below make the case in full: why relaunching the binary
 //! (fork+exec) beats a plain fork, why the readiness handshake matters, how the
@@ -374,11 +377,13 @@
 //! format differs silently.
 //!
 //! Re-exec'ing the current binary makes skew structurally impossible on
-//! Linux: [`/proc/self/exe`](https://man7.org/linux/man-pages/man5/proc_pid_exe.5.html)
+//! Linux whenever `/proc` is mounted:
+//! [`/proc/self/exe`](https://man7.org/linux/man-pages/man5/proc_pid_exe.5.html)
 //! is a kernel magic link to the running image's inode, so the daemon is
 //! byte-identical to the parent even if the on-disk binary was replaced by a
 //! package upgrade mid-run, and the build-id handshake catches whatever the
-//! platform can't guarantee (the macOS `current_exe()` fallback, operator
+//! platform can't guarantee (the macOS `current_exe()` fallback, the Linux
+//! `AT_EXECFN` / `argv[0]` fallback used when `/proc` is absent, operator
 //! mistakes). This is well-trodden ground: Docker/Moby ships a dedicated
 //! [`reexec` package](https://pkg.go.dev/github.com/moby/sys/reexec) whose
 //! `Self()` returns the literal string `/proc/self/exe` ("safe to delete or
@@ -397,15 +402,18 @@
 //!   binary being re-exec'd must still be *your* binary, so a wrapper-script
 //!   entry point breaks re-exec. Fork-based crates work on any code with zero
 //!   cooperation.
-//! - **procfs.** On Linux the re-exec needs `/proc` mounted (bare chroots and
-//!   minimal containers may not have it); other platforms fall back to
-//!   `current_exe()` plus the handshake.
-//!   *TODO: degrade gracefully instead of failing — when `/proc/self/exe`
-//!   is unavailable, fall back to `getauxval(AT_EXECFN)` / `argv[0]`
-//!   resolution (`current_exe()` is not a fallback on Linux; it reads
-//!   `/proc/self/exe` itself). The fallback gives up the same-inode
-//!   guarantee, but the build-id handshake already turns a swapped binary
-//!   into a clean error rather than a wrong daemon.*
+//! - **procfs (soft dependency).** On Linux the re-exec prefers `/proc/self/exe`
+//!   for its exact same-inode guarantee, but no longer *requires* `/proc`: when
+//!   it isn't mounted (bare chroots, minimal containers) the spawn degrades
+//!   gracefully to the exec-time pathname the kernel recorded in the auxiliary
+//!   vector (`getauxval(AT_EXECFN)`), and then to `argv[0]`, instead of failing.
+//!   (`current_exe()` is *not* the Linux fallback: it reads `/proc/self/exe`
+//!   itself, so it fails whenever the primary path does.) The fallback gives up
+//!   the same-inode guarantee — a package upgrade mid-run could swap the on-disk
+//!   binary, and a relative `argv[0]` depends on the cwd — but the build-id
+//!   handshake already turns a swapped or wrong binary into a clean typed error
+//!   rather than a silently wrong daemon. Other platforms use `current_exe()`
+//!   plus the handshake.
 //! - **At most a narrow spawn-time race on macOS.** Because the daemon is
 //!   created with fork+exec, a running tokio runtime (or any thread pool) is
 //!   fine to spawn under — the parent-side restriction is *not* "no tokio." On

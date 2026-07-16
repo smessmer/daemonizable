@@ -23,7 +23,7 @@ use crate::ipc::error::SpawnDaemonError;
 
 /// Resolve the path to exec for the daemon child.
 ///
-/// On Linux we pass the **literal string** `"/proc/self/exe"` to `execve`.
+/// On Linux we prefer the **literal string** `"/proc/self/exe"` for `execve`.
 /// The kernel's magic-link resolver for that path returns `mm->exe_file` of
 /// the calling process (via `proc_exe_link` / `nd_jump_link`), so the child
 /// is loaded from the exact same inode the parent was loaded from — even if
@@ -34,17 +34,91 @@ use crate::ipc::error::SpawnDaemonError;
 /// who "simplifies" this to `current_exe` everywhere will silently lose the
 /// upgrade-mid-run guarantee.
 ///
+/// When `/proc` is **not** mounted (a bare chroot, a minimal container) the
+/// magic link doesn't exist, so we degrade gracefully instead of failing the
+/// spawn: fall back to the path the kernel recorded at `execve` time in the
+/// auxiliary vector ([`AT_EXECFN`](https://man7.org/linux/man-pages/man3/getauxval.3.html)),
+/// and finally to `argv[0]`. The fallback gives up the same-inode guarantee —
+/// the on-disk binary could have been replaced since startup, and a relative
+/// `argv[0]` is resolved against a cwd that may have changed — but the
+/// build-id handshake still turns a swapped or wrong binary into a clean typed
+/// error ([`HandshakeError::Mismatch`](crate::HandshakeError)) rather than a
+/// silently wrong daemon. `current_exe()` is deliberately **not** the Linux
+/// fallback: on Linux it `readlink`s `/proc/self/exe` itself, so it fails for
+/// the very same reason the primary path did.
+///
 /// On non-Linux, `current_exe()` is the best we have. The build-id handshake
 /// covers the gap.
 fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
     #[cfg(target_os = "linux")]
     {
-        Ok(PathBuf::from("/proc/self/exe"))
+        linux_daemon_exe_path()
     }
     #[cfg(not(target_os = "linux"))]
     {
         std::env::current_exe().map_err(SpawnDaemonError::ExePath)
     }
+}
+
+/// Linux path resolution with the `/proc`-absent fallback (see
+/// [`daemon_exe_path`]).
+#[cfg(target_os = "linux")]
+fn linux_daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
+    // Detect whether `/proc` is actually mounted by trying to *read* the magic
+    // link. `read_link` succeeding proves the link resolves; we then hand the
+    // LITERAL "/proc/self/exe" string (not the read-link target) to `execve` so
+    // the same-inode guarantee is preserved. A TOCTOU where `/proc` disappears
+    // between this probe and the `execve` is astronomically unlikely and no
+    // worse than the previous unconditional behavior.
+    if std::fs::read_link("/proc/self/exe").is_ok() {
+        return Ok(PathBuf::from("/proc/self/exe"));
+    }
+
+    // `/proc` is unavailable. Fall back to the exec-time pathname the kernel
+    // stashed in the auxiliary vector.
+    if let Some(path) = exe_path_from_auxv() {
+        return Ok(path);
+    }
+
+    // Last resort: `argv[0]`. It may be a bare command name (then `Command`
+    // resolves it via `$PATH`) or a path relative to a since-changed cwd —
+    // best-effort, and again backstopped by the build-id handshake.
+    if let Some(argv0) = std::env::args_os().next() {
+        if !argv0.is_empty() {
+            return Ok(PathBuf::from(argv0));
+        }
+    }
+
+    Err(SpawnDaemonError::ExePath(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "/proc is not mounted and neither AT_EXECFN nor argv[0] yielded an \
+         executable path to re-exec",
+    )))
+}
+
+/// The pathname used to `execve` this process, as recorded by the kernel in
+/// the auxiliary vector under `AT_EXECFN`. Returns `None` if the entry is
+/// absent (e.g. a statically odd libc, or a stripped auxv). Available on
+/// glibc and musl via `getauxval(3)`.
+#[cfg(target_os = "linux")]
+fn exe_path_from_auxv() -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: `getauxval` is always safe to call; it returns 0 when the
+    // requested type isn't present. On a non-zero return the value is a pointer
+    // into the process's own auxiliary vector — a NUL-terminated string that
+    // lives for the life of the process — so building a `CStr` from it is
+    // sound.
+    let ptr = unsafe { libc::getauxval(libc::AT_EXECFN) };
+    if ptr == 0 {
+        return None;
+    }
+    let bytes = unsafe { CStr::from_ptr(ptr as *const libc::c_char) }.to_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(OsStr::from_bytes(bytes)))
 }
 
 /// Spawn the current binary as a background daemon via fork+exec — the
@@ -81,12 +155,14 @@ where
     Response: Serialize + DeserializeOwned + Send,
 {
     let exe = daemon_exe_path()?;
-    // The execve path is `/proc/self/exe` on Linux (kernel magic-link, see
-    // `daemon_exe_path`), but that string would also become argv[0] by
-    // default, so `ps`/`top` would show "/proc/self/exe" instead of the
-    // actual binary name. Override argv[0] to the resolved path so operators
-    // see a recognizable command line. Falls back to the exec path if
-    // `current_exe()` fails — preserves correctness over cosmetics.
+    // The execve path is usually `/proc/self/exe` on Linux (kernel magic-link,
+    // see `daemon_exe_path`), but that string would also become argv[0] by
+    // default, so `ps`/`top` would show "/proc/self/exe" instead of the actual
+    // binary name. Override argv[0] to the resolved path so operators see a
+    // recognizable command line. Falls back to the exec path if `current_exe()`
+    // fails — preserves correctness over cosmetics. (In the `/proc`-absent
+    // fallback, `current_exe()` also fails, so argv[0] becomes `exe`, which is
+    // then already the real AT_EXECFN / argv[0] path — still recognizable.)
     let argv0 = std::env::current_exe().unwrap_or_else(|_| exe.clone());
     let (client, child) = start_background_process_inner::<Request, Response>(
         &exe,
@@ -105,9 +181,10 @@ where
 /// binary instead of re-exec'ing the current one, but keep the full handshake
 /// validation and success/failure child cleanup. Exists so the documented
 /// failed-spawn cleanup contract is testable — [`spawn_daemon_process`] always
-/// re-execs `/proc/self/exe`, which is unusable from a libtest binary, and the
-/// raw [`start_background_process_with_exe`] path bypasses handshake validation
-/// and drops the `Child`.
+/// re-execs the current binary (via `/proc/self/exe`, or its `AT_EXECFN` /
+/// `argv[0]` fallback), which is unusable from a libtest binary, and the raw
+/// [`start_background_process_with_exe`] path bypasses handshake validation and
+/// drops the `Child`.
 ///
 /// `#[doc(hidden)]` and gated behind `test`/`testutils`: not part of the stable
 /// surface.
@@ -265,4 +342,47 @@ where
     })?;
 
     Ok((client, child))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_proc_self_exe_when_proc_is_mounted() {
+        // The test process runs on a normal Linux box with `/proc` mounted, so
+        // resolution must take the primary path and hand `execve` the LITERAL
+        // magic-link string (preserving the same-inode guarantee), not a
+        // resolved or fallback path.
+        assert!(
+            std::fs::read_link("/proc/self/exe").is_ok(),
+            "precondition: this test assumes /proc is mounted"
+        );
+        assert_eq!(
+            daemon_exe_path().unwrap(),
+            PathBuf::from("/proc/self/exe"),
+            "with /proc mounted, the exec path must be the literal magic link"
+        );
+    }
+
+    #[test]
+    fn auxv_fallback_resolves_to_this_test_binary() {
+        // `AT_EXECFN` is the pathname this process was `execve`'d with. It must
+        // be present and point at a real, existing file (the libtest binary) —
+        // this is the path the spawn would re-exec if `/proc` were unmounted.
+        let from_auxv = exe_path_from_auxv().expect("AT_EXECFN should be present under glibc/musl");
+        assert!(
+            from_auxv.exists(),
+            "AT_EXECFN path {from_auxv:?} should name an existing file"
+        );
+        // It refers to the same on-disk file as `current_exe()` (which resolves
+        // via `/proc/self/exe`). Compare canonical paths so a relative or
+        // symlinked `AT_EXECFN` still matches.
+        let via_proc = std::env::current_exe().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&from_auxv).unwrap(),
+            std::fs::canonicalize(&via_proc).unwrap(),
+            "AT_EXECFN and /proc/self/exe should name the same binary"
+        );
+    }
 }
