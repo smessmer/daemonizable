@@ -78,7 +78,7 @@ where
             return Err(PipeRecvError::Desynchronized);
         }
         self.recver.set_nonblocking(true)?;
-        let timeout_at = Instant::now() + timeout;
+        let timeout_at = deadline_from(timeout);
 
         // Length prefix. A timeout that consumed 0 bytes is a clean idle poll
         // and must not poison; a partial prefix (1–3 bytes) leaves the wire
@@ -127,6 +127,10 @@ where
     /// Receive one postcard-decoded message, bounded by `timeout`. Framing (and
     /// its poisoning contract) is shared with [`recv_raw_timeout`](Self::recv_raw_timeout);
     /// this only adds the decode step, which never poisons.
+    ///
+    /// An extremely large `timeout` (e.g. `Duration::MAX`) is clamped rather
+    /// than panicking on deadline overflow; for a genuinely unbounded wait, use
+    /// the blocking [`recv`](Self::recv) instead.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, PipeRecvError>
     where
         T: Send,
@@ -162,6 +166,32 @@ where
             .map_err(normalize_blocking_read_err)?;
         Ok(buf)
     }
+}
+
+/// Upper bound on the deadline a caller-supplied timeout can produce, used only
+/// when the requested `Duration` would overflow `Instant + Duration`. ~30 years
+/// is "effectively forever" for a receive deadline yet far inside every
+/// platform's `Instant` range, so adding it to `Instant::now()` can't itself
+/// overflow in practice.
+const MAX_DEADLINE_FROM_NOW: Duration = Duration::from_secs(60 * 60 * 24 * 365 * 30);
+
+/// Turn a caller-supplied timeout into an absolute deadline without panicking.
+///
+/// `Instant + Duration` panics on overflow, and `recv_timeout` /
+/// `recv_response` take an arbitrary `Duration` from the caller — a very large
+/// one (e.g. `Duration::MAX`, sometimes used as a stand-in for "wait a long
+/// time") would otherwise crash the process. We saturate instead: a timeout
+/// that would overflow is clamped to [`MAX_DEADLINE_FROM_NOW`] out. (For a
+/// genuinely unbounded wait, use the blocking `recv` / `recv_response_blocking`
+/// path, which has no deadline at all.)
+fn deadline_from(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout)
+        .or_else(|| now.checked_add(MAX_DEADLINE_FROM_NOW))
+        // `now + MAX_DEADLINE_FROM_NOW` can't overflow in practice; the final
+        // `unwrap_or(now)` (an immediate deadline) keeps this total and
+        // panic-free even if some exotic platform disagreed.
+        .unwrap_or(now)
 }
 
 /// `read_exact` on a blocking pipe reports a closed write end as
@@ -240,6 +270,39 @@ fn read_exact_with_timeout_impl<R: Read + AsFd>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression test for the deadline-overflow guard: `Instant::now() + timeout`
+    // panics when `timeout` is large enough to overflow `Instant` (e.g.
+    // `Duration::MAX`, a plausible "wait a long time" stand-in). `deadline_from`
+    // must clamp instead of panicking. Data is already available, so the receive
+    // returns immediately after computing the (clamped) deadline — exercising the
+    // previously-panicking line without actually waiting.
+    #[test]
+    fn recv_timeout_with_overflowing_duration_does_not_panic() {
+        let (mut sender, mut recver) = crate::ipc::pipe::pipe::<u32>().unwrap();
+        sender.send(&7).unwrap();
+        assert_eq!(
+            recver.recv_timeout(Duration::MAX).unwrap(),
+            7,
+            "a Duration that overflows the deadline must be clamped, not panic"
+        );
+    }
+
+    // `deadline_from` is total and never panics, even on `Duration::MAX`, and a
+    // clamped deadline is still in the future (so it doesn't spuriously time out
+    // immediately).
+    #[test]
+    fn deadline_from_clamps_instead_of_overflowing() {
+        let before = Instant::now();
+        let clamped = deadline_from(Duration::MAX);
+        assert!(
+            clamped > before,
+            "a clamped deadline must still be in the future"
+        );
+        // A normal timeout is unaffected: the deadline is ~`timeout` out.
+        let normal = deadline_from(Duration::from_secs(1));
+        assert!(normal > Instant::now());
+    }
 
     // Regression test for the poll-window clamp: a read whose deadline is longer
     // than a single poll window must not be cut short when the window expires.
