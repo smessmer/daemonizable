@@ -106,8 +106,11 @@ pub enum SpawnDaemonError {
     #[error("Failed to create IPC pipes: {0}")]
     CreatePipes(#[from] PipeCreateError),
 
-    /// The path to re-exec could not be determined (only possible on
-    /// platforms where we fall back to `std::env::current_exe`).
+    /// The path to re-exec could not be determined. On non-Linux this is a
+    /// failed `std::env::current_exe`. On Linux it means `/proc` was not
+    /// mounted *and* every fallback (`AT_EXECFN`, then `argv[0]`) also failed
+    /// to yield an executable path — normally `/proc/self/exe` is used and this
+    /// never arises.
     #[error("Failed to determine the executable path to re-exec: {0}")]
     ExePath(#[source] std::io::Error),
 
