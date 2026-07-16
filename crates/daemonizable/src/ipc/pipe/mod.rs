@@ -121,13 +121,13 @@ fn create_pipe_ends() -> Result<
     ),
     PipeCreateError,
 > {
-    use std::os::fd::AsRawFd;
+    use std::os::fd::AsFd;
 
     use crate::ipc::cloexec::set_cloexec;
 
     let (sender, recver) =
         interprocess::unnamed_pipe::pipe().map_err(PipeCreateError::CreatePipe)?;
-    for fd in [sender.as_raw_fd(), recver.as_raw_fd()] {
+    for fd in [sender.as_fd(), recver.as_fd()] {
         set_cloexec(fd)
             .map_err(|(operation, source)| PipeCreateError::SetCloexec { operation, source })?;
     }
@@ -138,9 +138,10 @@ fn create_pipe_ends() -> Result<
 mod tests {
     use super::*;
     use crate::ipc::error::{PipeRecvError, PipeSendError};
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use serde::Deserialize;
     use std::io::Read;
-    use std::os::fd::AsRawFd;
+    use std::os::fd::AsFd;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -163,22 +164,14 @@ mod tests {
         // check below; they're closed when these `OwnedFd`s drop at the end.
         let sender_fd = sender.into_owned_fd();
         let recver_fd = recver.into_owned_fd();
-        for (label, raw_fd) in [
-            ("sender", sender_fd.as_raw_fd()),
-            ("recver", recver_fd.as_raw_fd()),
-        ] {
-            // SAFETY: FFI call to fcntl(F_GETFD). F_GETFD takes no variadic
-            // third argument and reads no caller pointer, so the only operands
-            // are plain ints. `raw_fd` is borrowed via `as_raw_fd()` from
-            // `sender_fd`/`recver_fd`, `OwnedFd`s that stay alive on the stack
-            // for the whole loop, so the descriptor is open and exclusively
-            // owned during the call; the call neither takes ownership nor closes
-            // it. An invalid fd would only yield EBADF (checked below), not UB.
-            let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
-            assert!(flags >= 0, "fcntl(F_GETFD) failed for {label}");
+        for (label, fd) in [("sender", sender_fd.as_fd()), ("recver", recver_fd.as_fd())] {
+            let flags = FdFlag::from_bits_retain(
+                fcntl(fd, FcntlArg::F_GETFD)
+                    .unwrap_or_else(|e| panic!("fcntl(F_GETFD) failed for {label}: {e}")),
+            );
             assert!(
-                flags & libc::FD_CLOEXEC != 0,
-                "{label} end of pipe is missing FD_CLOEXEC (flags={flags:#x})",
+                flags.contains(FdFlag::FD_CLOEXEC),
+                "{label} end of pipe is missing FD_CLOEXEC (flags={flags:?})",
             );
         }
     }
