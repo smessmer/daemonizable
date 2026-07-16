@@ -53,3 +53,10 @@ path = "src/bin/daemonizable_test_app.rs"
 [[bin]]
 name = "daemonizable-test-detach-stdio"
 path = "src/bin/daemonizable_test_detach_stdio.rs"
+
+# Helper for tests/detach_stdio_reopens_preclosed_fd.rs. Pre-closes a std fd,
+# calls `detach_stdio`, and reports via exit code whether that fd ends up
+# reopened onto /dev/null rather than left closed (the RAII edge case).
+[[bin]]
+name = "daemonizable-test-detach-stdio-preclosed"
+path = "src/bin/daemonizable_test_detach_stdio_preclosed.rs"
