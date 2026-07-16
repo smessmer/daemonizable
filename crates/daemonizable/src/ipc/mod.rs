@@ -58,8 +58,10 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
     // the `dup2(fd, fd)` self-copy below is a no-op and the end-of-scope drop
     // would close the std fd we just "redirected". See the doc comment.
     if source.as_raw_fd() <= libc::STDERR_FILENO {
-        // SAFETY: `source` is a live, open descriptor; `F_DUPFD_CLOEXEC`
-        // returns a fresh owned fd >= STDERR_FILENO + 1 (or -1 on failure).
+        // SAFETY: `source` is a live, open descriptor and the variadic third
+        // argument is a valid `c_int` minimum fd. `F_DUPFD_CLOEXEC` only
+        // duplicates the descriptor (or fails with a plain errno); it has no
+        // memory effects. Ownership of the returned fd is taken below.
         let relocated = unsafe {
             libc::fcntl(
                 source.as_raw_fd(),
@@ -85,7 +87,7 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
             });
         }
     }
+    // `source` (now guaranteed > 2) drops at end of scope, closing the temp fd;
+    // the three targets keep their duplicated descriptors.
     Ok(())
-    // `source` (now guaranteed > 2) drops here, closing the temp fd; the three
-    // targets keep their duplicated descriptors.
 }
