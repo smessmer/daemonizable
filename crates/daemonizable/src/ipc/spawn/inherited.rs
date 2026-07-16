@@ -40,7 +40,7 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// the build-id handshake before handing the server to the app.
 ///
 /// # Safety
-/// Fds [`CHILD_REQUEST_RECV_FD`] (3) and [`CHILD_RESPONSE_SEND_FD`] (4) must be
+/// Fds `CHILD_REQUEST_RECV_FD` (3) and `CHILD_RESPONSE_SEND_FD` (4) must be
 /// the daemon's *exclusively owned* inherited RPC pipe ends: call this only in a
 /// process the framework re-exec'd as a daemon child, where `spawn_daemon_process`
 /// / [`start_background_process_with_exe`] mapped the parent's pipe ends onto
