@@ -97,14 +97,8 @@ fn main() {
             let _ = unsafe { libc::write(leak_fd, payload.as_ptr().cast(), payload.len()) };
             std::fs::write(&pid_file, std::process::id().to_string())
                 .expect("daemon: write pid file");
-            // SAFETY: `libc::setsid()` is a bare syscall wrapper that takes no
-            // arguments and dereferences no pointers or file descriptors, so
-            // there is no memory-safety precondition to uphold. It is `unsafe`
-            // only as an FFI call. It either succeeds or returns -1/EPERM
-            // (already a process-group leader), a defined error handled by the
-            // `< 0` check below.
-            if unsafe { libc::setsid() } < 0 {
-                eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
+            if let Err(err) = nix::unistd::setsid() {
+                eprintln!("daemon: setsid failed: {err}");
                 std::process::exit(1);
             }
             loop {
@@ -152,13 +146,8 @@ fn main() {
             // setsid for the test daemon so it survives the sub-test-process
             // exit even though we haven't gone through the framework's
             // daemon dispatch (which would have called setsid).
-            // SAFETY: setsid() takes no arguments and no pointers/fds, so it has
-            // no memory-safety preconditions; it is `unsafe` only as an FFI call.
-            // Not in a fork/exec window, so async-signal-safety is irrelevant.
-            // Its sole failure (EPERM if already a group leader) is a runtime
-            // error, not UB, and is handled by the `< 0` branch below.
-            if unsafe { libc::setsid() } < 0 {
-                eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
+            if let Err(err) = nix::unistd::setsid() {
+                eprintln!("daemon: setsid failed: {err}");
                 std::process::exit(1);
             }
             let mut tick: u64 = 0;
@@ -197,14 +186,8 @@ fn main() {
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
-            // SAFETY: `setsid()` takes no arguments — no pointers, buffers, or
-            // fds — so it has no memory-safety preconditions; it is `unsafe`
-            // only because it is an `extern "C"` fn. It is not in a fork→exec
-            // async-signal-safety window (the fork below happens afterwards) and
-            // the process is single-threaded here regardless. Its only failure
-            // is a -1/EPERM return, handled by the `< 0` check below.
-            if unsafe { libc::setsid() } < 0 {
-                eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
+            if let Err(err) = nix::unistd::setsid() {
+                eprintln!("daemon: setsid failed: {err}");
                 std::process::exit(1);
             }
             // SAFETY: libc::fork() takes no arguments and is always callable; its

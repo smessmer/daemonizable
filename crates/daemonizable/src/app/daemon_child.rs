@@ -54,17 +54,8 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
 
     // setsid is fatal on failure: without a new session the daemon would die
     // along with the parent's controlling terminal.
-    //
-    // SAFETY: `libc::setsid` is `unsafe` only as an `extern "C"` binding; the
-    // POSIX call takes no arguments and no caller-provided pointers, owns no
-    // file descriptors, and cannot invoke UB. Its one failure mode (the caller
-    // is already a process-group leader) is a defined EPERM/-1 return, handled
-    // by the `< 0` check below — a correctness concern, not a soundness one.
-    if unsafe { libc::setsid() } < 0 {
-        eprintln!(
-            "daemon child: setsid() failed: {}",
-            std::io::Error::last_os_error()
-        );
+    if let Err(err) = nix::unistd::setsid() {
+        eprintln!("daemon child: setsid() failed: {err}");
         std::process::exit(1);
     }
 
@@ -151,17 +142,9 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // the daemon still works, it just keeps the parent's cwd pinned — worth a
     // warning, not a crash. Runs before the handshake so a failure can still
     // surface on the not-yet-detached stderr.
-    //
-    // SAFETY: `libc::chdir` requires only that its `path` argument be a valid,
-    // non-null, aligned, NUL-terminated C string live for the call. `c"/"` is a
-    // `&'static CStr` literal (bytes `{'/', 0}`) in static storage, so
-    // `c"/".as_ptr()` is non-null, aligned, NUL-terminated, and never freed or
-    // mutated — the precondition holds unconditionally. chdir takes no fd and a
-    // bad path only yields an errno (-1), never UB.
-    if unsafe { libc::chdir(c"/".as_ptr()) } < 0 {
+    if let Err(err) = std::env::set_current_dir("/") {
         eprintln!(
-            "daemon child: warning: chdir(\"/\") failed, keeping inherited working directory: {}",
-            std::io::Error::last_os_error()
+            "daemon child: warning: chdir(\"/\") failed, keeping inherited working directory: {err}"
         );
     }
 

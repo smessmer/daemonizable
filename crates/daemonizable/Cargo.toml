@@ -26,7 +26,7 @@ command-fds.workspace = true
 daemonizable-macros = { workspace = true, optional = true }
 interprocess.workspace = true
 libc.workspace = true
-nix = { workspace = true, features = ["poll", "fs"] }
+nix = { workspace = true, features = ["poll", "fs", "process", "signal"] }
 postcard = { workspace = true, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true
