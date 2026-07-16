@@ -50,7 +50,7 @@ impl Daemonizable for MyApp {
 
     fn run_foreground(daemonizer: Daemonizer<Self>) -> ExitCode {
         let mut rpc = daemonizer.spawn_daemon().unwrap(); // spawn the daemon
-        // ...talk to the daemon over the typed RPC channel...
+        // ...initialize the daemon over the typed RPC channel...
         ExitCode::SUCCESS // exit; the daemon keeps running in the background
     }
 
