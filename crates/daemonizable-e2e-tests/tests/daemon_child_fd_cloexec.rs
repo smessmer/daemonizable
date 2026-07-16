@@ -22,6 +22,9 @@ use std::thread;
 use std::time::Duration;
 
 use daemonizable::{PipeRecvError, start_background_process_with_exe};
+use nix::sys::signal::{Signal, kill};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::unistd::Pid;
 
 fn helper_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-background"))
@@ -38,38 +41,23 @@ impl Drop for Cleanup {
     fn drop(&mut self) {
         if let Ok(contents) = std::fs::read_to_string(&self.sleeper_pid_file) {
             if let Ok(pid) = contents.trim().parse::<i32>() {
-                // SAFETY: `libc::kill` takes two integer scalars and no pointers, so
-                // it has no memory-safety precondition and cannot invoke UB for any
-                // argument. `pid` is the `i32` parsed just above and `SIGKILL` is a
-                // valid signal constant; a stale or reused pid at cleanup time is a
-                // benign correctness issue (defined ESRCH/EPERM behavior), and the
-                // result is discarded.
-                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+                // A stale or reused pid at cleanup time is a benign correctness
+                // issue (defined ESRCH/EPERM behavior); the result is discarded.
+                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
             }
         }
         // Reap the daemon (our direct child; the raw helper-spawn path does not
         // go through the framework's second fork, so it stays our child). It has
         // already exited, so a non-blocking reap suffices; retry briefly in case
         // cleanup races its exit.
-        let mut status = 0;
         for _ in 0..100 {
-            // SAFETY: `libc::waitpid`'s only pointer argument is `&mut status`,
-            // which points to the live, initialized, correctly aligned stack `i32`
-            // declared just above (`let mut status = 0;`, inferred as `c_int` from
-            // the signature). `c_int` matches `i32` on Linux, so the status write is
-            // in bounds and to writable storage. `pid = -1` and `WNOHANG` are plain
-            // integers, and a missing child merely returns -1 (ECHILD), handled by
-            // the `rc < 0` branch below — not UB. `waitpid` has no
-            // async-signal-safety / single-threaded requirement, so thread context
-            // is irrelevant.
-            let rc = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
-            if rc > 0 {
-                break; // reaped it (our only direct child)
+            match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+                // Not reaped yet; retry briefly in case cleanup races the exit.
+                Ok(WaitStatus::StillAlive) => thread::sleep(Duration::from_millis(10)),
+                // Reaped our only direct child, or ECHILD (nothing to reap) —
+                // either way we're done.
+                Ok(_) | Err(_) => break,
             }
-            if rc < 0 {
-                break; // ECHILD — nothing to reap
-            }
-            thread::sleep(Duration::from_millis(10));
         }
     }
 }

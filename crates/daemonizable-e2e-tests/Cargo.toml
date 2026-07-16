@@ -21,11 +21,14 @@ publish = false
 # controlled helper binary (production always re-execs `/proc/self/exe`).
 daemonizable = { path = "../daemonizable", features = ["testutils"] }
 libc.workspace = true
+# Safe syscall wrappers (setsid/getsid/kill/waitpid) used by both the helper
+# binaries and the integration tests. A normal (not dev-only) dependency so the
+# `[[bin]]` helpers below — which dev-dependencies do not reach — can use it.
+nix = { workspace = true, features = ["poll", "process", "signal"] }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 interprocess.workspace = true
-nix = { workspace = true, features = ["poll", "process", "signal"] }
 rustversion.workspace = true
 tempfile.workspace = true
 trybuild.workspace = true

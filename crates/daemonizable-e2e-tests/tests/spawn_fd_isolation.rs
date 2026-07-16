@@ -24,6 +24,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use daemonizable::start_background_process_with_exe;
+use nix::sys::signal::{Signal, kill};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::unistd::Pid;
 
 fn helper_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-background"))
@@ -43,53 +46,24 @@ struct DaemonGuard(i32);
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
-        // SAFETY: FFI call to POSIX kill(2). Both arguments are plain ints
-        // passed by value (`self.0` is the daemon pid, `SIGTERM` a valid signal
-        // constant); the call dereferences no memory, so there is no
-        // pointer/buffer contract to uphold. A stale or invalid pid yields
-        // ESRCH/EPERM as an errno error, never UB, and the result is discarded.
-        // Runs in the parent during Drop, so async-signal-safety does not apply.
-        let _ = unsafe { libc::kill(self.0, libc::SIGTERM) };
+        // A stale or invalid pid yields ESRCH/EPERM (discarded). Runs in the
+        // parent during Drop, so async-signal-safety does not apply.
+        let _ = kill(Pid::from_raw(self.0), Signal::SIGTERM);
         let term_deadline = Instant::now() + Duration::from_secs(2);
-        let mut status = 0;
-        loop {
-            // SAFETY: FFI call to POSIX waitpid(2). The only pointer argument,
-            // `&mut status`, borrows the live local `status` (a c_int declared
-            // above), so it is non-null, aligned, writable, and valid for the
-            // whole call; the kernel writing the status word into it is sound.
-            // `self.0` (the child pid) and `libc::WNOHANG` are plain ints — an
-            // invalid pid or non-child target yields an errno, not UB, and is
-            // handled by the rc checks below. Runs in the parent process, not a
-            // post-fork/pre-exec path, so no async-signal-safety constraint.
-            let rc = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) };
-            // rc == pid: reaped. rc == -1: ECHILD or other error — already
-            // gone or not ours. Either way, stop.
-            if rc != 0 {
-                break;
-            }
+        // Poll until the child is reaped — any non-`StillAlive` result (reaped,
+        // or gone / not ours) ends the loop. If it outlasts the SIGTERM grace
+        // period, escalate to SIGKILL and a blocking reap.
+        while let Ok(WaitStatus::StillAlive) =
+            waitpid(Pid::from_raw(self.0), Some(WaitPidFlag::WNOHANG))
+        {
             if Instant::now() >= term_deadline {
                 eprintln!(
                     "daemon {} did not exit on SIGTERM within 2s; sending SIGKILL",
                     self.0,
                 );
-                // SAFETY: `libc::kill` (kill(2)) takes only integer arguments —
-                // the pid `self.0` (an i32) and the signal constant SIGKILL —
-                // and dereferences no pointers, so it has no memory-safety
-                // precondition. A stale/reused/foreign pid yields ESRCH/EPERM, an
-                // ordinary error return (discarded here), never UB. Runs in the
-                // parent during Drop, so the post-fork async-signal-safety rule
-                // does not apply.
-                let _ = unsafe { libc::kill(self.0, libc::SIGKILL) };
+                let _ = kill(Pid::from_raw(self.0), Signal::SIGKILL);
                 // Block-wait to reap; SIGKILL is unblockable.
-                // SAFETY: FFI call to waitpid(2). `self.0` (pid) and the `0`
-                // options are plain integers that can never cause UB — a stale
-                // pid only yields ECHILD/ESRCH, which is why the result is
-                // discarded. The one pointer argument, `&mut status`, borrows the
-                // live, initialized, correctly-aligned stack-local c_int from
-                // above, into which the kernel writes the wait status; it stays
-                // in scope for the whole blocking call. Not a post-fork window,
-                // so no async-signal-safety concern applies.
-                let _ = unsafe { libc::waitpid(self.0, &mut status, 0) };
+                let _ = waitpid(Pid::from_raw(self.0), None);
                 break;
             }
             thread::sleep(Duration::from_millis(20));

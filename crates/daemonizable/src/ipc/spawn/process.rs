@@ -271,15 +271,17 @@ where
             // A grandchild the group-kill somehow misses (it left the group via
             // its own setsid/setpgid) still self-terminates via pipe EOF once
             // the client is dropped on the error return.
-            // SAFETY: `libc::kill` is `unsafe` only as an `extern "C"` FFI
-            // symbol; it takes two by-value integers (a pid_t and a signal
-            // number) and no pointers, so it has no memory-safety precondition
-            // and can never cause UB. A stale, wrong, or nonexistent pid/group
-            // can only return ESRCH/EPERM at runtime (discarded via `let _`).
-            // Which group is actually signalled — that `-child_pid` reaches the
-            // daemon grandchild and cannot hit a pid-reused foreign group — is a
-            // correctness property argued in the comment above.
-            let _ = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
+            //
+            // `Pid::from_raw(-child_pid)` is the process group: nix passes it
+            // straight to `kill(2)`, so a negative pid signals the group, same
+            // as the raw call. Which group is actually signalled — that
+            // `-child_pid` reaches the daemon grandchild and cannot hit a
+            // pid-reused foreign group — is the correctness property argued
+            // above. A stale/foreign pid only yields ESRCH/EPERM (discarded).
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(-child_pid),
+                nix::sys::signal::Signal::SIGKILL,
+            );
             let _ = child.kill();
             let _ = child.wait();
             Err(SpawnDaemonError::Handshake(err))
