@@ -58,7 +58,10 @@ fn main() {
 
     // Pre-close the chosen std fd, so `/dev/null` will reopen onto that low
     // number inside `detach_stdio`.
-    // SAFETY: closing a raw fd is always safe; a bad fd just returns EBADF.
+    // SAFETY: `close` takes a bare fd int; a bad fd is EBADF, not UB. `to_close`
+    // is a std fd (0/1/2, per the `0..=2` match above) held as a raw number, not
+    // owned by any `OwnedFd`/`File`, so closing it sets up no double-close, and
+    // the single-threaded process has no concurrent reopen to race it.
     unsafe { libc::close(to_close) };
 
     if daemonizable::detach_stdio().is_err() {
@@ -69,6 +72,9 @@ fn main() {
     // A closed fd (fstat → EBADF) is the bug; a live fd with a different
     // identity means detach redirected it somewhere other than /dev/null.
     for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: `libc::stat` is a `repr(C)` struct of only integer fields (no
+        // references/NonZero/bool/enums), so an all-zero bit pattern is a valid,
+        // fully-initialized value; it serves purely as the out-param `fstat` fills.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: `fstat` reads into a valid out-param; a closed fd is EBADF.
         if unsafe { libc::fstat(fd, &mut st) } < 0 {
@@ -88,6 +94,9 @@ fn main() {
 /// the std fds the rest of the helper manages.
 fn devnull_rdev() -> Option<libc::dev_t> {
     let devnull = std::fs::File::open("/dev/null").ok()?;
+    // SAFETY: `libc::stat` is a `repr(C)` plain-old-data struct of integer fields
+    // only (no references, NonZero, bool, or enums), so an all-zero bit pattern is
+    // a valid value; it is then fully written by the `fstat` call below.
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: `fstat` on a live fd, reading into a valid out-param.
     if unsafe { libc::fstat(devnull.as_raw_fd(), &mut st) } < 0 {
@@ -115,6 +124,11 @@ fn ensure_open(fd: i32) -> bool {
         return true;
     }
     let moved = unsafe { libc::dup2(opened, fd) };
+    // SAFETY: `opened` is the raw fd returned by `open` above; it is a live,
+    // exclusively-owned descriptor (never wrapped in an `OwnedFd`/`File`, so no
+    // other owner closes it) and is distinct from `fd` (the `opened == fd` case
+    // returned early). `dup2` does not consume its source, so `opened` is still
+    // open here; closing it releases the temporary `/dev/null` fd.
     unsafe { libc::close(opened) };
     moved >= 0
 }

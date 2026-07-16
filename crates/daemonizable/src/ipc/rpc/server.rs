@@ -37,7 +37,24 @@ where
     /// Both fds must be owned (not shared) — calling this twice on the same
     /// fd numbers is a use-after-free.
     pub unsafe fn from_raw_fds(in_fd: RawFd, out_fd: RawFd) -> Self {
+        // SAFETY: Per this `unsafe fn`'s `# Safety` contract, `in_fd` is the
+        // open read end of the parent<->daemon pipe and is exclusively owned
+        // (no other `OwnedFd`/`File` owns it). Wrapping it in an `OwnedFd`,
+        // which closes it on drop, therefore satisfies `from_raw_fd`'s
+        // "open + exclusive-ownership" precondition. The sole caller
+        // (`rpc_server_from_inherited_fds`) upholds this: it `fstat`-validates
+        // the fd is open and a FIFO and serializes the claim behind the
+        // `DAEMON_FDS_CLAIMED` flag, so the fd is wrapped at most once.
+        // `Receiver::from_owned_fd` is a safe consumer of the `OwnedFd`.
         let receiver = unsafe { Receiver::from_owned_fd(OwnedFd::from_raw_fd(in_fd)) };
+        // SAFETY: `OwnedFd::from_raw_fd` requires `out_fd` be open and exclusively
+        // owned, since the `OwnedFd` closes it on drop. Both hold by this `unsafe fn`'s
+        // documented `# Safety` contract: `out_fd` is the caller-owned pipe write end,
+        // distinct from `in_fd` (so it does not alias the `OwnedFd` minted on the line
+        // above). The sole caller, `rpc_server_from_inherited_fds`, enforces this — its
+        // `DAEMON_FDS_CLAIMED` atomic makes the claim of fds 3/4 a once-per-process
+        // singleton (no second owner), and it `fstat`-verifies the fd is an open FIFO
+        // before this call.
         let sender = unsafe { Sender::from_owned_fd(OwnedFd::from_raw_fd(out_fd)) };
         Self::new(sender, receiver)
     }

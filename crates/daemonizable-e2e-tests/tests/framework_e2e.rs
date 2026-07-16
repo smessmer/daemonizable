@@ -57,6 +57,12 @@ fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
     // Session assertions — the payoff of the framework's `setsid` + second fork.
     let daemon_sid: i32 = fields["sid"].parse().expect("sid not an int");
     let daemon_pid: i32 = fields["pid"].parse().expect("pid not an int");
+    // SAFETY: FFI call to POSIX getsid(2). It takes a single pid_t and no
+    // pointers, reads/writes no memory, and consumes/produces no file
+    // descriptors, so there are no memory-safety, ownership, or aliasing
+    // preconditions. The argument is the literal 0 (the calling process),
+    // which always exists, so even the ESRCH error path cannot be reached.
+    // The call cannot cause undefined behavior under any process state.
     let test_sid = unsafe { libc::getsid(0) };
     assert!(daemon_sid > 0, "daemon reported a bogus sid: {daemon_sid}");
     // setsid took effect: the daemon is in its own session, not the test's

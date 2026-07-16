@@ -43,10 +43,24 @@ struct DaemonGuard(i32);
 
 impl Drop for DaemonGuard {
     fn drop(&mut self) {
+        // SAFETY: FFI call to POSIX kill(2). Both arguments are plain ints
+        // passed by value (`self.0` is the daemon pid, `SIGTERM` a valid signal
+        // constant); the call dereferences no memory, so there is no
+        // pointer/buffer contract to uphold. A stale or invalid pid yields
+        // ESRCH/EPERM as an errno error, never UB, and the result is discarded.
+        // Runs in the parent during Drop, so async-signal-safety does not apply.
         let _ = unsafe { libc::kill(self.0, libc::SIGTERM) };
         let term_deadline = Instant::now() + Duration::from_secs(2);
         let mut status = 0;
         loop {
+            // SAFETY: FFI call to POSIX waitpid(2). The only pointer argument,
+            // `&mut status`, borrows the live local `status` (a c_int declared
+            // above), so it is non-null, aligned, writable, and valid for the
+            // whole call; the kernel writing the status word into it is sound.
+            // `self.0` (the child pid) and `libc::WNOHANG` are plain ints — an
+            // invalid pid or non-child target yields an errno, not UB, and is
+            // handled by the rc checks below. Runs in the parent process, not a
+            // post-fork/pre-exec path, so no async-signal-safety constraint.
             let rc = unsafe { libc::waitpid(self.0, &mut status, libc::WNOHANG) };
             // rc == pid: reaped. rc == -1: ECHILD or other error — already
             // gone or not ours. Either way, stop.
@@ -58,8 +72,23 @@ impl Drop for DaemonGuard {
                     "daemon {} did not exit on SIGTERM within 2s; sending SIGKILL",
                     self.0,
                 );
+                // SAFETY: `libc::kill` (kill(2)) takes only integer arguments —
+                // the pid `self.0` (an i32) and the signal constant SIGKILL —
+                // and dereferences no pointers, so it has no memory-safety
+                // precondition. A stale/reused/foreign pid yields ESRCH/EPERM, an
+                // ordinary error return (discarded here), never UB. Runs in the
+                // parent during Drop, so the post-fork async-signal-safety rule
+                // does not apply.
                 let _ = unsafe { libc::kill(self.0, libc::SIGKILL) };
                 // Block-wait to reap; SIGKILL is unblockable.
+                // SAFETY: FFI call to waitpid(2). `self.0` (pid) and the `0`
+                // options are plain integers that can never cause UB — a stale
+                // pid only yields ECHILD/ESRCH, which is why the result is
+                // discarded. The one pointer argument, `&mut status`, borrows the
+                // live, initialized, correctly-aligned stack-local c_int from
+                // above, into which the kernel writes the wait status; it stays
+                // in scope for the whole blocking call. Not a post-fork window,
+                // so no async-signal-safety concern applies.
                 let _ = unsafe { libc::waitpid(self.0, &mut status, 0) };
                 break;
             }
@@ -77,8 +106,22 @@ fn pipes_do_not_leak_into_daemon() {
     // pipes are, so the test isolates the *daemon spawn* layer rather than
     // a coincidental CLOEXEC default.
     for fd in [sentinel_recver.as_raw_fd(), sentinel_sender.as_raw_fd()] {
+        // SAFETY: FFI call to fcntl(2) with cmd F_GETFD, which takes no variadic
+        // third argument (none is passed) and no pointer argument, so there are
+        // no memory-validity preconditions. `fd` is a plain c_int borrowed via
+        // as_raw_fd() from the live `sentinel_recver`/`sentinel_sender` pipes
+        // (still owned in this scope); F_GETFD only reads the descriptor's flags
+        // and never takes ownership, so a stale fd would merely return EBADF
+        // (checked below), never cause UB.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         assert!(flags >= 0);
+        // SAFETY: FFI call to fcntl(2). Setting F_SETFD requires exactly one int
+        // variadic arg, and `flags | FD_CLOEXEC` is that int (`flags` is the
+        // c_int returned by the F_GETFD call above). No pointer args are passed.
+        // `fd` is borrowed via AsRawFd from the still-live sentinel pipe halves;
+        // F_SETFD only sets the close-on-exec flag and neither transfers nor
+        // closes fd ownership, so there is no aliasing or double-close hazard. A
+        // stale fd would only yield EBADF, not UB.
         let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
         assert!(rc >= 0);
     }

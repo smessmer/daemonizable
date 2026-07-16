@@ -80,6 +80,15 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
 
     let fd = source.as_raw_fd();
     for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: `libc::dup2` takes two `c_int`s and no pointers, so the FFI
+        // call cannot touch caller memory. `fd` is `source.as_raw_fd()`, a live
+        // open descriptor owned by `source` (the `/dev/null` `OwnedFd`, or its
+        // relocated `F_DUPFD_CLOEXEC` duplicate) that stays alive until end of
+        // scope; `dup2` does not consume `oldfd`, so ownership is unaffected.
+        // The targets are the raw std fds 0/1/2, which no `OwnedFd` owns, so
+        // replacing them is the intended effect, not a close-under-owner. The
+        // relocation above guarantees `fd > 2`, so `fd != target` and the copy
+        // is never a self-copy no-op. A bad fd would yield EBADF, not UB.
         if unsafe { libc::dup2(fd, target) } < 0 {
             return Err(DetachStdioError::Dup2 {
                 target,

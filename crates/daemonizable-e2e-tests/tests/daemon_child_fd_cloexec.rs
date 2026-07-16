@@ -38,6 +38,12 @@ impl Drop for Cleanup {
     fn drop(&mut self) {
         if let Ok(contents) = std::fs::read_to_string(&self.sleeper_pid_file) {
             if let Ok(pid) = contents.trim().parse::<i32>() {
+                // SAFETY: `libc::kill` takes two integer scalars and no pointers, so
+                // it has no memory-safety precondition and cannot invoke UB for any
+                // argument. `pid` is the `i32` parsed just above and `SIGKILL` is a
+                // valid signal constant; a stale or reused pid at cleanup time is a
+                // benign correctness issue (defined ESRCH/EPERM behavior), and the
+                // result is discarded.
                 let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
@@ -47,6 +53,15 @@ impl Drop for Cleanup {
         // cleanup races its exit.
         let mut status = 0;
         for _ in 0..100 {
+            // SAFETY: `libc::waitpid`'s only pointer argument is `&mut status`,
+            // which points to the live, initialized, correctly aligned stack `i32`
+            // declared just above (`let mut status = 0;`, inferred as `c_int` from
+            // the signature). `c_int` matches `i32` on Linux, so the status write is
+            // in bounds and to writable storage. `pid = -1` and `WNOHANG` are plain
+            // integers, and a missing child merely returns -1 (ECHILD), handled by
+            // the `rc < 0` branch below — not UB. `waitpid` has no
+            // async-signal-safety / single-threaded requirement, so thread context
+            // is irrelevant.
             let rc = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
             if rc > 0 {
                 break; // reaped it (our only direct child)
