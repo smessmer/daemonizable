@@ -39,6 +39,10 @@ where
     /// desynced stream surfaces as a loud typed error instead of silently
     /// misframed data. A clean idle timeout does not poison, so poll-with-short-
     /// timeout loops on an idle channel keep working.
+    ///
+    /// An extremely large `timeout` (e.g. `Duration::MAX`) is clamped rather
+    /// than panicking on deadline overflow; for a genuinely unbounded wait, use
+    /// [`recv_response_blocking`](Self::recv_response_blocking) instead.
     pub fn recv_response(&mut self, timeout: Duration) -> Result<Response, PipeRecvError> {
         self.receiver.recv_timeout(timeout)
     }
