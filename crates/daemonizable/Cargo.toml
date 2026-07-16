@@ -16,10 +16,23 @@ default = ["macros"]
 # Re-exports the #[daemonizable::main] attribute from the companion
 # proc-macro crate.
 macros = ["dep:daemonizable-macros"]
-# Re-exports test-only helpers (e.g. `RpcConnection::into_server_and_client`)
-# so downstream crates can drive the IPC primitives in their own unit tests
-# without re-implementing pipe wiring. Not part of the stable surface.
+# Re-exports test-only helpers (`RpcConnection`, `InheritedFdsError`,
+# `send_handshake`, `rpc_server_from_inherited_fds`, and the `*_with_exe` spawn
+# helpers) so downstream crates can drive the IPC primitives in their own unit
+# tests without re-implementing pipe wiring. NOT part of the stable surface:
+# every one of these re-exports is also `#[doc(hidden)]`, and the feature is off
+# by default, so the helpers never appear in the default published API or on
+# docs.rs (see `[package.metadata.docs.rs]` below).
 testutils = []
+
+# docs.rs already builds with default features only, so the `testutils` feature
+# (test-only helpers, all `#[doc(hidden)]`) is never compiled into the published
+# docs. Pin the feature set explicitly so that stays true even if the default
+# ever changes: `testutils` is deliberately omitted here. (Belt-and-suspenders —
+# the `#[doc(hidden)]` markers would hide those items even under `--all-features`,
+# as the CI `docs` job, which builds with all features, demonstrates.)
+[package.metadata.docs.rs]
+features = []
 
 [dependencies]
 command-fds.workspace = true

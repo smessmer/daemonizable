@@ -3,8 +3,9 @@
 //!
 //! The moving parts are split by responsibility:
 //! - [`mod@process`] — the fork+exec machinery on the parent side
-//!   ([`spawn_daemon_process`], [`start_background_process_with_exe`]) and the
-//!   build-id handshake validation that completes a spawn.
+//!   ([`spawn_daemon_process`], plus the `testutils`-gated
+//!   `start_background_process_with_exe`) and the build-id handshake
+//!   validation that completes a spawn.
 //! - [`mod@handshake`] — the build-id handshake both sides exchange
 //!   ([`send_handshake`] on the daemon side, validation on the parent side).
 //! - [`mod@inherited`] — the daemon child's one-time claim of the pipe fds it
@@ -19,9 +20,10 @@ mod process;
 pub use handshake::send_handshake;
 pub use inherited::rpc_server_from_inherited_fds;
 pub(crate) use process::spawn_daemon_process;
+// Test-only spawn helpers: gated so they don't ship in the default published
+// surface (their crate-root re-exports in `lib.rs` are `testutils`-gated too).
 #[cfg(any(test, feature = "testutils"))]
-pub use process::spawn_daemon_process_with_exe;
-pub use process::start_background_process_with_exe;
+pub use process::{spawn_daemon_process_with_exe, start_background_process_with_exe};
 
 /// Fd numbers the fork+exec child receives its inherited pipe ends on.
 /// Matches `sd_listen_fds(3)`-style convention (parent-provided fds start at 3).

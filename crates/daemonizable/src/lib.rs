@@ -481,38 +481,52 @@ pub use daemonizable_macros::main;
 
 // Re-exported so applications can name the typed handles they receive: the
 // client handle from `Daemonizer::spawn_daemon` and the server handle passed
-// to `Daemonizable::run_daemon`, and so test code can construct in-process
-// connections for unit testing.
-pub use ipc::{RpcClient, RpcConnection, RpcServer};
+// to `Daemonizable::run_daemon`. `RpcConnection` — the pipe-pair owner used to
+// build an in-process client+server for unit tests — is a `testutils`-only
+// construct (re-exported below), never named by production app code.
+pub use ipc::{RpcClient, RpcServer};
 
 // Typed errors returned by the IPC layer (thiserror, not anyhow) so callers
 // can match on failure modes, e.g. distinguish a peer that closed the pipe
-// (`PipeRecvError::SenderClosed`) from a timeout.
+// (`PipeRecvError::SenderClosed`) from a timeout. Only errors reachable from
+// the stable public API are here; `InheritedFdsError` is produced solely by the
+// `testutils` fd-claim helper and is re-exported alongside it below.
 pub use ipc::{
-    DetachStdioError, HandshakeError, InheritedFdsError, PipeCreateError, PipeRecvError,
-    PipeSendError, SpawnDaemonError,
+    DetachStdioError, HandshakeError, PipeCreateError, PipeRecvError, PipeSendError,
+    SpawnDaemonError,
 };
 
 // Process-global helper: the daemon calls this at its post-startup boundary
 // to detach the inherited stdio from the parent's terminal.
 pub use ipc::detach_stdio;
 
-// Lower-level handles for integration tests that substitute an external
-// helper binary for the re-execed self and drive the spawn machinery
-// directly, skipping the handshake.
+// Lower-level handles that substitute an external helper binary for the
+// re-execed self and drive the spawn/handshake machinery directly. These exist
+// ONLY for `daemonizable-e2e-tests` (and downstream crates unit-testing their
+// own IPC wiring), so they are gated behind `testutils` and hidden from docs —
+// exactly like the rest of the test-only surface — rather than shipping in the
+// default published API.
 //
-// Production app code should not reach for these — implement
-// [`Daemonizable`] and let [`run`] orchestrate the daemon side.
-// `send_handshake` is the daemon-side primitive the child arm uses; helper
-// binaries need it to stand in for a (correct or deliberately wrong) daemon.
-#[doc(hidden)]
-pub use ipc::{rpc_server_from_inherited_fds, send_handshake, start_background_process_with_exe};
-
-// Like `start_background_process_with_exe` but keeps the full handshake +
-// failed-spawn cleanup, against an arbitrary helper binary. Exists
-// only so `daemonizable-e2e-tests` can cover the cleanup contract that
-// `spawn_daemon` promises (production always re-execs `/proc/self/exe`, which a
-// libtest binary cannot stand in for). Gated off the stable surface.
+// Production app code should not reach for these — implement [`Daemonizable`]
+// and let [`run`] orchestrate the daemon side. (The daemon-child arm uses
+// `send_handshake` / `rpc_server_from_inherited_fds` internally too, but via
+// the crate-private `ipc` module, so those call sites don't depend on these
+// re-exports.)
+//
+//   * `RpcConnection` / `InheritedFdsError` — build an in-process connection
+//     and the error its fd-claim can return.
+//   * `send_handshake` / `rpc_server_from_inherited_fds` — the daemon-side
+//     primitives a helper binary needs to stand in for a (correct or
+//     deliberately wrong) daemon.
+//   * `start_background_process_with_exe` — spawn an arbitrary helper binary,
+//     skipping the handshake.
+//   * `spawn_daemon_process_with_exe` — like the above but keeps the full
+//     handshake + failed-spawn cleanup, so the cleanup contract `spawn_daemon`
+//     promises stays testable (production always re-execs `/proc/self/exe`,
+//     which a libtest binary cannot stand in for).
 #[cfg(any(test, feature = "testutils"))]
 #[doc(hidden)]
-pub use ipc::spawn_daemon_process_with_exe;
+pub use ipc::{
+    InheritedFdsError, RpcConnection, rpc_server_from_inherited_fds, send_handshake,
+    spawn_daemon_process_with_exe, start_background_process_with_exe,
+};

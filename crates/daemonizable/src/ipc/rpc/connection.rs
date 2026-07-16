@@ -43,7 +43,14 @@ where
     /// `dup2` the returned fds onto `CHILD_REQUEST_RECV_FD` and
     /// `CHILD_RESPONSE_SEND_FD` (3 and 4) in a `pre_exec` closure, then drop
     /// the originals after `Command::spawn` returns.
-    pub fn into_client_and_child_fds(self) -> (RpcClient<Request, Response>, OwnedFd, OwnedFd) {
+    ///
+    /// Crate-internal: this is the parent-side fork+exec plumbing, used only by
+    /// the spawn machinery. The `testutils` in-process path uses
+    /// `into_server_and_client` instead, so this stays off even the `testutils`
+    /// surface.
+    pub(crate) fn into_client_and_child_fds(
+        self,
+    ) -> (RpcClient<Request, Response>, OwnedFd, OwnedFd) {
         let client = RpcClient::new(self.request_sender, self.response_receiver);
         let child_request_recv = self.request_receiver.into_owned_fd();
         let child_response_send = self.response_sender.into_owned_fd();

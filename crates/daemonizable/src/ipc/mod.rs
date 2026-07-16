@@ -5,14 +5,27 @@ mod rpc;
 mod spawn;
 
 pub use error::{
-    DetachStdioError, HandshakeError, InheritedFdsError, PipeCreateError, PipeRecvError,
-    PipeSendError, SpawnDaemonError,
+    DetachStdioError, HandshakeError, PipeCreateError, PipeRecvError, PipeSendError,
+    SpawnDaemonError,
 };
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
-#[cfg(any(test, feature = "testutils"))]
-pub use spawn::spawn_daemon_process_with_exe;
 pub(crate) use spawn::{DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, spawn_daemon_process};
-pub use spawn::{rpc_server_from_inherited_fds, send_handshake, start_background_process_with_exe};
+// `send_handshake` / `rpc_server_from_inherited_fds` are also used internally by
+// the daemon-child arm (`app::daemon_child`), so they stay crate-visible here
+// regardless of features; only their crate-root re-export in `lib.rs` is
+// `testutils`-gated.
+pub use spawn::{rpc_server_from_inherited_fds, send_handshake};
+
+// Test-only surface, gated so it never ships in the default published API
+// (mirrored by the `testutils`-gated crate-root re-exports in `lib.rs`).
+// `InheritedFdsError` is produced only by the fd-claim helper — internal code
+// names it via the `error` submodule directly, so this re-export exists purely
+// for the crate-root one — and the `*_with_exe` spawn helpers exist only for
+// the e2e tests.
+#[cfg(any(test, feature = "testutils"))]
+pub use error::InheritedFdsError;
+#[cfg(any(test, feature = "testutils"))]
+pub use spawn::{spawn_daemon_process_with_exe, start_background_process_with_exe};
 
 /// Replace the calling process's stdin/stdout/stderr with `/dev/null` via
 /// `dup2`. The daemon calls this at its post-startup boundary — typically

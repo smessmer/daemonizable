@@ -293,6 +293,12 @@ where
 /// the current one. Used by the daemon-lifecycle integration tests to drive
 /// the spawn machinery against a controlled daemon. Does not send a build-id
 /// handshake — the helper bin doesn't expect one.
+///
+/// Gated behind `test`/`testutils` and hidden from docs — like
+/// [`spawn_daemon_process_with_exe`] — so it doesn't ship in the default
+/// published surface.
+#[cfg(any(test, feature = "testutils"))]
+#[doc(hidden)]
 pub fn start_background_process_with_exe<Request, Response>(
     exe: &Path,
     extra_env: &[(&OsStr, &OsStr)],
@@ -305,8 +311,9 @@ where
     Ok(client)
 }
 
-/// Common fork+exec machinery shared by [`spawn_daemon_process`] and
-/// [`start_background_process_with_exe`].
+/// Common fork+exec machinery shared by [`spawn_daemon_process`] and the
+/// `testutils` spawn helpers (`start_background_process_with_exe` and
+/// `spawn_daemon_process_with_exe`).
 fn start_background_process_inner<Request, Response>(
     exe: &Path,
     argv0: Option<&Path>,
