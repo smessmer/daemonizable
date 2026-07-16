@@ -23,7 +23,13 @@ fn main() {
     let behavior =
         std::env::var("DAEMONIZABLE_TEST_BEHAVIOR").unwrap_or_else(|_| "echo".to_string());
 
-    let mut rpc: RpcServer<Request, Response> = rpc_server_from_inherited_fds()
+    // SAFETY: `rpc_server_from_inherited_fds` requires fds 3/4 to be this
+    // process's exclusively-owned inherited RPC pipe ends (see its `# Safety`).
+    // This helper binary only ever runs as a daemon child spawned by the test
+    // harness (`start_background_process_with_exe` / `spawn_daemon_process_with_exe`),
+    // which `dup2` the parent's pipe ends onto fds 3/4 across `execve`; nothing
+    // else in this fresh process owns them, and this is the only claim.
+    let mut rpc: RpcServer<Request, Response> = unsafe { rpc_server_from_inherited_fds() }
         .expect("daemon: failed to rebuild RpcServer from inherited fds");
 
     match behavior.as_str() {

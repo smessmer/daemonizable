@@ -27,7 +27,8 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// of a curious user invoking the daemon entry point manually from a shell.
 ///
 /// Must be called at most once per process (it takes ownership of fds 3/4); a
-/// second call returns an error rather than aliasing the descriptors.
+/// second call returns an [`InheritedFdsError::AlreadyClaimed`] error rather
+/// than aliasing the descriptors.
 ///
 /// Also re-sets `FD_CLOEXEC` on the two fds: the spawn's `dup2` cleared it so
 /// they'd survive `execve`, and without restoring it the daemon's own
@@ -38,8 +39,23 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// framework's daemon dispatch in [`crate::run`], which additionally sends
 /// the build-id handshake before handing the server to the app.
 ///
+/// # Safety
+/// Fds [`CHILD_REQUEST_RECV_FD`] (3) and [`CHILD_RESPONSE_SEND_FD`] (4) must be
+/// the daemon's *exclusively owned* inherited RPC pipe ends: call this only in a
+/// process the framework re-exec'd as a daemon child, where `spawn_daemon_process`
+/// / [`start_background_process_with_exe`] mapped the parent's pipe ends onto
+/// exactly those fd numbers across `execve`. This function takes ownership of
+/// both fds — wrapping each in an `OwnedFd` that closes it on drop — so if any
+/// other live `OwnedFd`/`File` in the calling process already owns fd 3 or 4
+/// (e.g. an unrelated program that happened to open pipes there and called this
+/// directly), the second owner minted here causes a double-close / use-after-free
+/// once both drop. The `fstat` open+FIFO check and the process-wide
+/// `DAEMON_FDS_CLAIMED` guard below are best-effort validation — they reject the
+/// common "invoked by hand" mistake and any second claim — but they cannot prove
+/// exclusive ownership, which is why that obligation falls on the caller.
+///
 /// [`start_background_process_with_exe`]: super::start_background_process_with_exe
-pub fn rpc_server_from_inherited_fds<Request, Response>()
+pub unsafe fn rpc_server_from_inherited_fds<Request, Response>()
 -> Result<RpcServer<Request, Response>, InheritedFdsError>
 where
     Request: Serialize + DeserializeOwned,
@@ -105,6 +121,13 @@ where
             source,
         })?;
     }
+    // SAFETY: `from_raw_fds` requires fds 3/4 be open and exclusively owned. By
+    // this function's own `# Safety` contract the caller guarantees exactly that:
+    // they are the daemon's inherited RPC pipe ends, owned by no other `OwnedFd`
+    // in this process. The code above reinforces it — `DAEMON_FDS_CLAIMED` made
+    // this the one and only claim in the process, and each fd was just `fstat`ed
+    // as an open FIFO — and the two fd numbers are distinct (3 vs 4), so the pair
+    // does not alias each other either.
     Ok(unsafe { RpcServer::from_raw_fds(CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD) })
 }
 
@@ -121,7 +144,12 @@ mod tests {
         // the test process, and without taking ownership of them. Restore the
         // previous value so we don't disturb any other test in this binary.
         let previously = DAEMON_FDS_CLAIMED.swap(true, Ordering::SeqCst);
-        let result = rpc_server_from_inherited_fds::<(), ()>();
+        // SAFETY: `rpc_server_from_inherited_fds` is `unsafe` because it would
+        // take ownership of fds 3/4. Here `DAEMON_FDS_CLAIMED` is pre-set to
+        // `true`, so the call short-circuits with `AlreadyClaimed` *before*
+        // reaching the fd-claiming code — it never wraps a descriptor, so the
+        // exclusive-ownership precondition is vacuously satisfied.
+        let result = unsafe { rpc_server_from_inherited_fds::<(), ()>() };
         DAEMON_FDS_CLAIMED.store(previously, Ordering::SeqCst);
 
         let err = result

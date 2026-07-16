@@ -1,15 +1,22 @@
 //! Regression test for daemon detachment.
 //!
-//! Forks a sub-test-process that calls `start_background_process_with_exe`,
-//! spawning the `daemonizable-test-background` helper binary in
-//! `sentinel_loop` mode (ignores RPC, writes a tick counter to a file
-//! forever), then exits immediately. The main test waits for the sub-process
-//! to reap, verifies the daemon is in its own session (setsid took effect),
-//! and that it's still updating the sentinel. Cleans up via SIGTERM.
+//! Launches a dedicated helper *process* (`daemonizable-test-spawn-then-exit`)
+//! via `std::process::Command`. That helper calls
+//! `start_background_process_with_exe` to spawn the `daemonizable-test-background`
+//! helper in `sentinel_loop` mode (ignores RPC, writes a tick counter to a file
+//! forever), then exits immediately. The main test waits for the spawner process
+//! to reap, verifies the daemon is in its own session (setsid took effect), and
+//! that it's still updating the sentinel. Cleans up via SIGTERM.
 //!
 //! Covers parent-exit survival of the **raw** spawn machinery
 //! (`start_background_process_with_exe`): the daemon keeps running after the
-//! sub-process that spawned it exits.
+//! process that spawned it exits. Using a separate spawner process launched with
+//! `Command` (rather than an in-test `fork()`) exercises the identical survival
+//! guarantee while keeping the test free of the fork-in-a-multithreaded-process
+//! hazard — libtest runs each test on a worker thread, so a `fork()` here would
+//! run in a multithreaded process and the (non-async-signal-safe) child could
+//! deadlock. The spawner is also a more faithful stand-in for the real cryfs
+//! parent CLI: a genuine separate process image, not a snapshot of the harness.
 //!
 //! Note: the `setsid` this test observes via `getsid()` is one the HELPER
 //! BINARY performs itself (daemonizable_test_background.rs `sentinel_loop`),
@@ -19,18 +26,24 @@
 //! `framework_e2e.rs`, which asserts the daemon's session differs from the test
 //! process's AND from the daemon's own pid.
 
-use std::ffi::OsStr;
 use std::path::PathBuf;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use daemonizable::start_background_process_with_exe;
 use nix::sys::signal::{Signal, kill};
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{ForkResult, Pid, fork, getsid};
+use nix::unistd::{Pid, getsid};
 
-fn helper_exe() -> PathBuf {
+/// The `daemonizable-test-background` helper, run as the daemon (in
+/// `sentinel_loop` mode) by the spawner process.
+fn background_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-background"))
+}
+
+/// The `daemonizable-test-spawn-then-exit` helper: stands in for the parent CLI
+/// that launches the daemon and then exits.
+fn spawner_exe() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-spawn-then-exit"))
 }
 
 /// RAII handle that kills the daemon on drop, so an assertion failure in the
@@ -71,103 +84,85 @@ fn daemon_survives_parent_exit() {
     let sentinel_path = tmp.path().join("sentinel");
     let pid_path = tmp.path().join("daemon.pid");
 
-    // SAFETY: `set_var` is unsafe in edition 2024 because it mutates the
-    // global environment, which races with any concurrent env read/write on
-    // another thread. This integration test is its own binary with a single
-    // `#[test]`, so no sibling test thread is reading env at the same time.
-    // These calls also run before the `fork()` below and before any
-    // `thread::spawn`, so the process is effectively single-threaded here —
-    // no concurrent env access is possible. The values are inherited through
-    // fork + execve into the helper daemon.
-    unsafe {
-        std::env::set_var("DAEMONIZABLE_TEST_SENTINEL", &sentinel_path);
-        std::env::set_var("DAEMONIZABLE_TEST_PID", &pid_path);
+    // Run the spawner as a separate process: it launches the daemon (the
+    // `daemonizable-test-background` helper in `sentinel_loop` mode) and exits
+    // immediately, simulating a parent CLI that daemonizes and returns. The
+    // daemon paths are handed over the environment — passed to the spawner's
+    // `Command` here, then inherited by the daemon across the spawn — so we
+    // never mutate this test process's own environment (no `set_var`, hence no
+    // cross-thread env race). `exit(0)` in the spawner skips destructors, just
+    // like the real cryfs parent CLI after a successful mount.
+    let status = Command::new(spawner_exe())
+        .env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
+        .env("DAEMONIZABLE_TEST_SENTINEL", &sentinel_path)
+        .env("DAEMONIZABLE_TEST_PID", &pid_path)
+        .status()
+        .expect("failed to run spawner process");
+    assert!(
+        status.success(),
+        "spawner process did not exit cleanly: {status:?}",
+    );
+
+    // Daemon is a grandchild of this test; discover its PID through the file it
+    // writes on startup.
+    //
+    // Poll on parseable content rather than just file existence: `std::fs::write`
+    // (used by the daemon) creates the file before it writes, so a naive
+    // `pid_path.exists()` check can win the race and read an empty file. macOS
+    // exposes this race more often than Linux.
+    let pid_deadline = Instant::now() + Duration::from_secs(5);
+    let daemon_pid = loop {
+        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = contents.trim().parse::<i32>() {
+                break Pid::from_raw(pid);
+            }
+        }
+        assert!(
+            Instant::now() < pid_deadline,
+            "daemon did not publish a parseable PID within 5s",
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    // Installed *before* any assertion below, so the daemon gets killed even if
+    // a check panics.
+    let _guard = DaemonGuard(daemon_pid);
+
+    // setsid moved the daemon into its own session. Without this, the daemon
+    // would die on SIGHUP when the parent's controlling terminal closes (e.g.
+    // when the user closes the shell).
+    let daemon_sid = getsid(Some(daemon_pid)).expect("getsid(daemon)");
+    let test_sid = getsid(None).expect("getsid(test)");
+    assert_ne!(
+        daemon_sid, test_sid,
+        "daemon and test share a session — setsid did not take effect",
+    );
+
+    // Daemon must keep writing the sentinel even though its spawner (the
+    // sub-process) has exited. Wait for the file to appear, then poll until its
+    // contents change. Daemon writes every 50 ms, so observing a change normally
+    // takes <100 ms; 5 s is a generous ceiling that fails fast if the daemon has
+    // actually stopped.
+    let sentinel_appear_deadline = Instant::now() + Duration::from_secs(5);
+    while !sentinel_path.exists() {
+        assert!(
+            Instant::now() < sentinel_appear_deadline,
+            "daemon did not create sentinel file within 5s",
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    let first = std::fs::read_to_string(&sentinel_path).expect("read sentinel");
+    let change_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        thread::sleep(Duration::from_millis(20));
+        let next = std::fs::read_to_string(&sentinel_path).expect("read sentinel");
+        if next != first {
+            break; // observed a change → daemon is alive
+        }
+        assert!(
+            Instant::now() < change_deadline,
+            "daemon stopped writing sentinel after parent exited (no change in 5s)",
+        );
     }
 
-    match unsafe { fork() }.expect("fork failed") {
-        ForkResult::Child => {
-            // Simulate the cryfs parent CLI process: spawn the daemon, then
-            // exit immediately. The daemon must keep running. `exit(0)`
-            // skips destructors, matching what the real cryfs parent CLI
-            // does after a successful mount.
-            let env: [(&OsStr, &OsStr); 1] = [(
-                OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
-                OsStr::new("sentinel_loop"),
-            )];
-            let _client = start_background_process_with_exe::<(), ()>(&helper_exe(), &env)
-                .expect("start_background_process_with_exe failed in child");
-            std::process::exit(0);
-        }
-        ForkResult::Parent { child } => {
-            let status = waitpid(child, None).expect("waitpid on sub-process");
-            assert!(
-                matches!(status, WaitStatus::Exited(_, 0)),
-                "sub-test-process did not exit cleanly: {status:?}",
-            );
-
-            // Daemon is a grandchild of this test; discover its PID through
-            // the file it writes on startup.
-            //
-            // Poll on parseable content rather than just file existence:
-            // `std::fs::write` (used by the daemon) creates the file before
-            // it writes, so a naive `pid_path.exists()` check can win the
-            // race and read an empty file. macOS exposes this race more
-            // often than Linux.
-            let pid_deadline = Instant::now() + Duration::from_secs(5);
-            let daemon_pid = loop {
-                if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-                    if let Ok(pid) = contents.trim().parse::<i32>() {
-                        break Pid::from_raw(pid);
-                    }
-                }
-                assert!(
-                    Instant::now() < pid_deadline,
-                    "daemon did not publish a parseable PID within 5s",
-                );
-                thread::sleep(Duration::from_millis(20));
-            };
-            // Installed *before* any assertion below, so the daemon gets
-            // killed even if a check panics.
-            let _guard = DaemonGuard(daemon_pid);
-
-            // setsid moved the daemon into its own session. Without this,
-            // the daemon would die on SIGHUP when the parent's controlling
-            // terminal closes (e.g. when the user closes the shell).
-            let daemon_sid = getsid(Some(daemon_pid)).expect("getsid(daemon)");
-            let test_sid = getsid(None).expect("getsid(test)");
-            assert_ne!(
-                daemon_sid, test_sid,
-                "daemon and test share a session — setsid did not take effect",
-            );
-
-            // Daemon must keep writing the sentinel even though its parent
-            // (the sub-test-process) has exited. Wait for the file to appear,
-            // then poll until its contents change. Daemon writes every 50 ms,
-            // so observing a change normally takes <100 ms; 5 s is a generous
-            // ceiling that fails fast if the daemon has actually stopped.
-            let sentinel_appear_deadline = Instant::now() + Duration::from_secs(5);
-            while !sentinel_path.exists() {
-                assert!(
-                    Instant::now() < sentinel_appear_deadline,
-                    "daemon did not create sentinel file within 5s",
-                );
-                thread::sleep(Duration::from_millis(20));
-            }
-            let first = std::fs::read_to_string(&sentinel_path).expect("read sentinel");
-            let change_deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                thread::sleep(Duration::from_millis(20));
-                let next = std::fs::read_to_string(&sentinel_path).expect("read sentinel");
-                if next != first {
-                    break; // observed a change → daemon is alive
-                }
-                assert!(
-                    Instant::now() < change_deadline,
-                    "daemon stopped writing sentinel after parent exited (no change in 5s)",
-                );
-            }
-
-            // Cleanup happens via DaemonGuard's Drop.
-        }
-    }
+    // Cleanup happens via DaemonGuard's Drop.
 }

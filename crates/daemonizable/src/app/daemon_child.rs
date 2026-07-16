@@ -36,13 +36,21 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
         std::env::remove_var(DAEMON_CHILD_ENV_VAR);
     }
 
-    let mut server: RpcServer<A::Request, A::Response> = match rpc_server_from_inherited_fds() {
-        Ok(s) => s,
-        Err(err) => {
-            eprintln!("daemon child: {err}");
-            std::process::exit(2);
-        }
-    };
+    // SAFETY: `rpc_server_from_inherited_fds` requires fds 3/4 to be the
+    // daemon's exclusively-owned inherited RPC pipe ends (see its `# Safety`).
+    // That holds here: `run` only dispatches to `run_as_daemon_child` after
+    // detecting the `DAEMON_CHILD_ENV_VAR` marker the parent's spawn sets, so
+    // this is a fresh post-exec image the framework launched as the daemon
+    // child, with the parent's pipe ends `dup2`'d onto fds 3/4 across `execve`
+    // and owned by nothing else in this process. It is also the sole claim.
+    let mut server: RpcServer<A::Request, A::Response> =
+        match unsafe { rpc_server_from_inherited_fds() } {
+            Ok(s) => s,
+            Err(err) => {
+                eprintln!("daemon child: {err}");
+                std::process::exit(2);
+            }
+        };
 
     // setsid is fatal on failure: without a new session the daemon would die
     // along with the parent's controlling terminal.
