@@ -38,7 +38,13 @@ where
     /// `RpcClient`, and `out_fd` the corresponding write end — but that is a
     /// *correctness* contract (swapping them yields a broken RPC channel, not
     /// undefined behavior), not a safety one.
-    pub fn from_owned_fds(in_fd: OwnedFd, out_fd: OwnedFd) -> Self {
+    ///
+    /// Crate-internal: the daemon child never constructs its own `RpcServer`
+    /// (it receives one, already built, in `Daemonizable::run_daemon`). This
+    /// constructor exists only for the one internal caller
+    /// `rpc_server_from_inherited_fds`, so it stays off the public API rather
+    /// than exposing an fd-adopting constructor on a type every daemon app holds.
+    pub(crate) fn from_owned_fds(in_fd: OwnedFd, out_fd: OwnedFd) -> Self {
         let receiver = Receiver::from_owned_fd(in_fd);
         let sender = Sender::from_owned_fd(out_fd);
         Self::new(sender, receiver)
