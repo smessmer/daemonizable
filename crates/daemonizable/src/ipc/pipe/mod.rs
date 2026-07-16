@@ -167,6 +167,13 @@ mod tests {
             ("sender", sender_fd.as_raw_fd()),
             ("recver", recver_fd.as_raw_fd()),
         ] {
+            // SAFETY: FFI call to fcntl(F_GETFD). F_GETFD takes no variadic
+            // third argument and reads no caller pointer, so the only operands
+            // are plain ints. `raw_fd` is borrowed via `as_raw_fd()` from
+            // `sender_fd`/`recver_fd`, `OwnedFd`s that stay alive on the stack
+            // for the whole loop, so the descriptor is open and exclusively
+            // owned during the call; the call neither takes ownership nor closes
+            // it. An invalid fd would only yield EBADF (checked below), not UB.
             let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
             assert!(flags >= 0, "fcntl(F_GETFD) failed for {label}");
             assert!(

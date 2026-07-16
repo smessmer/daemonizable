@@ -71,11 +71,14 @@ fn daemon_survives_parent_exit() {
     let sentinel_path = tmp.path().join("sentinel");
     let pid_path = tmp.path().join("daemon.pid");
 
-    // SAFETY: `set_var` is unsafe because it races with concurrent env
-    // reads on other threads. This integration test is its own binary with
-    // a single `#[test]`, so no sibling test thread is reading env at the
-    // same time. The values are inherited through fork + execve into the
-    // helper daemon.
+    // SAFETY: `set_var` is unsafe in edition 2024 because it mutates the
+    // global environment, which races with any concurrent env read/write on
+    // another thread. This integration test is its own binary with a single
+    // `#[test]`, so no sibling test thread is reading env at the same time.
+    // These calls also run before the `fork()` below and before any
+    // `thread::spawn`, so the process is effectively single-threaded here —
+    // no concurrent env access is possible. The values are inherited through
+    // fork + execve into the helper daemon.
     unsafe {
         std::env::set_var("DAEMONIZABLE_TEST_SENTINEL", &sentinel_path);
         std::env::set_var("DAEMONIZABLE_TEST_PID", &pid_path);

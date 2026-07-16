@@ -114,6 +114,13 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
     if ptr == 0 {
         return None;
     }
+    // SAFETY: `ptr` is the non-zero return of `getauxval(AT_EXECFN)` (the
+    // `ptr == 0` case returned above), which for this pointer-typed auxv entry
+    // is the kernel-supplied pointer to the NUL-terminated pathname the process
+    // was `execve`'d with. That string is correctly aligned (`c_char` has
+    // alignment 1) and lives for the whole process lifetime, and the borrowed
+    // `CStr` is consumed inline (its bytes copied into a `PathBuf` below), so it
+    // is never mutated or outlived.
     let bytes = unsafe { CStr::from_ptr(ptr as *const libc::c_char) }.to_bytes();
     if bytes.is_empty() {
         return None;
@@ -264,6 +271,14 @@ where
             // A grandchild the group-kill somehow misses (it left the group via
             // its own setsid/setpgid) still self-terminates via pipe EOF once
             // the client is dropped on the error return.
+            // SAFETY: `libc::kill` is `unsafe` only as an `extern "C"` FFI
+            // symbol; it takes two by-value integers (a pid_t and a signal
+            // number) and no pointers, so it has no memory-safety precondition
+            // and can never cause UB. A stale, wrong, or nonexistent pid/group
+            // can only return ESRCH/EPERM at runtime (discarded via `let _`).
+            // Which group is actually signalled — that `-child_pid` reaches the
+            // daemon grandchild and cannot hit a pid-reused foreign group — is a
+            // correctness property argued in the comment above.
             let _ = unsafe { libc::kill(-child_pid, libc::SIGKILL) };
             let _ = child.kill();
             let _ = child.wait();

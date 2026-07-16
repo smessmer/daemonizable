@@ -80,9 +80,23 @@ fn main() {
             // doesn't observe "pid file present" until we've at least
             // attempted the leak.
             let payload = b"LEAK\n";
+            // SAFETY: libc::write reads `count` bytes from `buf`. Here `buf` is
+            // `payload.as_ptr()` and `count` is `payload.len()`, both derived from
+            // `payload` (`b"LEAK\n"`, a live `&[u8; 5]`), so the pointer addresses
+            // exactly 5 initialized, u8-aligned bytes and the length matches the
+            // buffer — no out-of-bounds or uninitialized read. `leak_fd` may be any
+            // int, but an invalid fd only yields EBADF at runtime (never UB); the
+            // return value is intentionally ignored since the test expects this
+            // write to fail with EBADF.
             let _ = unsafe { libc::write(leak_fd, payload.as_ptr().cast(), payload.len()) };
             std::fs::write(&pid_file, std::process::id().to_string())
                 .expect("daemon: write pid file");
+            // SAFETY: `libc::setsid()` is a bare syscall wrapper that takes no
+            // arguments and dereferences no pointers or file descriptors, so
+            // there is no memory-safety precondition to uphold. It is `unsafe`
+            // only as an FFI call. It either succeeds or returns -1/EPERM
+            // (already a process-group leader), a defined error handled by the
+            // `< 0` check below.
             if unsafe { libc::setsid() } < 0 {
                 eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
                 std::process::exit(1);
@@ -132,6 +146,11 @@ fn main() {
             // setsid for the test daemon so it survives the sub-test-process
             // exit even though we haven't gone through the framework's
             // daemon dispatch (which would have called setsid).
+            // SAFETY: setsid() takes no arguments and no pointers/fds, so it has
+            // no memory-safety preconditions; it is `unsafe` only as an FFI call.
+            // Not in a fork/exec window, so async-signal-safety is irrelevant.
+            // Its sole failure (EPERM if already a group leader) is a runtime
+            // error, not UB, and is handled by the `< 0` branch below.
             if unsafe { libc::setsid() } < 0 {
                 eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
                 std::process::exit(1);
@@ -172,10 +191,27 @@ fn main() {
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
+            // SAFETY: `setsid()` takes no arguments — no pointers, buffers, or
+            // fds — so it has no memory-safety preconditions; it is `unsafe`
+            // only because it is an `extern "C"` fn. It is not in a fork→exec
+            // async-signal-safety window (the fork below happens afterwards) and
+            // the process is single-threaded here regardless. Its only failure
+            // is a -1/EPERM return, handled by the `< 0` check below.
             if unsafe { libc::setsid() } < 0 {
                 eprintln!("daemon: setsid failed: {}", std::io::Error::last_os_error());
                 std::process::exit(1);
             }
+            // SAFETY: libc::fork() takes no arguments and is always callable; its
+            // only soundness obligation is the POSIX rule that after a fork in a
+            // MULTITHREADED process the child may run only async-signal-safe
+            // code. The child branch below runs non-async-signal-safe work
+            // (std::fs::write, send_handshake, sleep), so this is sound only
+            // because the process is single-threaded here: this is a synchronous
+            // `fn main` with no async runtime, and nothing on the path from
+            // program start to this point (env reads, rpc_server_from_inherited_fds,
+            // setsid) spawns a thread. With one thread at the fork, the child
+            // inherits a consistent address space and may run arbitrary code;
+            // the intermediate branch's _exit(0) is async-signal-safe regardless.
             match unsafe { libc::fork() } {
                 -1 => {
                     eprintln!("daemon: fork failed: {}", std::io::Error::last_os_error());
@@ -191,6 +227,12 @@ fn main() {
                         std::thread::sleep(std::time::Duration::from_secs(60));
                     }
                 }
+                // SAFETY: `libc::_exit` takes only an `int` exit status; it has
+                // no pointer/buffer/fd arguments and thus no memory-safety
+                // precondition a caller can violate. It is async-signal-safe, so
+                // terminating the parent ("intermediate session leader") here
+                // after `fork()` is permitted even in a multithreaded process.
+                // It never returns.
                 _ => unsafe { libc::_exit(0) }, // intermediate session leader
             }
         }

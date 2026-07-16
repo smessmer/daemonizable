@@ -58,7 +58,21 @@ where
         ("request-recv", CHILD_REQUEST_RECV_FD),
         ("response-send", CHILD_RESPONSE_SEND_FD),
     ] {
+        // SAFETY: `std::mem::zeroed` is sound here because `libc::stat` is a
+        // `repr(C)` plain-old-data struct made up entirely of integer fields
+        // (device/inode/mode/uid/gid/size/block counts and `time_t`/`c_long`
+        // timestamp members, plus reserved integer padding). None of these have
+        // a validity invariant that excludes zero, so the all-zero bit pattern
+        // is a valid value. It is only ever used as the out-buffer for the
+        // `fstat` call below, which initializes it before any field is read.
         let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `fstat` writes the file status through its second argument,
+        // which here is `&mut statbuf` — a live, non-null, correctly aligned,
+        // fully initialized `libc::stat` local (zeroed above; a repr(C) POD of
+        // integer fields matching the platform `struct stat`), valid for the
+        // whole call. `fd` is only an int: a bad or non-open descriptor yields
+        // -1/EBADF (handled below via `NotOpen`), never UB, and `fstat` neither
+        // takes ownership of nor closes it, so no aliasing obligation applies.
         if unsafe { libc::fstat(fd, &mut statbuf) } < 0 {
             return Err(InheritedFdsError::NotOpen {
                 fd,

@@ -123,6 +123,12 @@ impl Daemonizable for TestApp {
         // these report the FINAL daemon identity: pid is the grandchild's, sid
         // is the (dead) intermediate's pid.
         let pid = std::process::id();
+        // SAFETY: `libc::getsid` is a plain POSIX query syscall taking a
+        // by-value `pid_t` (0 = the calling process) and returning a `pid_t`.
+        // It reads/writes no caller memory, takes no pointers, owns no fds, and
+        // touches no shared/global state; it is `unsafe` only via libc's
+        // blanket `extern "C"` rule. The argument 0 is always valid, and any
+        // failure yields a `-1`/errno return rather than UB.
         let sid = unsafe { libc::getsid(0) };
         // Echo+1 until the parent drops its client (EOF), then exit cleanly.
         while let Ok(request) = rpc.next_request() {

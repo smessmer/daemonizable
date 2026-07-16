@@ -46,6 +46,12 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
 
     // setsid is fatal on failure: without a new session the daemon would die
     // along with the parent's controlling terminal.
+    //
+    // SAFETY: `libc::setsid` is `unsafe` only as an `extern "C"` binding; the
+    // POSIX call takes no arguments and no caller-provided pointers, owns no
+    // file descriptors, and cannot invoke UB. Its one failure mode (the caller
+    // is already a process-group leader) is a defined EPERM/-1 return, handled
+    // by the `< 0` check below — a correctness concern, not a soundness one.
     if unsafe { libc::setsid() } < 0 {
         eprintln!(
             "daemon child: setsid() failed: {}",
@@ -61,7 +67,11 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // it as its controlling terminal, and TIOCSCTTY likewise requires a
     // session leader; a non-leader is structurally immune to both.
     //
-    // Safe here: we are a fresh single-threaded post-exec image — no app code
+    // SAFETY: `libc::fork()` in a *multithreaded* process may run only
+    // async-signal-safe code in the child, and this grandchild's post-fork path
+    // is NOT async-signal-safe (chdir, then send_handshake allocates and
+    // serializes), so soundness requires that the process be single-threaded
+    // here. It is: we are a fresh single-threaded post-exec image — no app code
     // has run in this arm yet (`A::build_id()` first runs in send_handshake
     // below), so this is not a fork-in-a-multithreaded-process. (The one
     // residual assumption is that the application's `main` preamble started no
@@ -113,6 +123,13 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
             // hand-written main preamble must flush at most once, in the
             // daemon) and skips Rust drops (the live `server` owns fds 3/4;
             // the grandchild's inherited copies keep the pipes open regardless).
+            //
+            // SAFETY: `libc::_exit(0)` is `unsafe` only under libc's blanket
+            // `extern "C"` rule. POSIX `_exit(int)` takes a plain int (here the
+            // valid `c_int` `0`), passes no pointers, owns/aliases nothing, is
+            // async-signal-safe, and is unconditionally callable in any process
+            // state — so it has no preconditions to satisfy. It diverges,
+            // matching the `-> !` context.
             unsafe { libc::_exit(0) };
         }
     }
@@ -126,6 +143,13 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // the daemon still works, it just keeps the parent's cwd pinned — worth a
     // warning, not a crash. Runs before the handshake so a failure can still
     // surface on the not-yet-detached stderr.
+    //
+    // SAFETY: `libc::chdir` requires only that its `path` argument be a valid,
+    // non-null, aligned, NUL-terminated C string live for the call. `c"/"` is a
+    // `&'static CStr` literal (bytes `{'/', 0}`) in static storage, so
+    // `c"/".as_ptr()` is non-null, aligned, NUL-terminated, and never freed or
+    // mutated — the precondition holds unconditionally. chdir takes no fd and a
+    // bad path only yields an errno (-1), never UB.
     if unsafe { libc::chdir(c"/".as_ptr()) } < 0 {
         eprintln!(
             "daemon child: warning: chdir(\"/\") failed, keeping inherited working directory: {}",
