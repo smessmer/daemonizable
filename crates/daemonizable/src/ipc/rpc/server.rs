@@ -2,7 +2,7 @@
 //! parent and sends typed responses back, plus the out-of-band build-id
 //! handshake that precedes typed RPC.
 
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -27,35 +27,20 @@ where
         Self { sender, receiver }
     }
 
-    /// Reconstruct an `RpcServer` from inherited raw file descriptors. The
-    /// fork+exec daemon child receives its pipe ends as fds 3 (request-recv)
-    /// and 4 (response-send) and calls this to rebuild its typed RPC handle.
+    /// Reconstruct an `RpcServer` from the daemon's inherited pipe ends, already
+    /// adopted into owning [`OwnedFd`]s. The fork+exec daemon child receives its
+    /// pipe ends as fds 3 (request-recv) and 4 (response-send);
+    /// `rpc_server_from_inherited_fds` validates and takes ownership of them
+    /// (the one raw-fd `unsafe`), then hands the two `OwnedFd`s here.
     ///
-    /// # Safety
-    /// `in_fd` must be the read end of a pipe whose write end is held by the
-    /// parent's `RpcClient`. `out_fd` must be the corresponding write end.
-    /// Both fds must be owned (not shared) — calling this twice on the same
-    /// fd numbers is a use-after-free.
-    pub unsafe fn from_raw_fds(in_fd: RawFd, out_fd: RawFd) -> Self {
-        // SAFETY: Per this `unsafe fn`'s `# Safety` contract, `in_fd` is the
-        // open read end of the parent<->daemon pipe and is exclusively owned
-        // (no other `OwnedFd`/`File` owns it). Wrapping it in an `OwnedFd`,
-        // which closes it on drop, therefore satisfies `from_raw_fd`'s
-        // "open + exclusive-ownership" precondition. The sole caller
-        // (`rpc_server_from_inherited_fds`) upholds this: it `fstat`-validates
-        // the fd is open and a FIFO and serializes the claim behind the
-        // `DAEMON_FDS_CLAIMED` flag, so the fd is wrapped at most once.
-        // `Receiver::from_owned_fd` is a safe consumer of the `OwnedFd`.
-        let receiver = unsafe { Receiver::from_owned_fd(OwnedFd::from_raw_fd(in_fd)) };
-        // SAFETY: `OwnedFd::from_raw_fd` requires `out_fd` be open and exclusively
-        // owned, since the `OwnedFd` closes it on drop. Both hold by this `unsafe fn`'s
-        // documented `# Safety` contract: `out_fd` is the caller-owned pipe write end,
-        // distinct from `in_fd` (so it does not alias the `OwnedFd` minted on the line
-        // above). The sole caller, `rpc_server_from_inherited_fds`, enforces this — its
-        // `DAEMON_FDS_CLAIMED` atomic makes the claim of fds 3/4 a once-per-process
-        // singleton (no second owner), and it `fstat`-verifies the fd is an open FIFO
-        // before this call.
-        let sender = unsafe { Sender::from_owned_fd(OwnedFd::from_raw_fd(out_fd)) };
+    /// Safe: ownership is established by the `OwnedFd` arguments. `in_fd` should
+    /// be the read end of a pipe whose write end is held by the parent's
+    /// `RpcClient`, and `out_fd` the corresponding write end — but that is a
+    /// *correctness* contract (swapping them yields a broken RPC channel, not
+    /// undefined behavior), not a safety one.
+    pub fn from_owned_fds(in_fd: OwnedFd, out_fd: OwnedFd) -> Self {
+        let receiver = Receiver::from_owned_fd(in_fd);
+        let sender = Sender::from_owned_fd(out_fd);
         Self::new(sender, receiver)
     }
 

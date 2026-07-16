@@ -44,7 +44,10 @@ pub use spawn::{rpc_server_from_inherited_fds, send_handshake, start_background_
 /// partially redirected; see the error variants). The caller decides whether
 /// that's fatal; the daemon otherwise keeps running.
 pub fn detach_stdio() -> Result<(), DetachStdioError> {
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+
+    use nix::fcntl::{FcntlArg, fcntl};
+    use nix::unistd::{dup2_stderr, dup2_stdin, dup2_stdout};
 
     let devnull = std::fs::OpenOptions::new()
         .read(true)
@@ -58,44 +61,37 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
     // the `dup2(fd, fd)` self-copy below is a no-op and the end-of-scope drop
     // would close the std fd we just "redirected". See the doc comment.
     if source.as_raw_fd() <= libc::STDERR_FILENO {
-        // SAFETY: `source` is a live, open descriptor and the variadic third
-        // argument is a valid `c_int` minimum fd. `F_DUPFD_CLOEXEC` only
-        // duplicates the descriptor (or fails with a plain errno); it has no
-        // memory effects. Ownership of the returned fd is taken below.
-        let relocated = unsafe {
-            libc::fcntl(
-                source.as_raw_fd(),
-                libc::F_DUPFD_CLOEXEC,
-                libc::STDERR_FILENO + 1,
-            )
-        };
-        if relocated < 0 {
-            return Err(DetachStdioError::Relocate(std::io::Error::last_os_error()));
-        }
+        // Duplicate `source` above the std range with CLOEXEC in one `fcntl`.
+        // Safe: it borrows `source` and only reads/duplicates the descriptor.
+        let relocated = fcntl(
+            source.as_fd(),
+            FcntlArg::F_DUPFD_CLOEXEC(libc::STDERR_FILENO + 1),
+        )
+        .map_err(|errno| DetachStdioError::Relocate(errno.into()))?;
         // Reassigning `source` drops the old (low) fd, closing it, and takes
         // ownership of the relocated one, which is guaranteed to be > 2.
-        // SAFETY: `relocated` is a fresh, exclusively-owned fd from the fcntl.
+        //
+        // SAFETY: `relocated` is a fresh, exclusively-owned fd just returned by
+        // `F_DUPFD_CLOEXEC`; nothing else owns it, so adopting it into an
+        // `OwnedFd` (which closes it on drop) is sound.
         source = unsafe { OwnedFd::from_raw_fd(relocated) };
     }
 
-    let fd = source.as_raw_fd();
-    for target in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-        // SAFETY: `libc::dup2` takes two `c_int`s and no pointers, so the FFI
-        // call cannot touch caller memory. `fd` is `source.as_raw_fd()`, a live
-        // open descriptor owned by `source` (the `/dev/null` `OwnedFd`, or its
-        // relocated `F_DUPFD_CLOEXEC` duplicate) that stays alive until end of
-        // scope; `dup2` does not consume `oldfd`, so ownership is unaffected.
-        // The targets are the raw std fds 0/1/2, which no `OwnedFd` owns, so
-        // replacing them is the intended effect, not a close-under-owner. The
-        // relocation above guarantees `fd > 2`, so `fd != target` and the copy
-        // is never a self-copy no-op. A bad fd would yield EBADF, not UB.
-        if unsafe { libc::dup2(fd, target) } < 0 {
-            return Err(DetachStdioError::Dup2 {
-                target,
-                source: std::io::Error::last_os_error(),
-            });
-        }
-    }
+    // Redirect stdin/stdout/stderr onto `source`. `dup2_std*` are safe wrappers
+    // around `dup2(source, 0/1/2)`; the relocation above guarantees `source > 2`,
+    // so none of these is a self-copy no-op that would fail to replace the target.
+    dup2_stdin(source.as_fd()).map_err(|errno| DetachStdioError::Dup2 {
+        target: libc::STDIN_FILENO,
+        source: errno.into(),
+    })?;
+    dup2_stdout(source.as_fd()).map_err(|errno| DetachStdioError::Dup2 {
+        target: libc::STDOUT_FILENO,
+        source: errno.into(),
+    })?;
+    dup2_stderr(source.as_fd()).map_err(|errno| DetachStdioError::Dup2 {
+        target: libc::STDERR_FILENO,
+        source: errno.into(),
+    })?;
     // `source` (now guaranteed > 2) drops at end of scope, closing the temp fd;
     // the three targets keep their duplicated descriptors.
     Ok(())

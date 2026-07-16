@@ -18,12 +18,13 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use daemonizable::start_background_process_with_exe;
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
@@ -79,25 +80,12 @@ fn pipes_do_not_leak_into_daemon() {
     // We want the sentinel pipe to be CLOEXEC the same way cryfs's own
     // pipes are, so the test isolates the *daemon spawn* layer rather than
     // a coincidental CLOEXEC default.
-    for fd in [sentinel_recver.as_raw_fd(), sentinel_sender.as_raw_fd()] {
-        // SAFETY: FFI call to fcntl(2) with cmd F_GETFD, which takes no variadic
-        // third argument (none is passed) and no pointer argument, so there are
-        // no memory-validity preconditions. `fd` is a plain c_int borrowed via
-        // as_raw_fd() from the live `sentinel_recver`/`sentinel_sender` pipes
-        // (still owned in this scope); F_GETFD only reads the descriptor's flags
-        // and never takes ownership, so a stale fd would merely return EBADF
-        // (checked below), never cause UB.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        assert!(flags >= 0);
-        // SAFETY: FFI call to fcntl(2). Setting F_SETFD requires exactly one int
-        // variadic arg, and `flags | FD_CLOEXEC` is that int (`flags` is the
-        // c_int returned by the F_GETFD call above). No pointer args are passed.
-        // `fd` is borrowed via AsRawFd from the still-live sentinel pipe halves;
-        // F_SETFD only sets the close-on-exec flag and neither transfers nor
-        // closes fd ownership, so there is no aliasing or double-close hazard. A
-        // stale fd would only yield EBADF, not UB.
-        let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
-        assert!(rc >= 0);
+    for fd in [sentinel_recver.as_fd(), sentinel_sender.as_fd()] {
+        // Set FD_CLOEXEC on each sentinel pipe end via nix (safe: `fd` is
+        // borrowed from the still-live pipe halves), preserving other flags.
+        let flags = fcntl(fd, FcntlArg::F_GETFD).expect("fcntl F_GETFD");
+        let flags = FdFlag::from_bits_retain(flags) | FdFlag::FD_CLOEXEC;
+        fcntl(fd, FcntlArg::F_SETFD(flags)).expect("fcntl F_SETFD");
     }
     let sentinel_write_fd = sentinel_sender.as_raw_fd();
 

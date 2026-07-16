@@ -1,8 +1,10 @@
 //! The daemon child's one-time claim of the IPC pipe fds it inherited from its
 //! parent across `execve`, rebuilt into a typed [`RpcServer`].
 
+use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use nix::sys::stat::fstat;
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::{CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD};
@@ -12,8 +14,8 @@ use crate::ipc::error::InheritedFdsError;
 
 /// Guards the process-wide claim on the inherited daemon fds (3 and 4).
 ///
-/// [`rpc_server_from_inherited_fds`] mints owning `OwnedFd`s from those fixed
-/// fd numbers via the `unsafe` [`RpcServer::from_raw_fds`]. A second call would
+/// [`rpc_server_from_inherited_fds`] adopts those fixed fd numbers into owning
+/// `OwnedFd`s (the one raw-fd `unsafe`). A second call would
 /// hand out a *second* owner of the same fds; once the first `RpcServer` drops
 /// and closes them, the kernel can reassign 3/4 to unrelated files, and the
 /// second server would then read/write/close the wrong resource. The fds are a
@@ -74,33 +76,26 @@ where
         ("request-recv", CHILD_REQUEST_RECV_FD),
         ("response-send", CHILD_RESPONSE_SEND_FD),
     ] {
-        // SAFETY: `std::mem::zeroed` is sound here because `libc::stat` is a
-        // `repr(C)` plain-old-data struct made up entirely of integer fields
-        // (device/inode/mode/uid/gid/size/block counts and `time_t`/`c_long`
-        // timestamp members, plus reserved integer padding). None of these have
-        // a validity invariant that excludes zero, so the all-zero bit pattern
-        // is a valid value. It is only ever used as the out-buffer for the
-        // `fstat` call below, which initializes it before any field is read.
-        let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: `fstat` writes the file status through its second argument,
-        // which here is `&mut statbuf` — a live, non-null, correctly aligned,
-        // fully initialized `libc::stat` local (zeroed above; a repr(C) POD of
-        // integer fields matching the platform `struct stat`), valid for the
-        // whole call. `fd` is only an int: a bad or non-open descriptor yields
-        // -1/EBADF (handled below via `NotOpen`), never UB, and `fstat` neither
-        // takes ownership of nor closes it, so no aliasing obligation applies.
-        if unsafe { libc::fstat(fd, &mut statbuf) } < 0 {
-            return Err(InheritedFdsError::NotOpen {
-                fd,
-                label,
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        if statbuf.st_mode & libc::S_IFMT != libc::S_IFIFO {
+        // Borrow the raw fd number once for both the pipe-validation `fstat` and
+        // the CLOEXEC restore below. A `BorrowedFd` closes nothing, so if the fd
+        // turns out not to be open or not a pipe we can reject it without
+        // disturbing it — and without adopting an fd we don't want to own.
+        //
+        // SAFETY: this is single-threaded daemon startup; the borrow lives only
+        // for the two `nix` calls below, during which nothing closes or reuses
+        // the fd. `borrow_raw` requires a non-`-1` descriptor, which the fixed
+        // constants 3/4 satisfy.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        let stat = fstat(borrowed).map_err(|errno| InheritedFdsError::NotOpen {
+            fd,
+            label,
+            source: errno.into(),
+        })?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFIFO {
             return Err(InheritedFdsError::NotAPipe {
                 fd,
                 label,
-                st_mode: statbuf.st_mode,
+                st_mode: stat.st_mode,
             });
         }
         // Restore FD_CLOEXEC. The parent set it on every pipe end at creation,
@@ -114,21 +109,30 @@ where
         // the parent waits on — silently defeating the liveness of
         // `recv_response_blocking`. (The symmetric effect on fd 3 delays the
         // parent's `send_request` EPIPE.)
-        set_cloexec(fd).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
+        set_cloexec(borrowed).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
             fd,
             label,
             operation,
             source,
         })?;
     }
-    // SAFETY: `from_raw_fds` requires fds 3/4 be open and exclusively owned. By
-    // this function's own `# Safety` contract the caller guarantees exactly that:
-    // they are the daemon's inherited RPC pipe ends, owned by no other `OwnedFd`
-    // in this process. The code above reinforces it — `DAEMON_FDS_CLAIMED` made
-    // this the one and only claim in the process, and each fd was just `fstat`ed
-    // as an open FIFO — and the two fd numbers are distinct (3 vs 4), so the pair
-    // does not alias each other either.
-    Ok(unsafe { RpcServer::from_raw_fds(CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD) })
+    // Both fds validated as open FIFOs above; adopt ownership now. This is the
+    // one irreducible `unsafe` in the claim — turning the inherited raw fd
+    // numbers into owning `OwnedFd`s — and the reason this function is `unsafe`.
+    //
+    // SAFETY: by this function's `# Safety` contract the caller guarantees fds
+    // 3/4 are the daemon's exclusively-owned inherited pipe ends;
+    // `DAEMON_FDS_CLAIMED` made this the sole claim in the process, and each was
+    // just `fstat`ed as an open FIFO, so each `OwnedFd` (which closes on drop) is
+    // the one and only owner. The two fd numbers are distinct (3 vs 4), so the
+    // pair does not alias each other either.
+    let (request_recv, response_send) = unsafe {
+        (
+            OwnedFd::from_raw_fd(CHILD_REQUEST_RECV_FD),
+            OwnedFd::from_raw_fd(CHILD_RESPONSE_SEND_FD),
+        )
+    };
+    Ok(RpcServer::from_owned_fds(request_recv, response_send))
 }
 
 #[cfg(test)]
