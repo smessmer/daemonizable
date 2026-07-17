@@ -44,6 +44,17 @@ static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 /// `main` has to keep that promise itself (and must return `run`'s
 /// [`ExitCode`] rather than swallowing it).
 ///
+/// The constraint reaches before `main`, too: pre-main constructors
+/// (`#[ctor]`-style crates, `__attribute__((constructor))` code in linked C
+/// libraries, LD_PRELOAD shims — in your program or any of its dependencies)
+/// also run again in the daemon child, before `run` gets control. They must
+/// not spawn threads, read or modify the environment, or open/claim file
+/// descriptors 3/4: the daemon-child startup relies on being single-threaded
+/// while it drops the env marker and performs its second fork, and on fds 3/4
+/// having no other owner while it claims them. A constructor that breaks
+/// these rules can make daemonization undefined behavior in ways neither this
+/// crate nor `#[daemonizable::main]` can detect.
+///
 /// Dispatches on the process role: a normal invocation calls
 /// [`A::run_foreground`](Daemonizable::run_foreground) with the [`Daemonizer`]
 /// capability; the re-exec'd daemon child (recognized by the environment
