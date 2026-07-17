@@ -74,8 +74,31 @@ fn linux_daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
         return Ok(PathBuf::from("/proc/self/exe"));
     }
 
-    // `/proc` is unavailable. Fall back to the exec-time pathname the kernel
-    // stashed in the auxiliary vector.
+    // `/proc` is unavailable, so only the invoker-chosen fallbacks remain. In
+    // a secure-execution process (setuid/setgid/file-caps — AT_SECURE != 0)
+    // both AT_EXECFN and argv[0] are picked by the *unprivileged* invoker and
+    // may be relative paths resolved against a caller-controlled cwd, so
+    // re-exec'ing them would let the invoker steer which binary runs with the
+    // elevated credentials. Refuse instead: /proc-less *and* setuid is
+    // vanishingly rare, and a clean error beats a privilege-preserving exec
+    // of an unverified path. (The build-id handshake only catches accidents —
+    // a malicious binary can read the real binary's build id and replay it,
+    // and it has already run arbitrary code by handshake time.)
+    //
+    // SAFETY: `getauxval` reads the process's own auxiliary vector; it takes
+    // no pointers, has no preconditions, and is callable in any process
+    // state. It returns 0 when the entry is absent, and AT_SECURE's value is
+    // a plain 0/1 flag, not a pointer.
+    if unsafe { libc::getauxval(libc::AT_SECURE) } != 0 {
+        return Err(SpawnDaemonError::ExePath(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "/proc is not mounted and this is a secure-execution (setuid/setgid) process; \
+             refusing to re-exec via the invoker-controlled AT_EXECFN / argv[0] fallback",
+        )));
+    }
+
+    // Fall back to the exec-time pathname the kernel stashed in the auxiliary
+    // vector.
     if let Some(path) = exe_path_from_auxv() {
         return Ok(path);
     }
