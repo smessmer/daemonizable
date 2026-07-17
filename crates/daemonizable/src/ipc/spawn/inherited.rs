@@ -162,16 +162,32 @@ mod tests {
         // would alias owning `OwnedFd`s and risk a use-after-free. Simulate a
         // prior claim by setting the flag directly — this deterministically
         // exercises the guard without depending on what fds 3/4 happen to be in
-        // the test process, and without taking ownership of them. Restore the
-        // previous value so we don't disturb any other test in this binary.
+        // the test process, and without taking ownership of them.
+        //
+        // This swap→call→restore sequence is not atomic as a whole, so it is
+        // only sound while this test is the binary's SOLE claimant: a
+        // concurrent test that genuinely claimed fds 3/4 could observe a
+        // spurious `AlreadyClaimed`, or have its claim's flag clobbered back
+        // to `false` by the restore below — re-arming a second, aliasing
+        // claim. The assert enforces that invariant: if it ever fires, some
+        // other test in this binary now touches the claim guard, and this
+        // test needs a different design (e.g. a spawned-process test).
         let previously = DAEMON_FDS_CLAIMED.swap(true, Ordering::SeqCst);
+        assert!(
+            !previously,
+            "DAEMON_FDS_CLAIMED was already set: another test in this binary \
+             claims the daemon fds, which this test's flag swap/restore cannot \
+             coexist with"
+        );
         // SAFETY: `rpc_server_from_inherited_fds` is `unsafe` because it would
         // take ownership of fds 3/4. Here `DAEMON_FDS_CLAIMED` is pre-set to
         // `true`, so the call short-circuits with `AlreadyClaimed` *before*
         // reaching the fd-claiming code — it never wraps a descriptor, so the
         // exclusive-ownership precondition is vacuously satisfied.
         let result = unsafe { rpc_server_from_inherited_fds::<(), ()>() };
-        DAEMON_FDS_CLAIMED.store(previously, Ordering::SeqCst);
+        // Restore the flag (asserted `false` above) so a later claim in this
+        // process — none exists today — isn't spuriously rejected.
+        DAEMON_FDS_CLAIMED.store(false, Ordering::SeqCst);
 
         let err = result
             .err()
