@@ -132,8 +132,10 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
 /// engine behind `Daemonizer::spawn_daemon`. Re-execs the current binary
 /// with the [`DAEMON_CHILD_ENV_VAR`] marker (no argv flag; the child
 /// receives its two pipe ends as fds `CHILD_REQUEST_RECV_FD` (3) and
-/// `CHILD_RESPONSE_SEND_FD` (4); every other parent fd is CLOEXEC so the
-/// kernel closes them during `execve`) and validates the build-id handshake.
+/// `CHILD_RESPONSE_SEND_FD` (4); every other fd the framework or Rust's std
+/// opened carries `FD_CLOEXEC`, so the kernel closes those during `execve` —
+/// fds the application deliberately created *non*-CLOEXEC still survive into
+/// the daemon) and validates the build-id handshake.
 ///
 /// The handshake is a raw (not postcard-encoded) frame *from* the daemon
 /// child, bounded by `HANDSHAKE_TIMEOUT`, and the spawn is rejected if the
