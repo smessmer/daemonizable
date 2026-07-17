@@ -45,9 +45,10 @@ fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
     // chdir'd the daemon to `/` instead of pinning the parent's cwd.
     // "marker:removed" proves the child env marker was dropped before
     // `run_daemon` was entered, so the daemon's own children can't be
-    // misdetected as daemon children. (Note: "before run_daemon", not "before
-    // app code" — `build_id()` runs earlier in the child arm; see the
-    // remove_var TODO in app/daemon_child.rs.)
+    // misdetected as daemon children. (The drop actually happens even earlier:
+    // it is the FIRST statement of the daemon-child arm, before any app code —
+    // including `build_id()`, which runs later via send_handshake; see the
+    // remove_var SAFETY note in app/daemon_child.rs.)
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
     let fields = parse_outfile(&result);
     assert_eq!(fields["parent-got"], "43", "outfile: {result}");
