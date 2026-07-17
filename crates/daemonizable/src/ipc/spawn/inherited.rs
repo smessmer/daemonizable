@@ -63,10 +63,11 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// other live `OwnedFd`/`File` in the calling process already owns fd 3 or 4
 /// (e.g. an unrelated program that happened to open pipes there and called this
 /// directly), the second owner minted here causes a double-close / use-after-free
-/// once both drop. The `fstat` open+FIFO check and the process-wide
-/// `DAEMON_FDS_CLAIMED` guard below are best-effort validation — they reject the
-/// common "invoked by hand" mistake and any second claim — but they cannot prove
-/// exclusive ownership, which is why that obligation falls on the caller.
+/// once both drop. The `fstat` open+FIFO probe ([`validate_inherited_fds`])
+/// and the process-wide `DAEMON_FDS_CLAIMED` guard are best-effort validation
+/// — they reject the common "invoked by hand" mistake and any second claim —
+/// but they cannot prove exclusive ownership, which is why that obligation
+/// falls on the caller.
 ///
 /// Two clarifications. First, "exclusively owned" spans the whole call:
 /// nothing else in the process may close or reuse fds 3/4 while it runs
@@ -144,12 +145,12 @@ where
 
 /// Probe fds `CHILD_REQUEST_RECV_FD` (3) and `CHILD_RESPONSE_SEND_FD` (4) as
 /// open FIFOs **without taking any ownership**: bare `fstat` on the raw
-/// numbers — no fd wrappers, no claim, no flag changes, and safe to call any
-/// number of times. Two callers: stage 1 of the daemon-child startup uses it
-/// to reject a hand-launched invocation pre-fork with a clean error (on the
-/// still-attached stderr, before anything irreversible happens), and
-/// [`rpc_server_from_inherited_fds`] uses it as the validation step before
-/// adopting the fds in stage 2.
+/// numbers — no fd wrappers, no claim, no flag changes. Because it owns
+/// nothing and changes nothing, it is safe to call any number of times,
+/// before or instead of the owning claim — which is what lets the daemon
+/// stages validate independently on both sides of their exec boundary
+/// (a pre-fork rejection with a clean error in stage 1, and the mandatory
+/// validation step inside [`rpc_server_from_inherited_fds`]'s claim).
 pub(crate) fn validate_inherited_fds() -> Result<(), InheritedFdsError> {
     for (label, fd) in [
         ("request-recv", CHILD_REQUEST_RECV_FD),

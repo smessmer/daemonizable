@@ -20,7 +20,8 @@
 //!
 //! Note: the `setsid` this test observes via `getsid()` is one the HELPER
 //! BINARY performs itself (daemonizable_test_background.rs `sentinel_loop`),
-//! not the framework's `setsid`/second fork in `run_as_daemon_child` — the raw
+//! not the framework's `setsid`/second fork in its daemon-stage arms
+//! (`run_as_daemon_stage1`) — the raw
 //! path deliberately bypasses the framework's child arm. The framework's own
 //! `setsid` (and that the daemon is not a session leader) is covered by
 //! `framework_e2e.rs`, which asserts the daemon's session differs from the test

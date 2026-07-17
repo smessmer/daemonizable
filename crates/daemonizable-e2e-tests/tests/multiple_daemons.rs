@@ -10,7 +10,7 @@
 //! daemon per test. These tests close that gap.
 //!
 //! Like `framework_e2e.rs`, they drive the full production path through the
-//! `daemonizable-test-app` helper binary — env-marker dispatch, the real
+//! `daemonizable-test-app` helper binary — argv-sentinel stage dispatch, the real
 //! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
 //! channel — rather than the raw `start_background_process_with_exe` shortcut,
 //! so they cover `spawn_daemon` exactly as an application calls it.
@@ -114,8 +114,9 @@ fn assert_n_isolated_daemons(result: &str, n: usize) {
             "daemon {idx} returned the wrong fingerprint — channels crossed?\n{result}"
         );
 
-        // The framework put every daemon at cwd `/` and stripped the child
-        // marker before entering `run_daemon`, same as the single-daemon case.
+        // The framework put every daemon at cwd `/`, and no framework env
+        // var exists in any daemon's environment (stage identity rides argv;
+        // nothing is ever set) — same as the single-daemon case.
         assert_eq!(rec["cwd"], "/", "daemon {idx} cwd is not /:\n{result}");
         assert_eq!(
             rec["marker"], "removed",

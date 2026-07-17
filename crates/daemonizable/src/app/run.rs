@@ -1,7 +1,7 @@
 //! The single entry point [`run`] and its process-role dispatch: a normal
 //! invocation goes to the app's foreground code; the two re-exec'd daemon
-//! stages (stage 1 recognized by an environment marker, stage 2 — the final
-//! daemon image — by an argv sentinel) go to the daemon startup sequence.
+//! stages (each recognized by its argv[1] sentinel) go to the daemon startup
+//! sequence.
 
 use std::ffi::OsStr;
 use std::process::ExitCode;
@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::daemon_child::{run_as_daemon_stage1, run_as_daemon_stage2};
 use super::{Daemonizable, Daemonizer};
-use crate::ipc::{DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, DAEMON_STAGE2_ARGV};
+use crate::ipc::{DAEMON_STAGE1_ARGV, DAEMON_STAGE2_ARGV};
 
 /// Guards against a second `run` call in the same process. The daemon-child
 /// dispatch and the fd claim are process singletons, so `run` must be too.
@@ -49,24 +49,37 @@ static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 /// Pre-main constructors (`#[ctor]`-style crates,
 /// `__attribute__((constructor))` code in linked C libraries, LD_PRELOAD
 /// shims — in your program or any of its dependencies) also run again in both
-/// daemon-stage images, before `run` gets control. Threads or environment
-/// access from such constructors are tolerated by design — the staging image
-/// only ever runs async-signal-safe code after its fork, and the daemon image
-/// never forks or mutates its environment — but constructors must not
-/// deliberately claim or close raw file descriptors 3/4 (they carry the RPC
-/// pipe ends the daemon image takes exclusive ownership of; they are open in
-/// both stage images, so an ordinary `open` in a constructor can never land
-/// on those numbers accidentally).
+/// daemon-stage images, before `run` gets control. Constructor-spawned
+/// *threads* are tolerated by design: the code this crate runs after the
+/// staging image's fork is exclusively async-signal-safe, the daemon image
+/// never forks, and neither stage reads or mutates the environment for
+/// dispatch (stage identity rides argv). Three caveats remain, none of them
+/// amplified beyond what any fork+exec spawn implies: a `pthread_atfork`
+/// handler that is not fork-safe under threads is its registrant's problem
+/// (libc runs it inside `fork()` itself, for `std::process::Command` spawns
+/// just the same); a constructor thread mutating the environment via C
+/// `setenv` concurrently with *any* env read in the process is the usual
+/// libc `environ` caveat; and constructors must not claim or close raw file
+/// descriptors 3/4 (they carry the RPC pipe ends the daemon image takes
+/// exclusive ownership of; they are open in both stage images, so an
+/// ordinary `open` in a constructor can never land on those numbers
+/// accidentally) — and should avoid fork+exec'ing long-lived helpers of
+/// their own from the stage images, which would inherit duplicate pipe ends
+/// during the pre-claim window and can suppress the parent's EOF liveness.
 ///
 /// Dispatches on the process role: a normal invocation calls
 /// [`A::run_foreground`](Daemonizable::run_foreground) with the [`Daemonizer`]
-/// capability; the re-exec'd daemon stages (stage 1 recognized by the
-/// environment marker its parent set for it, stage 2 by an internal argv
-/// sentinel) run the daemon protocol, and stage 2 diverges into
-/// [`A::run_daemon`](Daemonizable::run_daemon). The sentinel occupies
-/// `argv[1]` in the daemon image only — foreground invocations never see it,
-/// and an application flag can't collide with it accidentally (dispatch
-/// happens before any app code, and the name is deliberately namespaced).
+/// capability; the two re-exec'd daemon stages (each recognized by an
+/// internal, namespaced `argv[1]` sentinel) run the daemon protocol, and
+/// stage 2 diverges into [`A::run_daemon`](Daemonizable::run_daemon).
+/// Foreground invocations never see either sentinel, and dispatch happens
+/// before any app code, so an application *flag* cannot collide with them —
+/// but they are reserved tokens: an invocation whose first argument is
+/// exactly one of them is routed to the corresponding daemon stage, which
+/// rejects anything the framework didn't actually plumb (fd validation, and
+/// stage 2 additionally refuses to run as a session/group leader). The
+/// stage-2 sentinel stays in `argv[1]` for the daemon's whole lifetime — it
+/// is visible in `ps` and in `std::env::args()` inside `run_daemon`.
 ///
 /// # Panics
 ///
@@ -78,10 +91,7 @@ pub fn run<A: Daemonizable>() -> ExitCode {
     {
         panic!("daemonizable::run may only be called once per process");
     }
-    match dispatch_decision(
-        std::env::var_os(DAEMON_CHILD_ENV_VAR),
-        std::env::args_os().nth(1),
-    ) {
+    match dispatch_decision(std::env::args_os().nth(1)) {
         DispatchDecision::DaemonStage1 => run_as_daemon_stage1(), // diverges
         DispatchDecision::DaemonStage2 => run_as_daemon_stage2::<A>(), // diverges
         DispatchDecision::Foreground => A::run_foreground(Daemonizer::new()),
@@ -98,25 +108,16 @@ enum DispatchDecision {
 /// Pure dispatch decision, split out so it's unit-testable without invoking
 /// the daemon arms (which probe/claim fds and exit the process).
 ///
-/// The stage-2 argv sentinel is checked first: a well-formed stage 2 never
-/// carries the env marker (stage 1 filters it out of execve's envp), so the
-/// only way to see both signals is a malformed hand-invocation — and the
-/// sentinel arm is the stricter one (its fd claim rejects a hand-run with a
-/// clean error). For the env marker, only the exact value the spawner sets
-/// counts; anything else — including a user exporting the variable with some
-/// other value — falls through to the foreground arm, where the app can
-/// produce a proper error path instead of a hijacked process. The sentinel,
-/// by contrast, is matched as a whole `argv[1]`; there is no "wrong value"
-/// variant of it.
-fn dispatch_decision(
-    marker: Option<std::ffi::OsString>,
-    first_arg: Option<std::ffi::OsString>,
-) -> DispatchDecision {
-    if first_arg.as_deref() == Some(OsStr::new(DAEMON_STAGE2_ARGV)) {
-        return DispatchDecision::DaemonStage2;
-    }
-    match marker {
-        Some(value) if value == DAEMON_CHILD_ENV_VALUE => DispatchDecision::DaemonStage1,
+/// Each sentinel is matched exactly, as the whole first argument; anything
+/// else — including near-misses — falls through to the foreground arm, where
+/// the app can produce a proper error path instead of a hijacked process.
+/// Dispatch deliberately reads nothing but `argv[1]`: no environment access
+/// (see [`DAEMON_STAGE2_ARGV`]'s doc for why stage identity rides argv), no
+/// fd probing, no side effects.
+fn dispatch_decision(first_arg: Option<std::ffi::OsString>) -> DispatchDecision {
+    match first_arg.as_deref() {
+        Some(arg) if arg == OsStr::new(DAEMON_STAGE1_ARGV) => DispatchDecision::DaemonStage1,
+        Some(arg) if arg == OsStr::new(DAEMON_STAGE2_ARGV) => DispatchDecision::DaemonStage2,
         _ => DispatchDecision::Foreground,
     }
 }
@@ -154,36 +155,28 @@ mod tests {
 
     #[test]
     fn dispatch_decision_table() {
-        const S2: &str = DAEMON_STAGE2_ARGV;
-        let cases: &[(Option<&str>, Option<&str>, DispatchDecision)] = &[
-            // No signals → foreground.
-            (None, None, DispatchDecision::Foreground),
-            (None, Some("--verbose"), DispatchDecision::Foreground),
-            // The exact env marker value → stage 1.
-            (Some("1"), None, DispatchDecision::DaemonStage1),
-            (Some("1"), Some("--verbose"), DispatchDecision::DaemonStage1),
-            // Only the exact marker value counts; anything else falls
-            // through to the foreground arm (see fn docs).
-            (Some(""), None, DispatchDecision::Foreground),
-            (Some("0"), None, DispatchDecision::Foreground),
-            (Some("true"), None, DispatchDecision::Foreground),
-            (Some("11"), None, DispatchDecision::Foreground),
-            // The argv sentinel → stage 2, and it must match exactly as a
-            // whole argument.
-            (None, Some(S2), DispatchDecision::DaemonStage2),
-            (None, Some("__daemonizable-daemonX"), DispatchDecision::Foreground),
-            (None, Some("__daemonizable"), DispatchDecision::Foreground),
-            // Both signals is a malformed hand-invocation (stage 1 filters
-            // the marker out of stage 2's environment); the sentinel wins so
-            // the stricter fd-validating arm handles it.
-            (Some("1"), Some(S2), DispatchDecision::DaemonStage2),
-            (Some("0"), Some(S2), DispatchDecision::DaemonStage2),
+        let cases: &[(Option<&str>, DispatchDecision)] = &[
+            // No or ordinary first argument → foreground.
+            (None, DispatchDecision::Foreground),
+            (Some(""), DispatchDecision::Foreground),
+            (Some("--verbose"), DispatchDecision::Foreground),
+            // Exact sentinels route to their stages.
+            (Some(DAEMON_STAGE1_ARGV), DispatchDecision::DaemonStage1),
+            (Some(DAEMON_STAGE2_ARGV), DispatchDecision::DaemonStage2),
+            // Near-misses must match exactly as the whole argument; anything
+            // else falls through to the foreground arm (see fn docs).
+            (Some("__daemonizable-daemonX"), DispatchDecision::Foreground),
+            (Some("__daemonizable"), DispatchDecision::Foreground),
+            (Some("__daemonizable-stage1 "), DispatchDecision::Foreground),
+            // The legacy env marker is no longer a dispatch signal at all —
+            // it is exercised end-to-end in framework_e2e
+            // (legacy_env_marker_is_ignored); dispatch never reads env.
         ];
-        for (marker, first_arg, expected) in cases {
+        for (first_arg, expected) in cases {
             assert_eq!(
                 *expected,
-                dispatch_decision(marker.map(OsString::from), first_arg.map(OsString::from)),
-                "wrong decision for marker {marker:?}, first_arg {first_arg:?}",
+                dispatch_decision(first_arg.map(OsString::from)),
+                "wrong decision for first_arg {first_arg:?}",
             );
         }
     }

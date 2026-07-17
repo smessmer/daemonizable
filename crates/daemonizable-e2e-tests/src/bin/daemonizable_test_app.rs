@@ -3,7 +3,7 @@
 //! bypasses the framework and drives the raw IPC primitives), this binary
 //! goes through the full production path: `#[daemonizable::main]` generates
 //! the `main` that calls `daemonizable::run::<TestApp>()`, so a
-//! `--daemonize` invocation exercises the env-marker dispatch, the real
+//! `--daemonize` invocation exercises the argv-sentinel stage dispatch, the real
 //! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
 //! channel end-to-end — and dogfoods the attribute macro under that real
 //! fork+exec path.
@@ -38,10 +38,17 @@ struct TestResponse {
     /// The daemon's working directory, so the test can assert the framework
     /// chdir'd it to `/` (it must not pin the parent's cwd).
     daemon_cwd: String,
-    /// Whether the daemon-child env marker is still set inside `run_daemon`.
-    /// The framework must have removed it (so the daemon's own children
-    /// aren't misdetected); the test asserts "removed".
+    /// Whether the legacy daemon-child env marker is set inside `run_daemon`.
+    /// Stage identity rides argv now, so no framework env var may exist in
+    /// the daemon's environment at all (its children would inherit it); the
+    /// test asserts "removed". Kept as a regression pin against any future
+    /// design reintroducing environment leakage.
     marker: String,
+    /// Whether `argv[1]` inside `run_daemon` is the documented stage-2
+    /// sentinel — pins the documented argv contract (`run`'s docs: the
+    /// sentinel stays visible in `std::env::args()` for the daemon's whole
+    /// lifetime). The test asserts "sentinel".
+    argv1: String,
     /// The daemon's own pid (`std::process::id()`). With `sid` below it proves
     /// the daemon is a grandchild, not a session leader.
     pid: u32,
@@ -156,7 +163,7 @@ impl Daemonizable for TestApp {
     fn run_daemon(mut rpc: RpcServer<TestRequest, TestResponse>) -> ! {
         // Report the daemon's cwd so the test can confirm the framework
         // chdir'd it to `/` rather than inheriting the parent's working
-        // directory, and whether the child env marker was removed.
+        // directory, plus the marker/argv1 environment- and argv-contract probes.
         let daemon_cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
@@ -164,6 +171,16 @@ impl Daemonizable for TestApp {
             "set"
         } else {
             "removed"
+        };
+        // Literal kept in sync with DAEMON_STAGE2_ARGV in ipc/spawn/mod.rs
+        // (deliberately hard-coded: drift makes the framework_e2e assertion
+        // fail, which is the point).
+        let argv1 = if std::env::args_os().nth(1).as_deref()
+            == Some(std::ffi::OsStr::new("__daemonizable-daemon"))
+        {
+            "sentinel"
+        } else {
+            "other"
         };
         // `run_daemon` runs in the surviving grandchild (post second fork), so
         // these report the FINAL daemon identity: pid is the grandchild's, sid
@@ -180,6 +197,7 @@ impl Daemonizable for TestApp {
                 v: request.v + 1,
                 daemon_cwd: daemon_cwd.clone(),
                 marker: marker.to_string(),
+                argv1: argv1.to_string(),
                 pid,
                 sid,
             })
@@ -207,8 +225,14 @@ fn run_parent(daemonizer: Daemonizer<TestApp>, outfile: &Path) -> Result<(), Str
     std::fs::write(
         outfile,
         format!(
-            "parent-got:{} cwd:{} marker:{} sid:{} pid:{} zombies:{}",
-            response.v, response.daemon_cwd, response.marker, response.sid, response.pid, zombies,
+            "parent-got:{} cwd:{} marker:{} argv1:{} sid:{} pid:{} zombies:{}",
+            response.v,
+            response.daemon_cwd,
+            response.marker,
+            response.argv1,
+            response.sid,
+            response.pid,
+            zombies,
         ),
     )
     .map_err(|err| format!("failed to write outfile: {err}"))

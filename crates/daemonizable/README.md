@@ -333,8 +333,9 @@ mistakes). This is well-trodden ground: Docker/Moby ships a dedicated
 `Self()` returns the literal string `/proc/self/exe` ("safe to delete or
 replace the on-disk binary"); [runc](https://github.com/opencontainers/runc)
 re-execs itself as `runc init` with a bootstrap pipe fd passed through an
-environment variable — env-marker plus inherited-fd, the same shape used
-here; and `systemctl daemon-reexec` re-execs PID 1 itself.
+environment variable — a stage marker plus inherited fds, the same shape
+used here (this crate carries its stage markers in argv rather than the
+environment); and `systemctl daemon-reexec` re-execs PID 1 itself.
 
 ### What this approach costs
 

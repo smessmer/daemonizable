@@ -36,7 +36,8 @@ use crate::ipc::RpcServer;
 /// struct MyApp;
 ///
 /// /// Startup configuration the foreground process hands to the daemon.
-/// /// The daemon's argv is empty, so this is how it learns what to do.
+/// /// The daemon gets no app arguments (its argv carries only an internal
+/// /// framework sentinel), so this is how it learns what to do.
 /// #[derive(Serialize, Deserialize)]
 /// struct Config {
 ///     workdir: String,
@@ -161,7 +162,8 @@ pub trait Daemonizable: Sized {
     /// directory to `/`, and passed the build-id handshake. The process is
     /// otherwise pristine: no logging, no panic hooks, stdio still inherited
     /// from the parent — install whatever you need before serving requests.
-    /// Any configuration the daemon needs (its argv is empty, so it can't
+    /// Any configuration the daemon needs (it gets no app arguments — its
+    /// argv carries only an internal framework sentinel — so it can't
     /// parse flags) travels as an ordinary first RPC request on `rpc`.
     ///
     /// Diverges: drive the request loop until [`RpcServer::next_request`]

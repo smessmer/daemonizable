@@ -3,7 +3,8 @@
 //!
 //! This API makes no policy decisions at all. The library only handles the
 //! process mechanics: detecting whether this invocation *is* the re-exec'd
-//! daemon child (via an environment-variable marker — no argv flag, so apps
+//! daemon child (via internal argv[1] sentinels checked before any app code
+//! runs — nothing rides the environment, so apps
 //! aren't forced onto any particular argument parser), the fork+exec spawn,
 //! and the build-id handshake. Everything else — CLI parsing, logging, panic
 //! hooks, banners — is the application's business, inside

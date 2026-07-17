@@ -16,7 +16,7 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::handshake::validate_handshake_and_build_client;
 use super::{
-    CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR,
+    CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_STAGE1_ARGV,
 };
 use crate::ipc::RpcClient;
 use crate::ipc::RpcConnection;
@@ -173,7 +173,8 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
 
 /// Spawn the current binary as a background daemon via fork+exec — the
 /// engine behind `Daemonizer::spawn_daemon`. Re-execs the current binary
-/// with the [`DAEMON_CHILD_ENV_VAR`] marker (no argv flag; the child
+/// with the [`DAEMON_STAGE1_ARGV`] sentinel as its only argument (stage
+/// identity rides argv, see the sentinel docs in `spawn::mod`; the child
 /// receives its two pipe ends as fds `CHILD_REQUEST_RECV_FD` (3) and
 /// `CHILD_RESPONSE_SEND_FD` (4); every other fd the framework or Rust's std
 /// opened carries `FD_CLOEXEC`, so the kernel closes those during `execve` —
@@ -221,11 +222,8 @@ where
     let (client, child) = start_background_process_inner::<Request, Response>(
         &exe,
         Some(argv0.as_path()),
+        &[DAEMON_STAGE1_ARGV],
         &[],
-        &[(
-            OsStr::new(DAEMON_CHILD_ENV_VAR),
-            OsStr::new(DAEMON_CHILD_ENV_VALUE),
-        )],
     )?;
 
     complete_spawn(client, child, expected_build_id)
