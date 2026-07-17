@@ -55,6 +55,14 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// common "invoked by hand" mistake and any second claim — but they cannot prove
 /// exclusive ownership, which is why that obligation falls on the caller.
 ///
+/// Two clarifications. First, "exclusively owned" spans the whole call:
+/// nothing else in the process may close or reuse fds 3/4 while it runs
+/// (starting from raw fd numbers leaves an unavoidable validate→adopt
+/// window). Second, if the process-wide claim guard is already set, the call
+/// returns [`InheritedFdsError::AlreadyClaimed`] *before* touching any file
+/// descriptor — such a call has no safety preconditions at all (the
+/// in-module unit test relies on exactly this guarantee).
+///
 /// [`start_background_process_with_exe`]: super::start_background_process_with_exe
 pub unsafe fn rpc_server_from_inherited_fds<Request, Response>()
 -> Result<RpcServer<Request, Response>, InheritedFdsError>

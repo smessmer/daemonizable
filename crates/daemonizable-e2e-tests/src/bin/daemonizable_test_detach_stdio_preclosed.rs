@@ -61,7 +61,14 @@ fn main() {
     // SAFETY: `close` takes a bare fd int; a bad fd is EBADF, not UB. `to_close`
     // is a std fd (0/1/2, per the `0..=2` match above) held as a raw number, not
     // owned by any `OwnedFd`/`File`, so closing it sets up no double-close, and
-    // the single-threaded process has no concurrent reopen to race it.
+    // the single-threaded process has no concurrent reopen to race it. Closing
+    // a std fd additionally obligates us to keep std from observing the hole:
+    // this binary never materializes a `Stdin`/`Stdout`/`Stderr` handle or a
+    // `BorrowedFd` over 0-2 (it reports via exit codes only, per the module
+    // docs), the only fd allocation inside the closed window is
+    // `detach_stdio`'s own `open`, which deliberately re-occupies the number,
+    // and a panic in the window would write its message to a closed fd 2 as a
+    // swallowed EBADF rather than into a stolen descriptor.
     unsafe { libc::close(to_close) };
 
     if daemonizable::detach_stdio().is_err() {

@@ -144,7 +144,9 @@
 //! Both are real, documented problems, not stylistic gripes. (What this library
 //! keeps from the classic ritual is the *second* fork — it performs
 //! `daemon(7)`'s second fork itself, but *after* `exec`, in the fresh
-//! single-threaded child, where it is unconditionally safe. What it rejects is
+//! single-threaded child, where it is safe by construction (provided no
+//! pre-main constructor in your binary spawned a thread — see [`run`]'s
+//! docs). What it rejects is
 //! fork-without-exec and cord-cutting, not the second fork.)
 //!
 //! ## fork without exec: the daemon inherits a broken process image
@@ -435,7 +437,8 @@
 //!   fork+exec hands the daemon a fresh process image, so the fork-vs-threads
 //!   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
 //!   doesn't apply (the second fork runs in that fresh single-threaded image,
-//!   before any app code, so it is safe too). On targets with `pipe2(O_CLOEXEC)`
+//!   before any app code, so it is safe too — provided, as [`run`] documents,
+//!   no pre-main constructor in your binary spawns threads). On targets with `pipe2(O_CLOEXEC)`
 //!   (Linux/Android, the *BSDs, …) the pipe fds are `FD_CLOEXEC` from creation,
 //!   so there is no fd-inheritance race; only on macOS/iOS, which lack `pipe2`,
 //!   does a narrow race remain if another thread forks while the spawn sets

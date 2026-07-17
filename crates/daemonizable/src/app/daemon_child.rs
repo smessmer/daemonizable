@@ -32,17 +32,33 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // `main`, see [`run`](super::run)). So the process is genuinely
     // single-threaded at this point, and no other thread can observe `environ`
     // mid-mutation.
+    //
+    // Residual assumption (shared with the fork SAFETY below, and stated as an
+    // application requirement in [`run`](super::run)'s docs): no pre-main
+    // constructor spawned a thread or is reading the environment. Static
+    // initializers — `#[ctor]`-style crates, `__attribute__((constructor))`
+    // code in a linked C library, LD_PRELOAD shims — run before `main` in the
+    // re-exec'd child too, outside anything this crate or the `main` preamble
+    // can control.
     unsafe {
         std::env::remove_var(DAEMON_CHILD_ENV_VAR);
     }
 
     // SAFETY: `rpc_server_from_inherited_fds` requires fds 3/4 to be the
     // daemon's exclusively-owned inherited RPC pipe ends (see its `# Safety`).
-    // That holds here: `run` only dispatches to `run_as_daemon_child` after
-    // detecting the `DAEMON_CHILD_ENV_VAR` marker the parent's spawn sets, so
-    // this is a fresh post-exec image the framework launched as the daemon
-    // child, with the parent's pipe ends `dup2`'d onto fds 3/4 across `execve`
-    // and owned by nothing else in this process. It is also the sole claim.
+    // The load-bearing argument is positional, not trust in the env marker
+    // (which any user can export by hand): this call runs in a fresh post-exec
+    // image before all app code — `run` executed only the once-guard CAS and
+    // one env read before dispatching here — so no live `OwnedFd`/`File` in
+    // this process can own fd 3 or 4, and the claim mints the *sole* owners of
+    // whatever sits there. In the intended configuration that is the parent's
+    // pipe ends, `dup2`'d onto fds 3/4 across `execve` by the spawn. A
+    // hand-launched process with closed or non-pipe fds is rejected by the
+    // callee's fstat probe with a clean error; even a user who deliberately
+    // plumbs real FIFOs onto 3/4 and exports the marker gets a broken RPC
+    // channel, never aliased ownership. It is also the sole claim. Residual
+    // assumption, shared with the remove_var note above: no pre-main
+    // constructor opened or claimed fds 3/4 (see [`run`](super::run)'s docs).
     let mut server: RpcServer<A::Request, A::Response> =
         match unsafe { rpc_server_from_inherited_fds() } {
             Ok(s) => s,
@@ -72,10 +88,12 @@ pub(super) fn run_as_daemon_child<A: Daemonizable>() -> ! {
     // serializes), so soundness requires that the process be single-threaded
     // here. It is: we are a fresh single-threaded post-exec image — no app code
     // has run in this arm yet (`A::build_id()` first runs in send_handshake
-    // below), so this is not a fork-in-a-multithreaded-process. (The one
-    // residual assumption is that the application's `main` preamble started no
-    // thread before `run()`; `#[daemonizable::main]` guarantees an empty
-    // preamble. Same assumption as the remove_var SAFETY note at the top.) The
+    // below), so this is not a fork-in-a-multithreaded-process. (The residual
+    // assumptions are that the application's `main` preamble started no thread
+    // before `run()` — `#[daemonizable::main]` guarantees an empty preamble —
+    // and that no pre-main constructor spawned one; same assumptions as the
+    // remove_var SAFETY note at the top, stated as an application requirement
+    // in [`run`](super::run)'s docs.) The
     // claimed pipe fds 3/4 are inherited across fork (FD_CLOEXEC only affects
     // execve), so the grandchild owns them.
     //

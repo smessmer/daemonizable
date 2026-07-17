@@ -25,10 +25,19 @@ fn main() {
 
     // SAFETY: `rpc_server_from_inherited_fds` requires fds 3/4 to be this
     // process's exclusively-owned inherited RPC pipe ends (see its `# Safety`).
-    // This helper binary only ever runs as a daemon child spawned by the test
-    // harness (`start_background_process_with_exe` / `spawn_daemon_process_with_exe`),
-    // which `dup2` the parent's pipe ends onto fds 3/4 across `execve`; nothing
-    // else in this fresh process owns them, and this is the only claim.
+    // The discharge is positional and holds for ANY invocation, not just the
+    // intended one: this call is the first fd-related action in a fresh
+    // post-exec image (only the env read above precedes it), so no live
+    // `OwnedFd`/`File` here can already own fd 3 or 4 — whatever open FIFOs
+    // sit there get their sole in-process owners, and a hand-run invocation
+    // with closed or non-pipe fds is rejected by the callee's fstat probe as a
+    // clean error, never as aliased ownership. Keep this call the first
+    // fd-creating operation in `main`: opening any fd before it would
+    // reintroduce aliasing risk in hand-run processes. The intended
+    // configuration remains the test harness spawning us
+    // (`start_background_process_with_exe` / `spawn_daemon_process_with_exe`),
+    // which `dup2`s the parent's pipe ends onto fds 3/4 across `execve`; this
+    // is the only claim in the process.
     let mut rpc: RpcServer<Request, Response> = unsafe { rpc_server_from_inherited_fds() }
         .expect("daemon: failed to rebuild RpcServer from inherited fds");
 
