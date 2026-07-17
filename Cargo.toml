@@ -10,6 +10,23 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 version = "0.0.1"
 
+# Every member crate opts in with `[lints] workspace = true`. Note that the
+# table only reaches a crate's own targets — each file under `tests/` and
+# `src/bin/` is its own crate root but still belongs to the package, so these
+# lints do cover the e2e helper binaries and integration tests.
+[workspace.lints.rust]
+# Edition 2024 only *warns* on an unsafe operation that isn't wrapped in its
+# own `unsafe {}` block inside an `unsafe fn`. Every unsafe op in this
+# workspace is already wrapped and individually justified; deny locks that in
+# so an unsafe fn body can't silently absorb new unsafe operations.
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+# Every `unsafe {}` block in this workspace carries a `// SAFETY:` comment
+# arguing why the contract of the called function is satisfied. Keep it that
+# way.
+undocumented_unsafe_blocks = "warn"
+
 [workspace.dependencies]
 command-fds = "^0.3.0"
 # Internal companion crate. Declared here (like every other dependency) so its
