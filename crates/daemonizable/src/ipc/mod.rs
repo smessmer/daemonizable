@@ -37,12 +37,13 @@ pub use spawn::{spawn_daemon_process_with_exe, start_background_process_with_exe
 /// but the intent is one-shot at the post-startup boundary.
 ///
 /// Concurrency: prefer calling while no other thread is creating file
-/// descriptors. Reopening an already-closed std fd inherently leaves a window
-/// between the `open` and the `dup2`s in which a descriptor allocated
-/// concurrently by another thread can land on a std fd number and then be
-/// clobbered by the redirect. (The function doesn't widen that window
-/// internally — see the relocation comments — but the initial one is inherent
-/// to reopening closed std fds.)
+/// descriptors. Any std fd still *closed* when this is called is a hole a
+/// concurrently-allocated descriptor can land in — from entry until the
+/// `open` fills the lowest hole and the matching `dup2`s fill the rest —
+/// after which the redirect silently clobbers whatever landed there. (The
+/// function doesn't widen that window internally: once the `open` fills the
+/// lowest hole, the relocation deliberately leaks rather than closes the low
+/// fd, so that hole never reopens mid-flight — see the relocation comments.)
 ///
 /// We `dup2` rather than `close` to keep fd numbers 0/1/2 valid — a later
 /// allocation that re-grabs those numbers would otherwise produce garbage in
