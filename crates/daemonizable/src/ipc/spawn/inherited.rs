@@ -92,39 +92,7 @@ where
             response_send_fd: CHILD_RESPONSE_SEND_FD,
         });
     }
-    for (label, fd) in [
-        ("request-recv", CHILD_REQUEST_RECV_FD),
-        ("response-send", CHILD_RESPONSE_SEND_FD),
-    ] {
-        // Probe the raw fd number with a bare `fstat` BEFORE building any fd
-        // wrapper. A hand-invoked daemon may have closed 3/4, and a `BorrowedFd`
-        // / `OwnedFd` must point at an *open* fd — whereas `libc::fstat` on a
-        // bare descriptor is defined for any int (EBADF for a closed one), so it
-        // can reject a bad fd without an I/O-safety-contract violation.
-        //
-        // SAFETY: `std::mem::zeroed()` yields a valid `libc::stat` — a `repr(C)`
-        // struct of integer fields with no niche/validity constraints — used
-        // only as the out-buffer that `fstat` fills before any field is read.
-        let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: `fstat` writes through `&mut statbuf`, a live, correctly
-        // aligned, writable `libc::stat`. `fd` is a bare int — a closed/invalid
-        // descriptor yields EBADF (handled below as `NotOpen`), never UB — and
-        // `fstat` neither takes ownership of nor closes it.
-        if unsafe { libc::fstat(fd, &mut statbuf) } < 0 {
-            return Err(InheritedFdsError::NotOpen {
-                fd,
-                label,
-                source: std::io::Error::last_os_error(),
-            });
-        }
-        if statbuf.st_mode & libc::S_IFMT != libc::S_IFIFO {
-            return Err(InheritedFdsError::NotAPipe {
-                fd,
-                label,
-                st_mode: statbuf.st_mode,
-            });
-        }
-    }
+    validate_inherited_fds()?;
     // Both fds validated as open FIFOs above; adopt ownership now. This is the
     // one irreducible `unsafe` in the claim — turning the inherited raw fd
     // numbers into owning `OwnedFd`s — and the reason this function is `unsafe`.
@@ -172,6 +140,51 @@ where
         })?;
     }
     Ok(RpcServer::from_owned_fds(request_recv, response_send))
+}
+
+/// Probe fds `CHILD_REQUEST_RECV_FD` (3) and `CHILD_RESPONSE_SEND_FD` (4) as
+/// open FIFOs **without taking any ownership**: bare `fstat` on the raw
+/// numbers — no fd wrappers, no claim, no flag changes, and safe to call any
+/// number of times. Two callers: stage 1 of the daemon-child startup uses it
+/// to reject a hand-launched invocation pre-fork with a clean error (on the
+/// still-attached stderr, before anything irreversible happens), and
+/// [`rpc_server_from_inherited_fds`] uses it as the validation step before
+/// adopting the fds in stage 2.
+pub(crate) fn validate_inherited_fds() -> Result<(), InheritedFdsError> {
+    for (label, fd) in [
+        ("request-recv", CHILD_REQUEST_RECV_FD),
+        ("response-send", CHILD_RESPONSE_SEND_FD),
+    ] {
+        // Probe the raw fd number with a bare `fstat` BEFORE building any fd
+        // wrapper. A hand-invoked daemon may have closed 3/4, and a `BorrowedFd`
+        // / `OwnedFd` must point at an *open* fd — whereas `libc::fstat` on a
+        // bare descriptor is defined for any int (EBADF for a closed one), so it
+        // can reject a bad fd without an I/O-safety-contract violation.
+        //
+        // SAFETY: `std::mem::zeroed()` yields a valid `libc::stat` — a `repr(C)`
+        // struct of integer fields with no niche/validity constraints — used
+        // only as the out-buffer that `fstat` fills before any field is read.
+        let mut statbuf: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: `fstat` writes through `&mut statbuf`, a live, correctly
+        // aligned, writable `libc::stat`. `fd` is a bare int — a closed/invalid
+        // descriptor yields EBADF (handled below as `NotOpen`), never UB — and
+        // `fstat` neither takes ownership of nor closes it.
+        if unsafe { libc::fstat(fd, &mut statbuf) } < 0 {
+            return Err(InheritedFdsError::NotOpen {
+                fd,
+                label,
+                source: std::io::Error::last_os_error(),
+            });
+        }
+        if statbuf.st_mode & libc::S_IFMT != libc::S_IFIFO {
+            return Err(InheritedFdsError::NotAPipe {
+                fd,
+                label,
+                st_mode: statbuf.st_mode,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

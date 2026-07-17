@@ -143,10 +143,11 @@
 //!
 //! Both are real, documented problems, not stylistic gripes. (What this library
 //! keeps from the classic ritual is the *second* fork — it performs
-//! `daemon(7)`'s second fork itself, but *after* `exec`, in the fresh
-//! single-threaded child, where it is safe by construction (provided no
-//! pre-main constructor in your binary spawned a thread — see [`run`]'s
-//! docs). What it rejects is
+//! `daemon(7)`'s second fork itself, but *after* `exec`, and the forked child
+//! immediately *execs once more* into the final daemon image: the only
+//! post-fork instruction is `execve` itself, which is async-signal-safe, so
+//! the second fork is sound by construction — no assumption about threads at
+//! all, not even about pre-main constructors. What it rejects is
 //! fork-without-exec and cord-cutting, not the second fork.)
 //!
 //! ## fork without exec: the daemon inherits a broken process image
@@ -391,9 +392,13 @@
 //!   fds 3/4), and `detach_stdio` gaining redirect-to-log-file targets (log
 //!   files opened before the privilege drop, so root-owned log directories
 //!   work). Defaults stay policy-free: every battery is opt-in.*
-//! - **Initialization runs twice.** The daemon re-runs the dynamic loader and
-//!   everything before `run` (with `#[daemonizable::main]`, that's nothing);
-//!   parent state must be shipped explicitly via the typed RPC channel.
+//! - **Initialization runs three times.** The daemon spawn loads the binary
+//!   twice more (a short-lived staging image that `setsid`s + forks, then the
+//!   final daemon image the fork execs into), each re-running the dynamic
+//!   loader and everything before `run` (with `#[daemonizable::main]`, that's
+//!   nothing); parent state must be shipped explicitly via the typed RPC
+//!   channel. The extra exec is what makes the second fork safe regardless of
+//!   threads — see the process contract below.
 //! - **If systemd manages your process, don't daemonize at all.**
 //!   `daemon(7)`'s "new-style daemons" doctrine is that services should run
 //!   in the foreground and report readiness via `sd_notify(3)`; SysV-style
@@ -410,8 +415,9 @@
 //! # Process contract
 //!
 //! - The daemon is a **grandchild**: the re-exec'd child forks a second time
-//!   after `setsid` (the classic double fork, `daemon(7)` step 7). The
-//!   session-leader intermediate exits immediately and is reaped by
+//!   after `setsid` (the classic double fork, `daemon(7)` step 7), and the
+//!   forked child immediately re-execs the binary into the final daemon
+//!   image. The session-leader intermediate exits immediately and is reaped by
 //!   [`Daemonizer::spawn_daemon`] itself, and the surviving daemon — never a session leader,
 //!   so it can never acquire a controlling terminal — is orphaned to init (or
 //!   the nearest `PR_SET_CHILD_SUBREAPER` ancestor, e.g. a systemd user
@@ -436,9 +442,9 @@
 //! - [`Daemonizer::spawn_daemon`] is safe to call with a tokio runtime already running —
 //!   fork+exec hands the daemon a fresh process image, so the fork-vs-threads
 //!   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
-//!   doesn't apply (the second fork runs in that fresh single-threaded image,
-//!   before any app code, so it is safe too — provided, as [`run`] documents,
-//!   no pre-main constructor in your binary spawns threads). On targets with `pipe2(O_CLOEXEC)`
+//!   doesn't apply (nor to the second fork: its child immediately execs the
+//!   final daemon image, so nothing but async-signal-safe code runs post-fork
+//!   — safe regardless of threads, including pre-main-constructor ones). On targets with `pipe2(O_CLOEXEC)`
 //!   (Linux/Android, the *BSDs, …) the pipe fds are `FD_CLOEXEC` from creation,
 //!   so there is no fd-inheritance race; only on macOS/iOS, which lack `pipe2`,
 //!   does a narrow race remain if another thread forks while the spawn sets

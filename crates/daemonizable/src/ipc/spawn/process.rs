@@ -1,9 +1,10 @@
 //! Parent-side fork+exec machinery: re-exec the current binary (or a test
 //! helper) as a background child, wire up the IPC pipes, and — for the real
 //! daemon path — validate the build-id handshake. The validated daemon is a
-//! *grandchild*: the re-exec'd child forks once more so it is never a session
-//! leader, and the direct child this parent holds a `Child` handle for is a
-//! short-lived intermediate.
+//! *grandchild*: the re-exec'd child (stage 1) forks once more so the daemon
+//! is never a session leader, and the forked child immediately re-execs into
+//! the final daemon image (stage 2); the direct child this parent holds a
+//! `Child` handle for is the short-lived stage-1 intermediate.
 
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
@@ -49,7 +50,10 @@ use crate::ipc::error::SpawnDaemonError;
 ///
 /// On non-Linux, `current_exe()` is the best we have. The build-id handshake
 /// covers the gap.
-fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
+///
+/// Crate-visible because the daemon child's stage 1 resolves the same path
+/// again for its stage-2 re-exec (see `app::daemon_child`).
+pub(crate) fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
     #[cfg(target_os = "linux")]
     {
         linux_daemon_exe_path()
@@ -188,13 +192,15 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
 ///     to write something to fd 4 (handshake bytes won't match the
 ///     expected build id).
 ///
-/// The re-exec'd child forks a second time (see `run_as_daemon_child`) so the
-/// daemon is the grandchild; the direct child is a short-lived session-leader
-/// intermediate. On success the intermediate is reaped here (it has already
-/// `_exit(0)`d). On handshake/spawn failure the spawn is killed via its
-/// process group — `kill(-child_pid, SIGKILL)`, which reaches the grandchild —
-/// and the intermediate reaped before the error is returned, so a failed spawn
-/// leaves no orphan and no unreapable zombie behind in a long-lived caller.
+/// The re-exec'd child (stage 1, see `app::daemon_child`) forks a second time
+/// and the forked child immediately re-execs into the final daemon image
+/// (stage 2), so the daemon is the grandchild; the direct child is a
+/// short-lived session-leader intermediate. On success the intermediate is
+/// reaped here (it has already `_exit(0)`d). On handshake/spawn failure the
+/// spawn is killed via its process group — `kill(-child_pid, SIGKILL)`, which
+/// reaches the grandchild — and the intermediate reaped before the error is
+/// returned, so a failed spawn leaves no orphan and no unreapable zombie
+/// behind in a long-lived caller.
 pub(crate) fn spawn_daemon_process<Request, Response>(
     expected_build_id: &str,
 ) -> Result<RpcClient<Request, Response>, SpawnDaemonError>
@@ -267,8 +273,9 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    // `child` is the session-leader intermediate from the second fork in
-    // run_as_daemon_child; the real daemon is its forked grandchild. Capture the
+    // `child` is the session-leader stage-1 intermediate (see
+    // `app::daemon_child`); the real daemon is its forked-then-re-exec'd
+    // grandchild. Capture the
     // pid before any wait() so it still names the (live or zombie) direct child.
     let child_pid = child.id() as libc::pid_t;
 

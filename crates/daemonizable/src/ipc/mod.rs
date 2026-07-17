@@ -9,7 +9,10 @@ pub use error::{
     SpawnDaemonError,
 };
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
-pub(crate) use spawn::{DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, spawn_daemon_process};
+pub(crate) use spawn::{
+    DAEMON_CHILD_ENV_VALUE, DAEMON_CHILD_ENV_VAR, DAEMON_STAGE2_ARGV, daemon_exe_path,
+    spawn_daemon_process, validate_inherited_fds,
+};
 // `send_handshake` / `rpc_server_from_inherited_fds` are also used internally by
 // the daemon-child arm (`app::daemon_child`), so they stay crate-visible here
 // regardless of features; only their crate-root re-export in `lib.rs` is
