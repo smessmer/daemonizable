@@ -63,7 +63,8 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// other live `OwnedFd`/`File` in the calling process already owns fd 3 or 4
 /// (e.g. an unrelated program that happened to open pipes there and called this
 /// directly), the second owner minted here causes a double-close / use-after-free
-/// once both drop. The `fstat` open+FIFO probe ([`validate_inherited_fds`])
+/// once both drop. The `fstat` open+FIFO probe (`validate_inherited_fds` —
+/// crate-private, so not linkable from these public docs)
 /// and the process-wide `DAEMON_FDS_CLAIMED` guard are best-effort validation
 /// — they reject the common "invoked by hand" mistake and any second claim —
 /// but they cannot prove exclusive ownership, which is why that obligation

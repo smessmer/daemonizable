@@ -15,9 +15,7 @@ use command_fds::{CommandFdExt, FdMapping};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::handshake::validate_handshake_and_build_client;
-use super::{
-    CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_STAGE1_ARGV,
-};
+use super::{CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_STAGE1_ARGV};
 use crate::ipc::RpcClient;
 use crate::ipc::RpcConnection;
 use crate::ipc::error::SpawnDaemonError;

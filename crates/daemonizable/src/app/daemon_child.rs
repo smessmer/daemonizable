@@ -78,7 +78,9 @@ pub(super) fn run_as_daemon_stage1() -> ! {
     let exe = match daemon_exe_path() {
         Ok(exe) => exe,
         Err(err) => {
-            eprintln!("daemon stage 1: cannot resolve the executable to re-exec for stage 2: {err}");
+            eprintln!(
+                "daemon stage 1: cannot resolve the executable to re-exec for stage 2: {err}"
+            );
             std::process::exit(1);
         }
     };
