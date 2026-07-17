@@ -36,6 +36,14 @@ pub use spawn::{spawn_daemon_process_with_exe, start_background_process_with_exe
 /// Call exactly once. Idempotent in practice (a second `dup2` is harmless)
 /// but the intent is one-shot at the post-startup boundary.
 ///
+/// Concurrency: prefer calling while no other thread is creating file
+/// descriptors. Reopening an already-closed std fd inherently leaves a window
+/// between the `open` and the `dup2`s in which a descriptor allocated
+/// concurrently by another thread can land on a std fd number and then be
+/// clobbered by the redirect. (The function doesn't widen that window
+/// internally — see the relocation comments — but the initial one is inherent
+/// to reopening closed std fds.)
+///
 /// We `dup2` rather than `close` to keep fd numbers 0/1/2 valid — a later
 /// allocation that re-grabs those numbers would otherwise produce garbage in
 /// unrelated files. The temp `/dev/null` fd is dropped after the dup2s; the
@@ -48,7 +56,9 @@ pub use spawn::{spawn_daemon_process_with_exe, start_background_process_with_exe
 /// meant to redirect — silently leaving it closed while returning `Ok`. To avoid
 /// that, we first relocate the `/dev/null` descriptor above the std range (via
 /// `fcntl(F_DUPFD_CLOEXEC)`) whenever it lands on 0/1/2, so the source fd is
-/// never one of the `dup2` targets.
+/// never one of the `dup2` targets. The old low descriptor is deliberately
+/// leaked, not closed: it stays parked on `/dev/null` until the matching
+/// `dup2` overwrites it in place, so the std-fd hole never reopens mid-flight.
 ///
 /// # Errors
 /// Returns [`DetachStdioError`] if `/dev/null` can't be opened, the relocation
@@ -57,7 +67,7 @@ pub use spawn::{spawn_daemon_process_with_exe, start_background_process_with_exe
 /// partially redirected; see the error variants). The caller decides whether
 /// that's fatal; the daemon otherwise keeps running.
 pub fn detach_stdio() -> Result<(), DetachStdioError> {
-    use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+    use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 
     use nix::fcntl::{FcntlArg, fcntl};
     use nix::unistd::{dup2_stderr, dup2_stdin, dup2_stdout};
@@ -81,13 +91,20 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
             FcntlArg::F_DUPFD_CLOEXEC(libc::STDERR_FILENO + 1),
         )
         .map_err(|errno| DetachStdioError::Relocate(errno.into()))?;
-        // Reassigning `source` drops the old (low) fd, closing it, and takes
-        // ownership of the relocated one, which is guaranteed to be > 2.
-        //
         // SAFETY: `relocated` is a fresh, exclusively-owned fd just returned by
-        // `F_DUPFD_CLOEXEC`; nothing else owns it, so adopting it into an
-        // `OwnedFd` (which closes it on drop) is sound.
-        source = unsafe { OwnedFd::from_raw_fd(relocated) };
+        // `F_DUPFD_CLOEXEC` (guaranteed > 2 by the min-fd argument); nothing
+        // else owns it, so adopting it into an `OwnedFd` (which closes it on
+        // drop) is sound.
+        let relocated = unsafe { OwnedFd::from_raw_fd(relocated) };
+        // Deliberately LEAK the old low fd instead of dropping (closing) it:
+        // closing would reopen the std-fd hole for a moment, and in a
+        // multithreaded process a descriptor another thread allocates in that
+        // window would land on the hole only to be silently clobbered by the
+        // dup2s below. Leaked, the low number stays parked on /dev/null until
+        // its matching dup2 atomically replaces it in place (every fd <= 2 is
+        // a dup2 target below); on a dup2 error return it stays open on
+        // /dev/null — a strictly better failure state than a closed std fd.
+        let _ = std::mem::replace(&mut source, relocated).into_raw_fd();
     }
 
     // Redirect stdin/stdout/stderr onto `source`. `dup2_std*` are safe wrappers
