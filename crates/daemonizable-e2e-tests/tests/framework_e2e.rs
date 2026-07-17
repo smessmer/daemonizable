@@ -141,6 +141,35 @@ fn env_marker_from_shell_is_rejected() {
 }
 
 #[test]
+fn stage2_sentinel_from_shell_is_rejected() {
+    // The stage-2 argv sentinel is internal plumbing: a user passing it by
+    // hand has no pipes on fds 3/4, so the stage-2 arm must refuse with the
+    // fd-claim error instead of misinterpreting whatever is open there.
+    // (Literal deliberately hard-coded, kept in sync with DAEMON_STAGE2_ARGV
+    // in ipc/spawn/mod.rs: if they drift, dispatch falls through to the
+    // foreground arm and this test fails on the exit code.)
+    let output = Command::new(test_app_exe())
+        .arg("__daemonizable-daemon")
+        .output()
+        .expect("failed to spawn daemonizable-test-app");
+
+    assert!(
+        !output.status.success(),
+        "the stage-2 sentinel without inherited fds must fail, but it succeeded"
+    );
+    assert_eq!(
+        Some(2),
+        output.status.code(),
+        "the stage-2 arm must exit with code 2 when the fd claim fails"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("internal to this binary; do not invoke it directly"),
+        "expected the fstat-guard message on stderr, got: {stderr}"
+    );
+}
+
+#[test]
 fn env_marker_with_wrong_value_falls_through_to_foreground() {
     // Only the exact marker value the spawner sets counts as "daemon child";
     // a user exporting the variable with some other value gets the normal
