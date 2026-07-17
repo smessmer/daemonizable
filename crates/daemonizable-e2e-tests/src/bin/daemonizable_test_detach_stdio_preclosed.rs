@@ -115,7 +115,9 @@ fn ensure_open(fd: i32) -> bool {
         return true; // already open
     }
     // Closed — open /dev/null and move it onto `fd` if it didn't land there.
-    // SAFETY: `open` with a valid C path; `dup2`/`close` on live raw fds.
+    // SAFETY: `open` takes a valid NUL-terminated path (a C string literal
+    // that outlives the call) and creates a fresh descriptor; it reads no
+    // other memory.
     let opened = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR) };
     if opened < 0 {
         return false;
@@ -123,6 +125,10 @@ fn ensure_open(fd: i32) -> bool {
     if opened == fd {
         return true;
     }
+    // SAFETY: `dup2` takes two bare fd ints and dereferences nothing. `opened`
+    // is the live fd returned by `open` above; `fd` is a std fd number (0..=2)
+    // owned by no `OwnedFd`/`File`, so clobbering it in place breaks no other
+    // owner. A bad fd yields EBADF, not UB.
     let moved = unsafe { libc::dup2(opened, fd) };
     // SAFETY: `opened` is the raw fd returned by `open` above; it is a live,
     // exclusively-owned descriptor (never wrapped in an `OwnedFd`/`File`, so no

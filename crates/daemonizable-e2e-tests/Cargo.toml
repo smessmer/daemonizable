@@ -15,6 +15,9 @@ license.workspace = true
 version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # `testutils` exposes `spawn_daemon_process_with_exe`, which the failed-spawn
 # cleanup tests use to drive the real handshake/cleanup path against a

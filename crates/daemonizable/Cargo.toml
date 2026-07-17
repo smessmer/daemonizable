@@ -11,6 +11,9 @@ version.workspace = true
 keywords = ["daemon", "daemonize", "fork", "background", "cli"]
 categories = ["command-line-interface", "os::unix-apis"]
 
+[lints]
+workspace = true
+
 [features]
 default = ["macros"]
 # Re-exports the #[daemonizable::main] attribute from the companion
