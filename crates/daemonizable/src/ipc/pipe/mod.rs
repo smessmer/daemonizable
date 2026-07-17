@@ -156,9 +156,12 @@ mod tests {
     fn pipe_ends_have_cloexec_set() {
         // Both ends of pipes created by our `pipe()` wrapper must have
         // FD_CLOEXEC set, so they're closed automatically by the kernel when
-        // the daemon child execs the new binary. The underlying
-        // `interprocess` crate does not set CLOEXEC, so we set it ourselves
-        // right after pipe creation.
+        // the daemon child execs the new binary. The underlying `interprocess`
+        // crate does not set CLOEXEC itself; on pipe2 targets (Linux and most
+        // other unixes) we create the fds via nix `pipe2(O_CLOEXEC)` — the
+        // flag is set atomically at creation and `interprocess` only wraps the
+        // ends — and only the macOS/iOS fallback sets the flag in a separate
+        // fcntl step after creation (see `create_pipe_ends`).
         let (sender, recver) = pipe::<u32>().unwrap();
         // Recover the owned fds so the descriptors stay valid for the fcntl
         // check below; they're closed when these `OwnedFd`s drop at the end.
