@@ -11,11 +11,14 @@ use crate::ipc::error::{HandshakeError, PipeSendError};
 use crate::ipc::{RpcClient, RpcServer};
 
 /// How long the spawning parent will wait for the daemon to send its
-/// build-id handshake after fork+exec. The child handshakes before any app
-/// code runs, so this only has to cover the exec itself plus the child arm's
-/// few syscalls (fstat of two fds, `setsid`, the second `fork`, `chdir`) —
-/// sub-millisecond on a healthy system; the generous bound is for loaded CI
-/// machines. The timeout
+/// build-id handshake after fork+exec. The daemon handshakes before any app
+/// code runs, but the window now spans the *whole two-stage startup*: two
+/// full exec + dynamic-loader passes (stage 1, then the final daemon image),
+/// two runs of any pre-main constructors the application links, plus the
+/// stages' few syscalls (fstat probes, `setsid`, the second `fork`, `chdir`).
+/// Tens of milliseconds on a cold cache, low single-digit milliseconds warm;
+/// the generous bound is for loaded CI machines and apps with heavy
+/// constructors (which pay their cost twice inside this window). The timeout
 /// also matters when the parent accidentally exec'd a wrong binary that
 /// opens fd 4 but never writes (or hangs); without a bound the spawn would
 /// hang forever in that case.

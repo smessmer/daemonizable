@@ -11,7 +11,8 @@
 //! - [`mod@inherited`] — the daemon child's one-time claim of the pipe fds it
 //!   inherited across `execve` ([`rpc_server_from_inherited_fds`]).
 //!
-//! The fd numbers and environment marker shared across those modules live here.
+//! The fd numbers and stage-sentinel argv tokens shared across those modules
+//! live here.
 
 mod handshake;
 mod inherited;
@@ -31,27 +32,30 @@ pub use process::{spawn_daemon_process_with_exe, start_background_process_with_e
 const CHILD_REQUEST_RECV_FD: i32 = 3;
 const CHILD_RESPONSE_SEND_FD: i32 = 4;
 
-/// Environment marker identifying a re-exec'd binary as stage 1 of the
-/// daemon-child startup. An env var rather than an argv flag so applications
-/// aren't forced onto any particular argument parser (stage 1's argv stays
-/// `[argv0]`). Set child-only via `Command::env` during the spawn; stage 1
-/// filters it out of the environment it execs stage 2 with, so the marker
-/// never exists in the final daemon's image — nothing has to scrub it, and
-/// the daemon's own children can't be misdetected.
-pub(crate) const DAEMON_CHILD_ENV_VAR: &str = "DAEMONIZABLE_DAEMON_CHILD";
-
-/// The exact value `spawn_daemon_process` sets [`DAEMON_CHILD_ENV_VAR`] to.
-/// Dispatch matches this value exactly; anything else is not a daemon child.
-pub(crate) const DAEMON_CHILD_ENV_VALUE: &str = "1";
+/// The argv[1] sentinel identifying a re-exec'd binary as stage 1 of the
+/// daemon-child startup (set by the parent's spawn as the child's only
+/// argument). See [`DAEMON_STAGE2_ARGV`] for why stage identity rides argv
+/// rather than the environment.
+pub(crate) const DAEMON_STAGE1_ARGV: &str = "__daemonizable-stage1";
 
 /// The argv[1] sentinel identifying a re-exec'd binary as stage 2 — the final
-/// daemon image. This one deliberately IS an argv flag, unlike the stage-1
-/// marker: argv is not inherited by child processes, so unlike an env var it
-/// needs no removal before the daemon spawns children of its own — which is
-/// what lets the daemon image avoid `env::remove_var` (and its thread-safety
-/// contract) entirely. The name is namespaced/ugly on purpose: dispatch in
-/// [`crate::run`] checks argv[1] against it before any app code runs, so an
-/// application flag can never collide accidentally, and a user passing it by
-/// hand gets the stage-2 fd validation error, same as hand-exporting the env
-/// marker.
+/// daemon image (set by stage 1's re-exec as the image's only argument).
+///
+/// Stage identity rides argv, not the environment, for two structural
+/// reasons. First, argv is not inherited by child processes: nothing ever
+/// needs scrubbing before the daemon spawns children of its own, which is
+/// what lets this crate avoid `env::remove_var` (and its no-concurrent-
+/// env-readers contract) entirely. Second, with no environment marker to
+/// filter out, stage 1 can re-exec with the inherited environment untouched
+/// (`execv`), so the daemon's environment is byte-identical to the
+/// foreground's and stage 1 never has to walk `environ` — which would race a
+/// C-level `setenv` from any constructor-spawned thread.
+///
+/// The names are namespaced/ugly on purpose. Dispatch in [`crate::run`]
+/// checks argv[1] against them before any app code runs, so an application
+/// *flag* can never collide; these are, however, reserved tokens — a process
+/// whose first argument is exactly one of them (hand-invocation, or argument
+/// passthrough of hostile data) is routed to the corresponding daemon stage,
+/// where the fd validation rejects anything the framework didn't plumb (see
+/// the stage functions in `app::daemon_child` for what a hand-run observes).
 pub(crate) const DAEMON_STAGE2_ARGV: &str = "__daemonizable-daemon";

@@ -39,7 +39,8 @@ fn helper_exe() -> PathBuf {
 ///
 /// Unlike `daemon_survives_parent_exit`, here the daemon is our *direct
 /// child*: this raw helper-spawn path does not go through the framework's
-/// child arm (`run_as_daemon_child`), and hence not through its second fork —
+/// daemon-stage arms (`run_as_daemon_stage1/2`), and hence not through the
+/// framework's second fork —
 /// so we must `waitpid` to reap it. `kill(pid, 0)` would report a zombie child
 /// as "still alive", so polling with that would always hit the SIGTERM
 /// timeout.
