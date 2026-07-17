@@ -133,6 +133,11 @@ pub enum InheritedFdsError {
     /// The fds were already claimed by an earlier call. They are a process
     /// singleton (like stdio): a second claim would alias owning `OwnedFd`s
     /// and risk a use-after-close.
+    ///
+    /// Also returned when an earlier claim *attempt* failed validation: the
+    /// claim guard never rolls back, so a failed first call permanently
+    /// poisons the process even though no fd was adopted (see
+    /// [`rpc_server_from_inherited_fds`](crate::rpc_server_from_inherited_fds)).
     #[error(
         "the inherited daemon fds ({request_recv_fd}/{response_send_fd}) have already been claimed; rpc_server_from_inherited_fds must be called at most once per process"
     )]
