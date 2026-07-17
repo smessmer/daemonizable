@@ -31,6 +31,16 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// second call returns an [`InheritedFdsError::AlreadyClaimed`] error rather
 /// than aliasing the descriptors.
 ///
+/// The claim guard is deliberately one-way: it is set before validation and
+/// never rolls back, so a first call that fails validation
+/// ([`InheritedFdsError::NotOpen`] / [`InheritedFdsError::NotAPipe`] /
+/// [`InheritedFdsError::SetCloexec`]) permanently poisons the process — every
+/// later call reports `AlreadyClaimed` even though no fd was adopted. That is
+/// intentional, not an oversight: a process whose fds 3/4 failed validation
+/// once has no legitimate second chance at them, and partial side effects of
+/// the failed attempt (e.g. `FD_CLOEXEC` already restored on fd 3 when fd 4
+/// fails) would make a retry unreliable anyway.
+///
 /// Also re-sets `FD_CLOEXEC` on the two fds: the spawn's `dup2` cleared it so
 /// they'd survive `execve`, and without restoring it the daemon's own
 /// subprocesses would inherit the RPC pipe ends and hold the parent's EOF open
