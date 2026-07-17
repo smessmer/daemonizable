@@ -26,7 +26,7 @@
 //!   5  a std fd is open but is not /dev/null (unexpected)
 //!   6  test setup failed to normalize the inherited std fds
 
-use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 
 fn main() {
     let Some(arg) = std::env::args().nth(1) else {
@@ -101,15 +101,14 @@ fn main() {
 /// the std fds the rest of the helper manages.
 fn devnull_rdev() -> Option<libc::dev_t> {
     let devnull = std::fs::File::open("/dev/null").ok()?;
-    // SAFETY: `libc::stat` is a `repr(C)` plain-old-data struct of integer fields
-    // only (no references, NonZero, bool, or enums), so an all-zero bit pattern is
-    // a valid value; it is then fully written by the `fstat` call below.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: `fstat` on a live fd, reading into a valid out-param.
-    if unsafe { libc::fstat(devnull.as_raw_fd(), &mut st) } < 0 {
-        return None;
-    }
-    Some(st.st_rdev)
+    // Safe fstat via std — `metadata()` stats the live `File`. (The raw-libc
+    // `fstat` in `main` cannot be replaced the same way: it probes possibly
+    // *closed* fd numbers, which no safe `AsFd`-based API may wrap.)
+    let meta = devnull.metadata().ok()?;
+    // `MetadataExt::rdev` widens `st_rdev` to `u64`; cast back to the
+    // platform's `dev_t` (a lossless round-trip of the kernel value) so the
+    // comparison against the raw `libc::stat` in `main` stays exact.
+    Some(meta.rdev() as libc::dev_t)
 }
 
 /// Ensure std fd `fd` is open, parking `/dev/null` on it if the harness left it

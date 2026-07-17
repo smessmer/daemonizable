@@ -1,7 +1,7 @@
 //! The daemon child's one-time claim of the IPC pipe fds it inherited from its
 //! parent across `execve`, rebuilt into a typed [`RpcServer`].
 
-use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Serialize, de::DeserializeOwned};
@@ -44,7 +44,10 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Also re-sets `FD_CLOEXEC` on the two fds: the spawn's `dup2` cleared it so
 /// they'd survive `execve`, and without restoring it the daemon's own
 /// subprocesses would inherit the RPC pipe ends and hold the parent's EOF open
-/// past the daemon's exit.
+/// past the daemon's exit. If restoring the flag fails, the fds have already
+/// been adopted at that point and are closed on the error return (validation
+/// failures — [`InheritedFdsError::NotOpen`] / [`InheritedFdsError::NotAPipe`]
+/// — happen before adoption and leave the fds untouched).
 ///
 /// Used by the test helper binary. Production applications go through the
 /// framework's daemon dispatch in [`crate::run`], which additionally sends
@@ -121,32 +124,6 @@ where
                 st_mode: statbuf.st_mode,
             });
         }
-        // Restore FD_CLOEXEC. The parent set it on every pipe end at creation,
-        // but the `dup2` onto fds 3/4 during the spawn necessarily cleared it so
-        // they'd survive the `execve` into this daemon. Nothing re-sets it, so
-        // without this the fds stay inheritable for the daemon's whole lifetime:
-        // every subprocess the daemon later spawns (`std::process::Command`
-        // inherits non-CLOEXEC fds across its own fork+exec) gets a duplicate of
-        // the response pipe's write end, and since EOF only fires once ALL write
-        // ends close, such a subprocess outliving the daemon suppresses the EOF
-        // the parent waits on — silently defeating the liveness of
-        // `recv_response_blocking`. (The symmetric effect on fd 3 delays the
-        // parent's `send_request` EPIPE.)
-        //
-        // SAFETY: `fd` was just `fstat`ed as open, and `BorrowedFd` requires the
-        // fd to remain open for the borrow's duration. A concurrent close in
-        // the fstat→borrow window is ruled out by this function's `# Safety`
-        // contract, not by this code: the caller guarantees fds 3/4 are the
-        // daemon's *exclusively owned* pipe ends, so nothing else in the
-        // process may close or reuse them. (The framework path reinforces this
-        // by calling us at single-threaded daemon startup.)
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        set_cloexec(borrowed).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
-            fd,
-            label,
-            operation,
-            source,
-        })?;
     }
     // Both fds validated as open FIFOs above; adopt ownership now. This is the
     // one irreducible `unsafe` in the claim — turning the inherited raw fd
@@ -167,6 +144,33 @@ where
             OwnedFd::from_raw_fd(CHILD_RESPONSE_SEND_FD),
         )
     };
+    // Restore FD_CLOEXEC. The parent set it on every pipe end at creation,
+    // but the `dup2` onto fds 3/4 during the spawn necessarily cleared it so
+    // they'd survive the `execve` into this daemon. Nothing re-sets it, so
+    // without this the fds stay inheritable for the daemon's whole lifetime:
+    // every subprocess the daemon later spawns (`std::process::Command`
+    // inherits non-CLOEXEC fds across its own fork+exec) gets a duplicate of
+    // the response pipe's write end, and since EOF only fires once ALL write
+    // ends close, such a subprocess outliving the daemon suppresses the EOF
+    // the parent waits on — silently defeating the liveness of
+    // `recv_response_blocking`. (The symmetric effect on fd 3 delays the
+    // parent's `send_request` EPIPE.)
+    //
+    // Runs on the adopted `OwnedFd`s — `as_fd()` needs no raw-fd `unsafe`, and
+    // there is no fstat→borrow window to reason about. A failure here closes
+    // both fds on the error return; acceptable, since the claim has begun and
+    // this function's contract says it takes ownership of them.
+    for (label, fd) in [
+        ("request-recv", &request_recv),
+        ("response-send", &response_send),
+    ] {
+        set_cloexec(fd.as_fd()).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
+            fd: fd.as_raw_fd(),
+            label,
+            operation,
+            source,
+        })?;
+    }
     Ok(RpcServer::from_owned_fds(request_recv, response_send))
 }
 
