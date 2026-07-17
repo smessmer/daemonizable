@@ -40,7 +40,7 @@ use crate::ipc::error::SpawnDaemonError;
 /// auxiliary vector ([`AT_EXECFN`](https://man7.org/linux/man-pages/man3/getauxval.3.html)),
 /// and finally to `argv[0]`. The fallback gives up the same-inode guarantee —
 /// the on-disk binary could have been replaced since startup, and a relative
-/// `argv[0]` is resolved against a cwd that may have changed — but the
+/// `AT_EXECFN` or `argv[0]` is resolved against a cwd that may have changed — but the
 /// build-id handshake still turns a swapped or wrong binary into a clean typed
 /// error ([`HandshakeError::Mismatch`](crate::HandshakeError)) rather than a
 /// silently wrong daemon. `current_exe()` is deliberately **not** the Linux
@@ -121,31 +121,47 @@ fn linux_daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
 
 /// The pathname used to `execve` this process, as recorded by the kernel in
 /// the auxiliary vector under `AT_EXECFN`. Returns `None` if the entry is
-/// absent (e.g. a statically odd libc, or a stripped auxv). Available on
-/// glibc and musl via `getauxval(3)`.
+/// absent (e.g. a statically odd libc, or a stripped auxv) or useless — a
+/// `/dev/fd/N` path from an `fexecve`-style exec, which cannot resolve
+/// without `/proc`. Available on glibc and musl via `getauxval(3)`.
 #[cfg(target_os = "linux")]
 fn exe_path_from_auxv() -> Option<PathBuf> {
     use std::ffi::{CStr, OsStr};
     use std::os::unix::ffi::OsStrExt;
 
-    // SAFETY: `getauxval` is always safe to call; it returns 0 when the
-    // requested type isn't present. On a non-zero return the value is a pointer
-    // into the process's own auxiliary vector — a NUL-terminated string that
-    // lives for the life of the process — so building a `CStr` from it is
-    // sound.
-    let ptr = unsafe { libc::getauxval(libc::AT_EXECFN) };
-    if ptr == 0 {
+    // SAFETY: `getauxval` is always safe to call; it takes no pointers and
+    // returns 0 when the requested type isn't present. On a non-zero return
+    // the value is a pointer into the process's own auxiliary vector.
+    let val = unsafe { libc::getauxval(libc::AT_EXECFN) };
+    if val == 0 {
         return None;
     }
-    // SAFETY: `ptr` is the non-zero return of `getauxval(AT_EXECFN)` (the
-    // `ptr == 0` case returned above), which for this pointer-typed auxv entry
-    // is the kernel-supplied pointer to the NUL-terminated pathname the process
-    // was `execve`'d with. That string is correctly aligned (`c_char` has
-    // alignment 1) and lives for the whole process lifetime, and the borrowed
-    // `CStr` is consumed inline (its bytes copied into a `PathBuf` below), so it
-    // is never mutated or outlived.
-    let bytes = unsafe { CStr::from_ptr(ptr as *const libc::c_char) }.to_bytes();
+    // `getauxval` returns the pointer as an integer (`c_ulong`);
+    // `with_exposed_provenance` spells out the int-to-pointer intent — the
+    // address originates outside Rust's provenance tracking (the kernel wrote
+    // it), so "exposed" is exactly its provenance status.
+    let ptr: *const libc::c_char = std::ptr::with_exposed_provenance(val as usize);
+    // SAFETY: for this pointer-typed auxv entry, `ptr` is the kernel-supplied
+    // pointer to the NUL-terminated pathname the process was `execve`'d with,
+    // stored in the argv/environ/auxv block at the top of the initial stack:
+    // correctly aligned (`c_char` has alignment 1), NUL-terminated well within
+    // `isize::MAX` bytes (the kernel caps that whole block at stack-size
+    // limits, orders of magnitude below `isize::MAX`), and mapped for the
+    // whole process lifetime. The borrowed `CStr` is consumed inline (its
+    // bytes copied into a `PathBuf` below), so it is never mutated or
+    // outlived. One assumption worth naming: nothing rewrites the initial
+    // argv/environ area (setproctitle-style tricks could clobber the string
+    // and its NUL terminator); neither this crate nor its dependencies does.
+    let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
     if bytes.is_empty() {
+        return None;
+    }
+    // Under fexecve(3) / execveat(AT_EMPTY_PATH), AT_EXECFN is "/dev/fd/N" —
+    // resolvable only through /proc (or a /dev/fd symlink into it), which is
+    // exactly what's absent whenever this fallback runs. Returning it would
+    // also shadow the argv[0] fallback below, which may still name a usable
+    // path.
+    if bytes.starts_with(b"/dev/fd/") {
         return None;
     }
     Some(PathBuf::from(OsStr::from_bytes(bytes)))
