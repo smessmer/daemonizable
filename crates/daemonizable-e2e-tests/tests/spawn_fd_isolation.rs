@@ -96,19 +96,23 @@ fn pipes_do_not_leak_into_daemon() {
         .unwrap();
     let pid_file = tmp.path().join("daemon.pid");
     let sentinel_param: OsString = sentinel_write_fd.to_string().into();
-    // SAFETY: `set_var` is unsafe because it races with concurrent env reads
-    // on other threads. This integration test is its own binary with a single
-    // `#[test]`, so no sibling test thread is reading env at the same time.
-    // The values are inherited through fork + execve into the helper daemon.
-    unsafe {
-        std::env::set_var("DAEMONIZABLE_TEST_LEAK_FD", &sentinel_param);
-        std::env::set_var("DAEMONIZABLE_TEST_PID", &pid_file);
-    }
 
-    let env: [(&OsStr, &OsStr); 1] = [(
-        OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
-        OsStr::new("write_to_fd_then_idle"),
-    )];
+    // All three variables ride `extra_env` (`Command::env`, applied in the
+    // spawned child) rather than `std::env::set_var` on this process: mutating
+    // our own environment is `unsafe` (racy with any concurrently-reading
+    // thread, e.g. the libtest controller), and the helper only reads these
+    // from its own environment anyway.
+    let env: [(&OsStr, &OsStr); 3] = [
+        (
+            OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
+            OsStr::new("write_to_fd_then_idle"),
+        ),
+        (
+            OsStr::new("DAEMONIZABLE_TEST_LEAK_FD"),
+            sentinel_param.as_os_str(),
+        ),
+        (OsStr::new("DAEMONIZABLE_TEST_PID"), pid_file.as_os_str()),
+    ];
     let _client =
         start_background_process_with_exe::<(), ()>(&helper_exe(), &env).expect("spawn daemon");
 

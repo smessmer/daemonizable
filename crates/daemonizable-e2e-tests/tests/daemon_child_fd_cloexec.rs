@@ -71,18 +71,18 @@ fn rpc_fds_do_not_leak_into_daemon_spawned_child() {
     let sleeper_pid_file = tmp.path().join("sleeper.pid");
 
     let pid_param: OsString = sleeper_pid_file.clone().into_os_string();
-    // SAFETY: `set_var` races with concurrent env reads on other threads. This
-    // integration test is its own binary with a single `#[test]`, so no sibling
-    // test thread reads env concurrently. The value is inherited through
-    // fork + execve into the helper daemon.
-    unsafe {
-        std::env::set_var("DAEMONIZABLE_TEST_PID", &pid_param);
-    }
-
-    let env: [(&OsStr, &OsStr); 1] = [(
-        OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
-        OsStr::new("spawn_child_holding_fds_then_exit"),
-    )];
+    // Both variables ride `extra_env` (`Command::env`, applied in the spawned
+    // child) rather than `std::env::set_var` on this process: mutating our own
+    // environment is `unsafe` (racy with any concurrently-reading thread, e.g.
+    // the libtest controller), and the helper only reads these from its own
+    // environment anyway.
+    let env: [(&OsStr, &OsStr); 2] = [
+        (
+            OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
+            OsStr::new("spawn_child_holding_fds_then_exit"),
+        ),
+        (OsStr::new("DAEMONIZABLE_TEST_PID"), pid_param.as_os_str()),
+    ];
     let mut client =
         start_background_process_with_exe::<(), ()>(&helper_exe(), &env).expect("spawn daemon");
 
