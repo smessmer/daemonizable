@@ -1,6 +1,6 @@
 //! Helper binary used by `start_background_process_with_exe` integration
 //! tests. Reads `DAEMONIZABLE_TEST_BEHAVIOR` from the environment and replays one of
-//! a few canned daemon behaviors against the inherited fds 3 and 4.
+//! a few canned daemon behaviors against the inherited channel fd (3).
 //!
 //! This binary is what the test_child_* daemon-lifecycle tests now spawn
 //! instead of forking an in-process fn pointer, so they no longer suffer the
@@ -23,20 +23,20 @@ fn main() {
     let behavior =
         std::env::var("DAEMONIZABLE_TEST_BEHAVIOR").unwrap_or_else(|_| "echo".to_string());
 
-    // SAFETY: `rpc_server_from_inherited_fds` requires fds 3/4 to be this
-    // process's exclusively-owned inherited RPC pipe ends (see its `# Safety`).
+    // SAFETY: `rpc_server_from_inherited_fds` requires fd 3 to be this
+    // process's exclusively-owned inherited channel socket (see its `# Safety`).
     // The discharge is positional and holds for ANY invocation, not just the
     // intended one: this call is the first fd-related action in a fresh
     // post-exec image (only the env read above precedes it), so no live
-    // `OwnedFd`/`File` here can already own fd 3 or 4 — whatever open FIFOs
-    // sit there get their sole in-process owners, and a hand-run invocation
-    // with closed or non-pipe fds is rejected by the callee's fstat probe as a
-    // clean error, never as aliased ownership. Keep this call the first
+    // `OwnedFd`/`File` here can already own fd 3 — whatever open socket
+    // sits there gets its sole in-process owner, and a hand-run invocation
+    // with a closed or non-socket fd is rejected by the callee's fstat probe as
+    // a clean error, never as aliased ownership. Keep this call the first
     // fd-creating operation in `main`: opening any fd before it would
     // reintroduce aliasing risk in hand-run processes. The intended
     // configuration remains the test harness spawning us
     // (`start_background_process_with_exe` / `spawn_daemon_process_with_exe`),
-    // which `dup2`s the parent's pipe ends onto fds 3/4 across `execve`; this
+    // which `dup2`s the parent's socketpair end onto fd 3 across `execve`; this
     // is the only claim in the process.
     let mut rpc: RpcServer<Request, Response> = unsafe { rpc_server_from_inherited_fds() }
         .expect("daemon: failed to rebuild RpcServer from inherited fds");
@@ -116,13 +116,13 @@ fn main() {
         }
         "spawn_child_holding_fds_then_exit" => {
             // Regression coverage for FD_CLOEXEC restoration on the inherited
-            // RPC fds (3/4). Spawn a long-lived grandchild via fork+exec, then
-            // exit this daemon. If the fds were left without FD_CLOEXEC, execve
-            // would NOT close them and the grandchild would inherit the response
-            // pipe's write end (fd 4) — keeping it open after we exit and
-            // starving the parent's EOF. With CLOEXEC restored the grandchild
-            // does not inherit them, so our exit closes the last write end and
-            // the parent's receive returns SenderClosed promptly.
+            // channel fd (3). Spawn a long-lived grandchild via fork+exec, then
+            // exit this daemon. If the fd were left without FD_CLOEXEC, execve
+            // would NOT close it and the grandchild would inherit the channel
+            // end (fd 3) — keeping it open after we exit and starving the
+            // parent's EOF. With CLOEXEC restored the grandchild does not
+            // inherit it, so our exit closes the last copy of the end and the
+            // parent's receive returns SenderClosed promptly.
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
@@ -139,7 +139,7 @@ fn main() {
             // Record the grandchild's pid so the test can kill it in cleanup
             // (it is reparented to init once we exit).
             std::fs::write(&pid_file, child.id().to_string()).expect("daemon: write sleeper pid");
-            drop(rpc); // close this daemon's own copies of fds 3/4
+            drop(rpc); // close this daemon's own copies of the channel fd
             std::process::exit(0);
         }
         "sentinel_loop" => {
@@ -271,7 +271,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 0 => {
-                    // Grandchild: the "daemon". Owns the inherited fds 3/4.
+                    // Grandchild: the "daemon". Owns the inherited channel fd (3).
                     std::fs::write(&pid_file, std::process::id().to_string())
                         .expect("daemon: write pid file");
                     daemonizable::send_handshake(&mut rpc, "deliberately-wrong-build-id")

@@ -4,7 +4,9 @@
 
 use std::io::Read;
 use std::marker::PhantomData;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+#[cfg(test)]
+use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
@@ -40,16 +42,9 @@ where
         }
     }
 
-    /// Construct a typed `Receiver` from a raw owned file descriptor that the
-    /// caller has verified is one end of a connected `AF_UNIX` socket inherited
-    /// across `execve`. Used by the fork+exec daemon child to rebuild its
-    /// `RpcServer`.
-    pub fn from_owned_fd(fd: OwnedFd) -> Self {
-        Self::new(UnixStream::from(fd))
-    }
-
     /// Surrender the typed wrapper and recover the underlying owned file
-    /// descriptor. Used to `dup2` the fd onto a fixed slot in a child process.
+    /// descriptor. Test-only (used to inspect the raw fd's flags).
+    #[cfg(test)]
     pub fn into_owned_fd(self) -> OwnedFd {
         OwnedFd::from(self.recver)
     }

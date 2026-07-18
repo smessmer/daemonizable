@@ -8,11 +8,11 @@
 //!   validation that completes a spawn.
 //! - [`mod@handshake`] — the build-id handshake both sides exchange
 //!   ([`send_handshake`] on the daemon side, validation on the parent side).
-//! - [`mod@inherited`] — the daemon child's one-time claim of the pipe fds it
+//! - [`mod@inherited`] — the daemon child's one-time claim of the channel fd it
 //!   inherited across `execve` ([`rpc_server_from_inherited_fds`]).
 //!
-//! The fd numbers and stage-sentinel argv tokens shared across those modules
-//! live here.
+//! The channel fd number and stage-sentinel argv tokens shared across those
+//! modules live here.
 
 mod handshake;
 mod inherited;
@@ -27,10 +27,14 @@ pub(crate) use process::{daemon_exe_path, spawn_daemon_process};
 #[cfg(any(test, feature = "testutils"))]
 pub use process::{spawn_daemon_process_with_exe, start_background_process_with_exe};
 
-/// Fd numbers the fork+exec child receives its inherited pipe ends on.
+/// Fd number the fork+exec child receives its inherited full-duplex channel on.
 /// Matches `sd_listen_fds(3)`-style convention (parent-provided fds start at 3).
-const CHILD_REQUEST_RECV_FD: i32 = 3;
-const CHILD_RESPONSE_SEND_FD: i32 = 4;
+/// Exactly ONE fd crosses the exec boundary now: the channel is a single
+/// full-duplex `AF_UNIX` socket rather than a pair of one-way pipes on 3+4. (The
+/// daemon's `RpcServer` dups this fd at runtime — via `endpoint_from_stream` — so
+/// it can read and write independently; that runtime clone lands on whatever fd
+/// the OS assigns, typically 4, and is CLOEXEC so it never leaks to children.)
+const DAEMON_CHANNEL_FD: i32 = 3;
 
 /// The argv[1] sentinel identifying a re-exec'd binary as stage 1 of the
 /// daemon-child startup (set by the parent's spawn as the child's only

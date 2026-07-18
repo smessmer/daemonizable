@@ -120,10 +120,10 @@ pub enum SpawnDaemonError {
     Handshake(#[from] HandshakeError),
 }
 
-/// The daemon child couldn't claim the IPC fds inherited from its parent.
+/// The daemon child couldn't claim the IPC channel fd inherited from its parent.
 #[derive(Debug, Error)]
 pub enum InheritedFdsError {
-    /// The fds were already claimed by an earlier call. They are a process
+    /// The channel fd was already claimed by an earlier call. It is a process
     /// singleton (like stdio): a second claim would alias owning `OwnedFd`s
     /// and risk a use-after-close.
     ///
@@ -132,21 +132,17 @@ pub enum InheritedFdsError {
     /// poisons the process even though no fd was adopted (see
     /// [`rpc_server_from_inherited_fds`](crate::rpc_server_from_inherited_fds)).
     #[error(
-        "the inherited daemon fds ({request_recv_fd}/{response_send_fd}) have already been claimed; rpc_server_from_inherited_fds must be called at most once per process"
+        "the inherited daemon channel fd ({channel_fd}) has already been claimed; rpc_server_from_inherited_fds must be called at most once per process"
     )]
-    AlreadyClaimed {
-        request_recv_fd: i32,
-        response_send_fd: i32,
-    },
+    AlreadyClaimed { channel_fd: i32 },
 
     /// The fd isn't open — almost always a user invoking the daemon entry
     /// point manually from a shell.
     #[error(
-        "fd {fd} ({label}) is not open. This entry point is internal to this binary; do not invoke it directly. ({source})"
+        "fd {fd} (daemon channel) is not open. This entry point is internal to this binary; do not invoke it directly. ({source})"
     )]
     NotOpen {
         fd: i32,
-        label: &'static str,
         #[source]
         source: std::io::Error,
     },
@@ -154,24 +150,27 @@ pub enum InheritedFdsError {
     /// The fd is open but not a socket — whatever happened to be open on that
     /// fd number is not the parent's IPC channel.
     #[error(
-        "fd {fd} ({label}) is not a socket (st_mode={st_mode:#o}). This entry point is internal to this binary; do not invoke it directly."
+        "fd {fd} (daemon channel) is not a socket (st_mode={st_mode:#o}). This entry point is internal to this binary; do not invoke it directly."
     )]
-    NotASocket {
-        fd: i32,
-        label: &'static str,
-        st_mode: libc::mode_t,
-    },
+    NotASocket { fd: i32, st_mode: libc::mode_t },
 
-    /// Restoring `FD_CLOEXEC` on a claimed fd failed. The spawn's `dup2` cleared
-    /// the flag so the fd would survive `execve`; it must be re-set so the
-    /// daemon's own subprocesses don't inherit the RPC pipe ends and suppress
+    /// Restoring `FD_CLOEXEC` on the claimed fd failed. The spawn's `dup2`
+    /// cleared the flag so the fd would survive `execve`; it must be re-set so
+    /// the daemon's own subprocesses don't inherit the channel end and suppress
     /// the EOF the parent relies on for liveness.
-    #[error("fcntl({operation}) failed restoring FD_CLOEXEC on fd {fd} ({label}): {source}")]
+    #[error("fcntl({operation}) failed restoring FD_CLOEXEC on fd {fd} (daemon channel): {source}")]
     SetCloexec {
         fd: i32,
-        label: &'static str,
         /// Which fcntl operation failed (`"F_GETFD"` or `"F_SETFD"`).
         operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// Cloning the claimed channel fd into the server's send/recv halves failed
+    /// (`dup` → EMFILE/ENFILE). The adopted fd is closed on this error.
+    #[error("failed to clone the daemon channel fd into its send/recv halves: {source}")]
+    CloneFd {
         #[source]
         source: std::io::Error,
     },

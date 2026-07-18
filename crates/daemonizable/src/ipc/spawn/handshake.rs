@@ -20,8 +20,8 @@ use crate::ipc::{RpcClient, RpcServer};
 /// the generous bound is for loaded CI machines and apps with heavy
 /// constructors (which pay their cost twice inside this window). The timeout
 /// also matters when the parent accidentally exec'd a wrong binary that
-/// opens fd 4 but never writes (or hangs); without a bound the spawn would
-/// hang forever in that case.
+/// opens the channel fd but never writes (or hangs); without a bound the spawn
+/// would hang forever in that case.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parent-side counterpart to [`send_handshake`]: read the build-id the
@@ -86,7 +86,8 @@ mod tests {
     fn accepts_matching_build_id() {
         let (mut server, client) = RpcConnection::<Req, Resp>::new_pipe()
             .unwrap()
-            .into_server_and_client();
+            .into_server_and_client()
+            .unwrap();
         send_handshake(&mut server, TEST_BUILD_ID).unwrap();
         validate_handshake_and_build_client(client, TEST_BUILD_ID).expect("matching build_id");
     }
@@ -95,7 +96,8 @@ mod tests {
     fn rejects_mismatched_build_id() {
         let (mut server, client) = RpcConnection::<Req, Resp>::new_pipe()
             .unwrap()
-            .into_server_and_client();
+            .into_server_and_client()
+            .unwrap();
         send_handshake(&mut server, "some-other-version-1.2.3").unwrap();
         let err = validate_handshake_and_build_client(client, TEST_BUILD_ID)
             .err()
@@ -113,7 +115,8 @@ mod tests {
     fn rejects_non_utf8_build_id() {
         let (mut server, client) = RpcConnection::<Req, Resp>::new_pipe()
             .unwrap()
-            .into_server_and_client();
+            .into_server_and_client()
+            .unwrap();
         // 0xff is never valid as a leading UTF-8 byte.
         server.send_raw_handshake(&[0xff, 0xfe]).unwrap();
         let err = validate_handshake_and_build_client(client, TEST_BUILD_ID)
@@ -132,7 +135,8 @@ mod tests {
         // EOF and bails — must surface as an error rather than hang.
         let (server, client) = RpcConnection::<Req, Resp>::new_pipe()
             .unwrap()
-            .into_server_and_client();
+            .into_server_and_client()
+            .unwrap();
         drop(server);
         let err = validate_handshake_and_build_client(client, TEST_BUILD_ID)
             .err()
@@ -145,13 +149,14 @@ mod tests {
 
     #[test]
     fn rejects_when_daemon_hangs_without_sending() {
-        // Daemon (or a wrong binary like a hung `/bin/cat`) holds fd 4 open
-        // but never writes. Without a timeout the parent would hang forever;
+        // Daemon (or a wrong binary like a hung `/bin/cat`) holds the channel
+        // fd open but never writes. Without a timeout the parent would hang forever;
         // bounded `recv_raw_handshake_with_timeout` surfaces a timeout error
         // instead. Tiny timeout so the test doesn't actually wait 10s.
         let (_server_keepalive, mut client) = RpcConnection::<Req, Resp>::new_pipe()
             .unwrap()
-            .into_server_and_client();
+            .into_server_and_client()
+            .unwrap();
         let err = client
             .recv_raw_handshake_with_timeout(Duration::from_millis(50))
             .expect_err("hung daemon should be rejected via timeout");

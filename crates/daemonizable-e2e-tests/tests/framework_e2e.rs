@@ -115,13 +115,14 @@ fn foreground_dispatch_runs_run_foreground_without_spawning() {
     assert_eq!("foreground-ran", result);
 }
 
-/// Spawn the test app with `arg` as its first argument and fds 3/4 known
-/// CLOSED in the child, then assert the daemon-stage arm rejects it: exit
+/// Spawn the test app with `arg` as its first argument and the channel fd (3)
+/// known CLOSED in the child, then assert the daemon-stage arm rejects it: exit
 /// code 2 and the fstat-guard message. Shared by both sentinel-rejection
-/// tests. The explicit close matters: the harness environment can leave
-/// non-CLOEXEC FIFOs on low fd numbers (the classic case is an old-style GNU
-/// make jobserver wrapping `cargo test`), which would pass the FIFO probe
-/// and turn this test into a hang that eats jobserver tokens.
+/// tests. The explicit close matters: the harness environment can leave a
+/// non-CLOEXEC socket/FIFO on a low fd number (the classic case is an old-style
+/// GNU make jobserver wrapping `cargo test`), which could pass the socket probe
+/// and turn this test into a hang that eats jobserver tokens. (fd 4 is closed
+/// too for good measure, though the framework no longer uses it.)
 fn assert_sentinel_rejected(arg: &str) {
     use std::os::unix::process::CommandExt;
 
@@ -159,7 +160,7 @@ fn assert_sentinel_rejected(arg: &str) {
 #[test]
 fn stage1_sentinel_from_shell_is_rejected() {
     // The stage-1 argv sentinel is internal plumbing: an invocation passing
-    // it by hand has no pipes on fds 3/4, so stage 1's pre-fork probe must
+    // it by hand has nothing plumbed on fd 3, so stage 1's pre-fork probe must
     // refuse with a clear message — before setsid, before any process is
     // forked. (Literal deliberately hard-coded, kept in sync with
     // DAEMON_STAGE1_ARGV in ipc/spawn/mod.rs: if they drift, dispatch falls
