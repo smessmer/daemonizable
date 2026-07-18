@@ -23,7 +23,7 @@ pub use handshake::send_handshake;
 pub use inherited::rpc_server_from_inherited_fds;
 pub(crate) use process::{daemon_exe_path, spawn_daemon_process};
 pub(crate) use token::{
-    StageDispatch, channel_has_stage2_token, dispatch_from_channel, verify_channel_peer_uid,
+    StageDispatch, channel_has_stage2_token, dispatch_from_channel, verify_channel_peer_creds,
 };
 // Test-only spawn helpers: gated so they don't ship in the default published
 // surface (their crate-root re-exports in `lib.rs` are `testutils`-gated too).
@@ -83,9 +83,12 @@ pub(crate) const TOKEN_STAGE2: u8 = 2;
 /// [`run_as_daemon_stage2`](crate::run) (all applied *before* any application
 /// code runs):
 /// - a **peer-credential check** (`SO_PEERCRED` / `getpeereid`): the fd-3
-///   peer's effective uid must equal ours, which rejects the load-bearing case —
-///   a lower-privileged principal trying to drive a setuid/file-cap daemon
-///   image into `run_daemon` over an attacker-controlled channel;
+///   peer's effective uid AND gid must equal ours, which rejects the
+///   load-bearing case — a lower-privileged principal trying to drive a daemon
+///   image that gained privilege by CHANGING uid/gid (a setuid- or
+///   setgid-to-a-different-id binary) into `run_daemon` over an
+///   attacker-controlled channel. It does NOT cover a file-capabilities binary,
+///   which keeps the invoker's ids (see `verify_channel_peer_creds`'s scope note);
 /// - the **session/group-leader guard**: a genuine daemon is a non-leader
 ///   grandchild (`sid == pgid == stage 1's pid ≠ own pid`), so a hand-run from
 ///   a shell or a setsid-wrapped launcher is refused.

@@ -3,7 +3,7 @@
 //! bypasses the framework and drives the raw IPC primitives), this binary
 //! goes through the full production path: `#[daemonizable::main]` generates
 //! the `main` that calls `daemonizable::run::<TestApp>()`, so a
-//! `--daemonize` invocation exercises the argv-sentinel stage dispatch, the real
+//! `--daemonize` invocation exercises the in-band channel-token stage dispatch, the real
 //! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
 //! channel end-to-end — and dogfoods the attribute macro under that real
 //! fork+exec path.
@@ -47,7 +47,7 @@ struct TestResponse {
     /// chdir'd it to `/` (it must not pin the parent's cwd).
     daemon_cwd: String,
     /// Whether the legacy daemon-child env marker is set inside `run_daemon`.
-    /// Stage identity rides argv now, so no framework env var may exist in
+    /// Stage identity rides an in-band channel token now, so no framework env var may exist in
     /// the daemon's environment at all (its children would inherit it); the
     /// test asserts "removed". Kept as a regression pin against any future
     /// design reintroducing environment leakage.

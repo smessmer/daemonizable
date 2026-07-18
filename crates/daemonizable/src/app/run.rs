@@ -82,12 +82,16 @@ static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 /// argument) and nothing is left in `ps`. Fd 3 is a **reserved descriptor**: a
 /// process that inherits a socket there whose peer writes the (public) token
 /// bytes is routed to a daemon stage, which then authenticates the channel —
-/// the peer's effective uid must equal ours (`SO_PEERCRED`/`getpeereid`) and the
-/// process must have the session/group topology of a framework-spawned daemon —
-/// before any application code runs. Applications must not treat `run_daemon`'s
-/// RPC input as authenticated-by-provenance against a *same-uid* local peer
-/// (which could equally `ptrace` the process); on a setuid/file-cap binary
-/// `AT_SECURE` is set and the peer-credential check is the load-bearing barrier.
+/// the peer's effective uid and gid must equal ours (`SO_PEERCRED`/`getpeereid`)
+/// and the process must have the session/group topology of a framework-spawned
+/// daemon — before any application code runs. Applications must not treat
+/// `run_daemon`'s RPC input as authenticated-by-provenance against a
+/// *same-principal* local peer (which could equally `ptrace` a
+/// non-privilege-elevated process). The peer-credential check is the
+/// load-bearing barrier for a binary that gains privilege by CHANGING uid/gid
+/// (setuid/setgid); a **file-capabilities** binary keeps the invoker's ids, so
+/// the check cannot distinguish a same-id attacker there — such a daemon must
+/// treat `run_daemon` input as untrusted (see `verify_channel_peer_creds`).
 ///
 /// # Panics
 ///

@@ -129,7 +129,7 @@ fn main() {
             // 30s: not a synchronization point — the test kills the sleeper
             // by the pid recorded below. The duration must merely outlast,
             // with a wide margin, the 5s recv_response wait in
-            // daemon_child_fd_cloexec (a leaked fd 4 has to stay open past
+            // daemon_child_fd_cloexec (a leaked fd 3 has to stay open past
             // that whole wait for the test to detect it), while still
             // self-cleaning eventually if the kill-based cleanup never ran.
             let child = std::process::Command::new("sleep")

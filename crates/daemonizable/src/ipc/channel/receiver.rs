@@ -275,12 +275,17 @@ fn read_exact_with_timeout_impl(
         // that window a single `poll` expires before the real deadline — so on
         // expiry we loop back (retry the recv, then re-check the real deadline)
         // rather than erroring, which would cut any timeout longer than one
-        // window short.
+        // window short. `remaining` is > 0 here (the `is_zero()` guard above),
+        // but `as_millis()` truncates a sub-millisecond remainder to 0, and
+        // `poll(0)` returns immediately — which would busy-spin recv/poll for
+        // the final fraction of a millisecond. Floor the window at 1ms so the
+        // poll actually blocks for that remainder instead of spinning; a timeout
+        // is a lower bound, so returning up to ~1ms late is fine.
         let timeout_ms: u16 = remaining
             .as_millis()
             .try_into()
             .unwrap_or(max_poll_window_ms)
-            .min(max_poll_window_ms);
+            .clamp(1, max_poll_window_ms);
         match poll(&mut [poll_fd], PollTimeout::from(timeout_ms)) {
             Ok(_) => continue,             // readable, or window expired — retry the recv
             Err(Errno::EINTR) => continue, // interrupted, retry

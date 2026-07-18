@@ -5,7 +5,7 @@
 //!
 //! Unlike the daemon-lifecycle tests (which drive the raw IPC primitives via
 //! `start_background_process_with_exe`, skipping the handshake), these tests
-//! cover the full production path: the argv-sentinel stage dispatch, the real
+//! cover the full production path: the in-band channel-token stage dispatch, the real
 //! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
 //! channel between parent and daemon.
 
