@@ -350,10 +350,13 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     // `dup2`'d onto fd 3 across the first exec, then preserved untouched
     // across stage 1's fork and second exec (stage 1 only probes it;
     // FD_CLOEXEC is restored by this claim, exactly once, in the image
-    // that keeps it). A hand-launched `app __daemonizable-daemon` with
-    // a closed or non-socket fd is rejected by the callee's fstat probe with a
-    // clean error; even a deliberately plumbed socket yields a broken RPC
-    // channel, never aliased ownership. It is also the sole claim. Residual
+    // that keeps it). Reaching this claim at all means dispatch already peeked a
+    // stage-2 token off fd 3, so it is a live socket that also cleared the
+    // topology and peer-cred guards above — a closed or non-socket fd 3
+    // classifies as foreground and never routes here, and the former
+    // `__daemonizable-daemon` argv is inert as a dispatch signal now. Even a
+    // deliberately plumbed socket that clears those guards yields at most a
+    // broken RPC channel, never aliased ownership. It is also the sole claim. Residual
     // assumption, stated in [`run`](super::run)'s docs: no pre-main
     // constructor deliberately claimed or closed raw fd 3 — it is open
     // in this image, so a constructor's own `open`s cannot land on that

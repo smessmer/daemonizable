@@ -183,6 +183,29 @@ impl std::fmt::Display for PeerCredError {
 /// wrongly reject a legitimate setuid-root foreground (euid 0, real uid =
 /// invoking user).
 ///
+/// # The socket-activation / handed-in-connection case
+///
+/// This check is also what keeps the design safe under **`inetd`-style socket
+/// activation** (systemd `Accept=yes`, classic inetd), where the service is
+/// exec'd with an already-*connected* client socket on fd 3 instead of a
+/// framework socketpair. There `fstat` reports a socket and `recv` succeeds (it
+/// is not the listening-socket case the classifier folds to foreground via
+/// `EINVAL`/`ENOTCONN`), so the classifier will match a token the peer sends —
+/// and the token is public, so a client can deliberately send `TOKEN_MAGIC ‖ 1`
+/// then `‖ 2`. The peer credential is the barrier a network client cannot cross:
+/// for a **remote TCP/IP peer** the kernel has no local process to attribute, so
+/// `SO_PEERCRED` reports `uid == gid == (uid_t)-1` (`4294967295`) — a reserved
+/// value that is never a real process's euid — and the comparison below rejects
+/// it (exit 1, before the claim and before `run_daemon`; the attacker gets the
+/// stage-1 `setsid`+fork side effects but no application code and no RPC). A
+/// **local** `AF_UNIX` activation peer of a *different* uid/gid is rejected the
+/// same way; only a *same-principal* local peer passes, which is the documented
+/// ptrace-equivalent limit. (On BSD/macOS `getpeereid` does not yield a matching
+/// credential for such a peer either — the lookup fails, giving the same
+/// rejection via [`PeerCredError::Lookup`].) The [`TOKEN_MAGIC`] threat-model doc
+/// names socket activation only as an *accidental*-collision concern; this is the
+/// *deliberate* case, and this check is what handles it.
+///
 /// # Scope and limits (important)
 ///
 /// - This protects **only** binaries that gain privilege by changing uid or gid.
@@ -211,9 +234,24 @@ pub(crate) fn verify_channel_peer_creds() -> Result<(), PeerCredError> {
     // read is I/O-safe. The borrow does not outlive this function and takes no
     // ownership (the fd is adopted later, by the claim).
     let fd = unsafe { BorrowedFd::borrow_raw(DAEMON_CHANNEL_FD) };
-    let (peer_uid, peer_gid) = peer_creds(fd).map_err(PeerCredError::Lookup)?;
-    let our_uid = nix::unistd::geteuid().as_raw();
-    let our_gid = nix::unistd::getegid().as_raw();
+    let peer = peer_creds(fd).map_err(PeerCredError::Lookup)?;
+    let ours = (
+        nix::unistd::geteuid().as_raw(),
+        nix::unistd::getegid().as_raw(),
+    );
+    creds_match(peer, ours)
+}
+
+/// The (uid, gid) equality decision, split out from the syscall path so it is
+/// unit-testable: the full [`verify_channel_peer_creds`] reads the real fd 3 and
+/// the process's real euid/egid, so its mismatch arm can only fire when the peer
+/// runs as a *different* principal — which a same-uid test harness cannot
+/// arrange without a second uid/privilege. This pure comparison lets the reject
+/// path (both the uid and gid halves, and the error it builds) be exercised
+/// directly.
+fn creds_match(peer: (u32, u32), ours: (u32, u32)) -> Result<(), PeerCredError> {
+    let (peer_uid, peer_gid) = peer;
+    let (our_uid, our_gid) = ours;
     if peer_uid != our_uid || peer_gid != our_gid {
         return Err(PeerCredError::CredMismatch {
             peer_uid,
@@ -309,5 +347,46 @@ mod tests {
         let mut trailing = magic_with(TOKEN_STAGE1);
         trailing.extend_from_slice(b"more data");
         assert_eq!(classify(Ok(&trailing)), StageDispatch::DaemonStage1);
+    }
+
+    #[test]
+    fn creds_match_accepts_equal_and_rejects_any_difference() {
+        // Same principal on both ends → accepted (the genuine flow: the peer is
+        // our own parent running the same image).
+        assert!(creds_match((1000, 1000), (1000, 1000)).is_ok());
+        assert!(creds_match((0, 0), (0, 0)).is_ok());
+
+        // A difference in EITHER half is a cross-principal channel and must be
+        // refused, with the mismatching values carried through for the message.
+        // (The live `verify_channel_peer_creds` can't reach this arm under a
+        // same-uid test harness, so this pure check is the reject-path coverage.)
+        let uid_only = creds_match((1001, 1000), (1000, 1000));
+        assert!(matches!(
+            uid_only,
+            Err(PeerCredError::CredMismatch {
+                peer_uid: 1001,
+                our_uid: 1000,
+                peer_gid: 1000,
+                our_gid: 1000,
+            })
+        ));
+
+        // gid-only difference (the setgid-to-a-different-gid case the gid half
+        // exists to catch) is rejected too.
+        let gid_only = creds_match((1000, 1001), (1000, 1000));
+        assert!(matches!(
+            gid_only,
+            Err(PeerCredError::CredMismatch {
+                peer_gid: 1001,
+                our_gid: 1000,
+                ..
+            })
+        ));
+
+        // Both halves differing is still a single rejection.
+        assert!(matches!(
+            creds_match((0, 0), (1000, 1000)),
+            Err(PeerCredError::CredMismatch { .. })
+        ));
     }
 }
