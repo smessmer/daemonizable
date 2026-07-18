@@ -122,9 +122,43 @@
 //!   chroot or minimal container still works (losing only the same-inode
 //!   guarantee, which the build-id handshake backstops).
 //!
-//! The sections below make the case in full: why relaunching the binary
-//! (fork+exec) beats a plain fork, why the readiness handshake matters, how the
-//! specific alternative crates compare, and what this approach costs.
+//! The sections below fill in the rest: first how the handoff actually works,
+//! then the case in full — why relaunching the binary (fork+exec) beats a plain
+//! fork, why the readiness handshake matters, how the specific alternative
+//! crates compare, and what this approach costs.
+//!
+//! # How the handoff works
+//!
+//! Concretely, when `run_foreground` calls [`Daemonizer::spawn_daemon`], the
+//! library:
+//!
+//! 1. **Opens a channel and relaunches the binary.** It creates an `AF_UNIX`
+//!    socketpair, pre-loads two short *stage tokens* into it — a fixed 32-byte
+//!    magic number followed by a stage byte — and re-execs the *same* executable
+//!    with one end of the socketpair on a reserved file descriptor. The magic
+//!    number is how a fresh process tells "I was launched as a daemon stage" from
+//!    an ordinary foreground run: it inspects that descriptor, and only a genuine
+//!    framework channel carries the token.
+//! 2. **Double fork + exec.** The relaunched process is *stage 1*: it consumes
+//!    its token, calls `setsid()` to start a new terminal-less session, and
+//!    forks. The child `exec`s the binary once more into *stage 2* — the final
+//!    daemon — while the stage-1 intermediate exits. Because that intermediate
+//!    was the session leader and is now gone, the surviving daemon is a
+//!    non-leader grandchild that can never reacquire a controlling terminal. The
+//!    lone instruction between fork and exec is the `exec` itself, so this is
+//!    sound even from a threaded or async parent.
+//! 3. **Authenticate, then confirm the build.** Stage 2 consumes its own token,
+//!    verifies it really was framework-spawned (its session/group shape and the
+//!    channel peer's kernel-reported credentials), adopts the descriptor as its
+//!    RPC channel, and sends a **build-id handshake** to the parent.
+//!    [`Daemonizer::spawn_daemon`] returns only once the parent reads back a
+//!    build id matching its own — proof the daemon is the very same executable —
+//!    and yields a typed error otherwise. Stage identity never touches `argv` or
+//!    the environment, so it cannot leak into the daemon's own child processes.
+//!
+//! From there the descriptor is simply your channel: [`Daemonizable::Request`] /
+//! [`Daemonizable::Response`] values, serialized and framed, until
+//! `run_foreground` returns and its end closes.
 //!
 //! # Why fork+exec? A comparison with the alternatives
 //!
