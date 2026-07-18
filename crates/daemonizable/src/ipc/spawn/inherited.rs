@@ -24,7 +24,7 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 
 /// Helper for the daemon side of [`start_background_process_with_exe`]: parse
 /// the conventional fds 3 and 4 into an [`RpcServer`]. Aborts with a
-/// human-readable message if the fds are not pipes — almost always the result
+/// human-readable message if the fds are not sockets — almost always the result
 /// of a curious user invoking the daemon entry point manually from a shell.
 ///
 /// Must be called at most once per process (it takes ownership of fds 3/4); a
@@ -46,7 +46,7 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// subprocesses would inherit the RPC pipe ends and hold the parent's EOF open
 /// past the daemon's exit. If restoring the flag fails, the fds have already
 /// been adopted at that point and are closed on the error return (validation
-/// failures — [`InheritedFdsError::NotOpen`] / [`InheritedFdsError::NotAPipe`]
+/// failures — [`InheritedFdsError::NotOpen`] / [`InheritedFdsError::NotASocket`]
 /// — happen before adoption and leave the fds untouched).
 ///
 /// Used by the test helper binary. Production applications go through the
@@ -63,7 +63,7 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// other live `OwnedFd`/`File` in the calling process already owns fd 3 or 4
 /// (e.g. an unrelated program that happened to open pipes there and called this
 /// directly), the second owner minted here causes a double-close / use-after-free
-/// once both drop. The `fstat` open+FIFO probe (`validate_inherited_fds` —
+/// once both drop. The `fstat` open+socket probe (`validate_inherited_fds` —
 /// crate-private, so not linkable from these public docs)
 /// and the process-wide `DAEMON_FDS_CLAIMED` guard are best-effort validation
 /// — they reject the common "invoked by hand" mistake and any second claim —
@@ -95,14 +95,14 @@ where
         });
     }
     validate_inherited_fds()?;
-    // Both fds validated as open FIFOs above; adopt ownership now. This is the
+    // Both fds validated as open sockets above; adopt ownership now. This is the
     // one irreducible `unsafe` in the claim — turning the inherited raw fd
     // numbers into owning `OwnedFd`s — and the reason this function is `unsafe`.
     //
     // SAFETY: by this function's `# Safety` contract the caller guarantees fds
     // 3/4 are the daemon's exclusively-owned inherited pipe ends;
     // `DAEMON_FDS_CLAIMED` made this the sole claim in the process, and each was
-    // just `fstat`ed as an open FIFO, so each `OwnedFd` (which closes on drop) is
+    // just `fstat`ed as an open socket, so each `OwnedFd` (which closes on drop) is
     // the one and only owner. The same exclusive-ownership contract rules out a
     // concurrent close/reuse between those checks and this adoption (there is an
     // unavoidable check→adopt window when starting from a raw fd number — it is
@@ -145,7 +145,7 @@ where
 }
 
 /// Probe fds `CHILD_REQUEST_RECV_FD` (3) and `CHILD_RESPONSE_SEND_FD` (4) as
-/// open FIFOs **without taking any ownership**: bare `fstat` on the raw
+/// open sockets **without taking any ownership**: bare `fstat` on the raw
 /// numbers — no fd wrappers, no claim, no flag changes. Because it owns
 /// nothing and changes nothing, it is safe to call any number of times,
 /// before or instead of the owning claim — which is what lets the daemon
@@ -178,8 +178,8 @@ pub(crate) fn validate_inherited_fds() -> Result<(), InheritedFdsError> {
                 source: std::io::Error::last_os_error(),
             });
         }
-        if statbuf.st_mode & libc::S_IFMT != libc::S_IFIFO {
-            return Err(InheritedFdsError::NotAPipe {
+        if statbuf.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+            return Err(InheritedFdsError::NotASocket {
                 fd,
                 label,
                 st_mode: statbuf.st_mode,

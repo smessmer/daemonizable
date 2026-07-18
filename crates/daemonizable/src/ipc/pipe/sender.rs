@@ -1,8 +1,9 @@
-//! The write half of the typed IPC pipe: [`Sender`].
+//! The write half of the typed IPC channel: [`Sender`].
 
 use std::io::Write;
 use std::marker::PhantomData;
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -13,7 +14,7 @@ pub struct Sender<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    sender: interprocess::unnamed_pipe::Sender,
+    sender: UnixStream,
     _p: PhantomData<T>,
 }
 
@@ -21,7 +22,7 @@ impl<T> Sender<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    pub(super) fn new(sender: interprocess::unnamed_pipe::Sender) -> Self {
+    pub(super) fn new(sender: UnixStream) -> Self {
         Self {
             sender,
             _p: PhantomData,
@@ -29,10 +30,11 @@ where
     }
 
     /// Construct a typed `Sender` from a raw owned file descriptor that the
-    /// caller has verified is the write end of a pipe inherited across `execve`.
-    /// Used by the fork+exec daemon child to rebuild its `RpcServer`.
+    /// caller has verified is one end of a connected `AF_UNIX` socket inherited
+    /// across `execve`. Used by the fork+exec daemon child to rebuild its
+    /// `RpcServer`.
     pub fn from_owned_fd(fd: OwnedFd) -> Self {
-        Self::new(interprocess::unnamed_pipe::Sender::from(fd))
+        Self::new(UnixStream::from(fd))
     }
 
     /// Surrender the typed wrapper and recover the underlying owned file
@@ -61,9 +63,16 @@ where
                 max: MAX_MESSAGE_SIZE,
             });
         }
-        // The sender fd is always blocking (the pipe is created without
-        // O_NONBLOCK and nothing ever switches it), so this `write_all` can't
-        // return mid-frame — a broken pipe surfaces as a terminal Io error.
+        // The socket is always blocking — it is created blocking and nothing
+        // ever switches it to non-blocking (the receiver's timeout path polls
+        // and reads with `MSG_DONTWAIT` rather than toggling the shared
+        // description's `O_NONBLOCK`; see `Receiver`). So `write_all` can't
+        // return `WouldBlock` mid-frame under backpressure — a full send blocks
+        // until the peer drains, and a broken pipe surfaces as a terminal Io
+        // error. std's socket writes carry `MSG_NOSIGNAL` (Linux) /
+        // `SO_NOSIGPIPE` (Apple), so a write to a closed peer returns `EPIPE`
+        // rather than raising `SIGPIPE`, even in a process that reset SIGPIPE
+        // to its default disposition.
         let len = bytes.len() as u32;
         self.sender.write_all(&len.to_le_bytes())?;
         self.sender.write_all(bytes)?;

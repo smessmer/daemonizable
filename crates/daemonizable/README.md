@@ -204,9 +204,9 @@ through a memory snapshot.
 
 (The symmetric honesty: the *parent* can already have a tokio runtime
 running when it calls `spawn_daemon` — fork+exec makes that safe. On the
-platforms with `pipe2(O_CLOEXEC)` there is no residual constraint at all;
-only on macOS/iOS, which lack it, does a narrow spawn-time race remain while
-the pipe fds get their CLOEXEC flag set non-atomically — and even there it
+platforms with `SOCK_CLOEXEC` there is no residual constraint at all; only
+on macOS/iOS, which lack it, does a narrow spawn-time race remain while the
+channel fds get their CLOEXEC flag set non-atomically — and even there it
 covers a moment at spawn time, not the daemon's whole life.)
 
 ### cutting the cord at fork time: nobody hears the daemon fail
@@ -362,10 +362,10 @@ channel:
 - **At most a narrow spawn-time race on macOS.** Because the daemon is
   created with fork+exec, a running tokio runtime (or any thread pool) is
   fine to spawn under — the parent-side restriction is *not* "no tokio." On
-  Linux/Android, the *BSDs, and every other target with `pipe2(O_CLOEXEC)`,
-  the pipe fds are created with `FD_CLOEXEC` already set, so there is no
-  race at all. macOS/iOS have no `pipe2` (nor any atomic equivalent), so
-  there the flag is set a moment after creation and a concurrent fork on
+  Linux/Android, the *BSDs, and every other target with `SOCK_CLOEXEC`,
+  the channel fds are created with `FD_CLOEXEC` already set, so there is no
+  race at all. macOS/iOS have no `SOCK_CLOEXEC` (nor any atomic equivalent),
+  so there the flag is set a moment after creation and a concurrent fork on
   another thread in that window can leak the fds; those targets keep the
   spawn-at-startup invariant.
   *TODO: migrating from `command-fds`' `pre_exec` to std's planned fd
@@ -393,7 +393,7 @@ channel:
   optional `chroot`, explicit `umask` (currently silently inherited — it
   survives `execve`), signal-mask reset (the mask, unlike handlers, also
   survives `execve`), fd hygiene for non-CLOEXEC fds inherited from the
-  CLI's own environment (`close_range(5, ~0)` on Linux, sparing the pipe
+  CLI's own environment (`close_range(5, ~0)` on Linux, sparing the channel
   fds 3/4), and `detach_stdio` gaining redirect-to-log-file targets (log
   files opened before the privilege drop, so root-owned log directories
   work). Defaults stay policy-free: every battery is opt-in.*
@@ -449,11 +449,11 @@ faith into an operation that can fail loudly.
   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
   doesn't apply (nor to the second fork: its child immediately execs the
   final daemon image, so nothing but async-signal-safe code runs post-fork
-  — safe regardless of threads, including pre-main-constructor ones). On targets with `pipe2(O_CLOEXEC)`
-  (Linux/Android, the *BSDs, …) the pipe fds are `FD_CLOEXEC` from creation,
-  so there is no fd-inheritance race; only on macOS/iOS, which lack `pipe2`,
+  — safe regardless of threads, including pre-main-constructor ones). On targets with `SOCK_CLOEXEC`
+  (Linux/Android, the *BSDs, …) the channel fds are `FD_CLOEXEC` from creation,
+  so there is no fd-inheritance race; only on macOS/iOS, which lack `SOCK_CLOEXEC`,
   does a narrow race remain if another thread forks while the spawn sets
-  `FD_CLOEXEC` on its pipe fds, and spawning before the process starts other
+  `FD_CLOEXEC` on its channel fds, and spawning before the process starts other
   subprocesses avoids it there.
 
 ## Features

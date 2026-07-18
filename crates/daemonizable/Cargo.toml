@@ -40,9 +40,13 @@ features = []
 [dependencies]
 command-fds.workspace = true
 daemonizable-macros = { workspace = true, optional = true }
-interprocess.workspace = true
 libc.workspace = true
-nix = { workspace = true, features = ["poll", "fs", "process", "signal"] }
+# `socket` powers the AF_UNIX transport: the non-consuming dispatch probe
+# (`recv(MSG_PEEK|MSG_DONTWAIT)`), the receiver's poll-then-`recv(MSG_DONTWAIT)`
+# timeout reads, and the stage-2 peer-credential check (`SO_PEERCRED` /
+# `getpeereid`). The transport itself is `std::os::unix::net::UnixStream`
+# (socketpair with atomic `SOCK_CLOEXEC`), so `interprocess` is no longer needed.
+nix = { workspace = true, features = ["poll", "fs", "process", "signal", "socket"] }
 postcard = { workspace = true, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true
