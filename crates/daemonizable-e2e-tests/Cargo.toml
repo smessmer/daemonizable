@@ -46,7 +46,7 @@ path = "src/bin/daemonizable_test_background.rs"
 # Minimal Daemonizable app used by the framework end-to-end tests
 # (tests/framework_e2e.rs, tests/multiple_daemons.rs,
 # tests/framework_daemon_survives_parent_exit.rs). Goes through the full
-# production path — run::<App>() argv-sentinel dispatch, fork+exec re-exec
+# production path — run::<App>() in-band channel-token dispatch, fork+exec re-exec
 # spawn, build-id handshake — where the test-background helper drives the raw
 # IPC primitives directly.
 [[bin]]

@@ -119,10 +119,10 @@ where
     // Runs on the adopted `OwnedFd` — `as_fd()` needs no raw-fd `unsafe`, and
     // there is no fstat→borrow window to reason about. A failure here closes the
     // fd on the error return; acceptable, since the claim has begun and this
-    // function's contract says it takes ownership of it. Done BEFORE building the
-    // server, so the internal `dup` (via `F_DUPFD_CLOEXEC`, itself CLOEXEC)
-    // clones an already-CLOEXEC fd — both halves of the channel end up
-    // close-on-exec.
+    // function's contract says it takes ownership of it. This restores CLOEXEC on
+    // fd 3 itself; the internal `dup` the server does next is independently
+    // CLOEXEC (std's `try_clone` uses `F_DUPFD_CLOEXEC` regardless of the source
+    // flag), so both halves of the channel end up close-on-exec either way.
     set_cloexec(channel.as_fd()).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
         fd: DAEMON_CHANNEL_FD,
         operation,

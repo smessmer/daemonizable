@@ -15,7 +15,8 @@ use crate::ipc::{RpcClient, RpcServer};
 /// code runs, but the window now spans the *whole two-stage startup*: two
 /// full exec + dynamic-loader passes (stage 1, then the final daemon image),
 /// two runs of any pre-main constructors the application links, plus the
-/// stages' few syscalls (fstat probes, `setsid`, the second `fork`, `chdir`).
+/// stages' few syscalls (the token peek/consume, `setsid`, the second `fork`,
+/// the stage-2 peer-credential check and fd claim, `chdir`).
 /// Tens of milliseconds on a cold cache, low single-digit milliseconds warm;
 /// the generous bound is for loaded CI machines and apps with heavy
 /// constructors (which pay their cost twice inside this window). The timeout

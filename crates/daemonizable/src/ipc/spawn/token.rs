@@ -129,14 +129,20 @@ pub(crate) fn channel_has_stage2_token() -> bool {
     classify(peek_token(&mut buf)) == StageDispatch::DaemonStage2
 }
 
-/// Error establishing the channel peer's identity, or a peer whose real uid
-/// doesn't match ours.
+/// Error establishing the channel peer's identity, or a peer whose effective
+/// credentials don't match ours.
 #[derive(Debug)]
 pub(crate) enum PeerCredError {
     /// Reading the peer credentials failed (`getsockopt`/`getpeereid` errno).
     Lookup(Errno),
-    /// The peer's real uid differs from ours — a cross-privilege forgery.
-    UidMismatch { peer: u32, ours: u32 },
+    /// The peer's effective uid or gid differs from ours — a cross-privilege
+    /// forgery.
+    CredMismatch {
+        peer_uid: u32,
+        our_uid: u32,
+        peer_gid: u32,
+        our_gid: u32,
+    },
 }
 
 impl std::fmt::Display for PeerCredError {
@@ -145,61 +151,94 @@ impl std::fmt::Display for PeerCredError {
             PeerCredError::Lookup(e) => {
                 write!(f, "could not read the channel peer's credentials: {e}")
             }
-            PeerCredError::UidMismatch { peer, ours } => write!(
+            PeerCredError::CredMismatch {
+                peer_uid,
+                our_uid,
+                peer_gid,
+                our_gid,
+            } => write!(
                 f,
-                "channel peer uid {peer} does not match our uid {ours}; refusing to serve a \
-                 channel from a different user"
+                "channel peer credentials (uid {peer_uid}, gid {peer_gid}) do not match ours \
+                 (uid {our_uid}, gid {our_gid}); refusing to serve a channel from a different \
+                 principal"
             ),
         }
     }
 }
 
-/// Authenticate the channel: the process on the other end of fd 3 must run as
-/// our own effective uid. See [`TOKEN_MAGIC`]'s threat model — the token is a
-/// public accident-authenticator, so this credential check (unforgeable by the
-/// peer, captured by the kernel at socketpair/connect time) is what stops a
-/// lower-privileged principal from driving a setuid/file-cap daemon image into
-/// `run_daemon` over a crafted channel. A same-uid peer is not a privilege
-/// crossing (it could `ptrace` us), so it passes.
+/// Authenticate the channel: the process on the other end of fd 3 must run with
+/// our own effective uid AND gid. See [`TOKEN_MAGIC`]'s threat model — the token
+/// is a public accident-authenticator, so this credential check (unforgeable by
+/// the peer, captured by the kernel at socketpair/connect time) is what stops a
+/// lower-privileged principal from driving a daemon image that gained privilege
+/// **by changing uid/gid** (a setuid- or setgid-to-a-different-id binary) into
+/// `run_daemon` over a crafted channel.
 ///
-/// Compares EFFECTIVE uid (`geteuid`), because that is what `SO_PEERCRED`
-/// (Linux fills `ucred.uid` from the peer's `cred->euid`) and `getpeereid`
-/// (POSIX: effective uid) report. In the genuine flow the peer is our own
-/// parent running the SAME binary, so its effective uid equals ours whether or
-/// not the binary is setuid — the socketpair is created before any privilege
-/// drop, and the daemon re-execs the same image so setuid is re-applied. A
-/// lower-privileged attacker (a different euid) is rejected; comparing real uid
-/// instead would wrongly reject a legitimate setuid-root foreground (euid 0,
-/// real uid = invoking user).
-pub(crate) fn verify_channel_peer_uid() -> Result<(), PeerCredError> {
+/// Compares EFFECTIVE ids (`geteuid`/`getegid`), because that is what
+/// `SO_PEERCRED` (Linux fills `ucred` from the peer's `cred->euid`/`egid`) and
+/// `getpeereid` (POSIX: effective ids) report. In the genuine flow the peer is
+/// our own parent running the SAME binary, so its effective ids equal ours
+/// whether or not the binary is setuid/setgid — the daemon re-execs the same
+/// image so the id change is re-applied. Comparing REAL ids instead would
+/// wrongly reject a legitimate setuid-root foreground (euid 0, real uid =
+/// invoking user).
+///
+/// # Scope and limits (important)
+///
+/// - This protects **only** binaries that gain privilege by changing uid or gid.
+///   It does **NOT** protect a **file-capabilities** binary (`setcap …+ep`): file
+///   caps grant privilege without changing uid/gid, so the daemon runs with the
+///   *invoker's* ids and a same-uid/gid attacker's crafted socketpair passes this
+///   check. For those deployments — and for any same-principal peer generally —
+///   `run_daemon`'s RPC input must be treated as UNtrusted-by-provenance (the
+///   same caveat that applies to a same-uid local peer, which could `ptrace` a
+///   non-privilege-elevated process anyway). setgid-to-a-different-gid IS caught,
+///   by the gid half of this comparison.
+/// - **Spawn before dropping privileges.** The peer creds are frozen at
+///   socketpair-creation time. If a setuid-root app drops to an unprivileged uid
+///   *before* calling `spawn_daemon`, the socket records the dropped uid while
+///   the re-exec'd daemon regains euid 0 — this check would then reject the
+///   legitimate daemon. Create the daemon while still holding the binary's
+///   startup credentials.
+/// - The creds report the *creator's* euid/egid; a daemon whose fd 3 was
+///   supplied by an unrelated higher-privileged process (e.g. a root helper that
+///   hands sockets to unprivileged users) could be spoofed. That is outside the
+///   normal spawn model (the framework always creates its own socketpair).
+pub(crate) fn verify_channel_peer_creds() -> Result<(), PeerCredError> {
     // SAFETY: fd 3 (`DAEMON_CHANNEL_FD`) is open here — dispatch's peek and token
     // consume just succeeded on it, and nothing has closed it since (the caller
     // only read process ids before this) — so borrowing it for the credential
     // read is I/O-safe. The borrow does not outlive this function and takes no
     // ownership (the fd is adopted later, by the claim).
     let fd = unsafe { BorrowedFd::borrow_raw(DAEMON_CHANNEL_FD) };
-    let peer = peer_uid(fd).map_err(PeerCredError::Lookup)?;
-    let ours = nix::unistd::geteuid().as_raw();
-    if peer != ours {
-        return Err(PeerCredError::UidMismatch { peer, ours });
+    let (peer_uid, peer_gid) = peer_creds(fd).map_err(PeerCredError::Lookup)?;
+    let our_uid = nix::unistd::geteuid().as_raw();
+    let our_gid = nix::unistd::getegid().as_raw();
+    if peer_uid != our_uid || peer_gid != our_gid {
+        return Err(PeerCredError::CredMismatch {
+            peer_uid,
+            our_uid,
+            peer_gid,
+            our_gid,
+        });
     }
     Ok(())
 }
 
-/// The effective uid of the process connected to the other end of `fd`.
+/// The effective (uid, gid) of the process connected to the other end of `fd`.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn peer_uid(fd: BorrowedFd<'_>) -> Result<u32, Errno> {
-    // Linux/Android: SO_PEERCRED via getsockopt (reports the peer's euid).
+fn peer_creds(fd: BorrowedFd<'_>) -> Result<(u32, u32), Errno> {
+    // Linux/Android: SO_PEERCRED via getsockopt (reports the peer's euid/egid).
     let creds = nix::sys::socket::getsockopt(&fd, nix::sys::socket::sockopt::PeerCredentials)?;
-    Ok(creds.uid())
+    Ok((creds.uid(), creds.gid()))
 }
 
-/// The effective uid of the process connected to the other end of `fd`.
+/// The effective (uid, gid) of the process connected to the other end of `fd`.
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn peer_uid(fd: BorrowedFd<'_>) -> Result<u32, Errno> {
-    // BSD/macOS: LOCAL_PEERCRED under the hood, via getpeereid (effective uid).
-    let (uid, _gid) = nix::unistd::getpeereid(fd)?;
-    Ok(uid.as_raw())
+fn peer_creds(fd: BorrowedFd<'_>) -> Result<(u32, u32), Errno> {
+    // BSD/macOS: LOCAL_PEERCRED under the hood, via getpeereid (effective ids).
+    let (uid, gid) = nix::unistd::getpeereid(fd)?;
+    Ok((uid.as_raw(), gid.as_raw()))
 }
 
 #[cfg(test)]

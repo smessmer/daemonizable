@@ -33,7 +33,7 @@ use std::path::PathBuf;
 use super::Daemonizable;
 use crate::ipc::{
     RpcServer, channel_has_stage2_token, daemon_exe_path, rpc_server_from_inherited_fds,
-    send_handshake, verify_channel_peer_uid,
+    send_handshake, verify_channel_peer_creds,
 };
 
 /// Stage 1: the parent's direct child lands here, straight from
@@ -291,16 +291,23 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     //     to acquire a controlling terminal), a configuration the historical
     //     single-stage arm made unrepresentable — keep it so;
     //   * sid != pgid means we are NOT in stage 1's setsid'd group even though
-    //     we're a non-leader. This catches the token-eaten degradation: if a
-    //     pre-main constructor in the stage-1 IMAGE consumed token 1, that
-    //     image's own dispatch would see token 2 and run THIS arm in the
-    //     parent's direct child — which never setsid'd/double-forked and so sits
-    //     in the foreground's session/group (sid != pgid for any foreground that
-    //     isn't itself a session leader, i.e. every ordinary CLI launch).
-    // (A non-leader hand-run with a deliberately plumbed same-uid socket, in a
-    // matching session/group, still gets past this — provenance can't be fully
-    // authenticated from inheritable state — but the peer-cred check below and
-    // "a non-leader can't acquire a controlling terminal" keep the core
+    //     we're a non-leader. This is defense-in-depth against the token-eaten
+    //     degradation: if a pre-main constructor in the stage-1 IMAGE consumed
+    //     token 1, that image's own dispatch would see token 2 and run THIS arm
+    //     in the parent's direct child, which never setsid'd/double-forked. It
+    //     catches that only when the foreground's own sid != pgid — true under
+    //     an interactive job-control shell (the job is its own group leader
+    //     while the shell is the session leader), but NOT under a non-job-control
+    //     launcher whose sid == pgid (a non-interactive shell/script, cron, or a
+    //     process that setsid'd itself — systemd, a container init). So this is a
+    //     backstop, not a complete guard; the real protection against a
+    //     token-eating constructor is the documented "constructors must not read
+    //     fd 3" caveat, plus the peer-cred check below for the cross-principal
+    //     case.
+    // (A non-leader hand-run with a deliberately plumbed same-principal socket,
+    // in a matching session/group, still gets past this — provenance can't be
+    // fully authenticated from inheritable state — but the peer-cred check below
+    // and "a non-leader can't acquire a controlling terminal" keep the core
     // guarantees.)
     let pid = nix::unistd::getpid();
     let sid = nix::unistd::getsid(None).ok();
@@ -318,12 +325,14 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     }
 
     // Peer-credential check: the process on the other end of the channel must
-    // run as our own real uid. The stage token is a PUBLIC accident
-    // authenticator (see `TOKEN_MAGIC`), so this — unforgeable by the peer — is
-    // what stops a lower-privileged principal from driving a setuid/file-cap
-    // daemon image into `run_daemon` over a crafted channel. Runs before the
-    // claim, while fd 3 is still just borrowed.
-    if let Err(err) = verify_channel_peer_uid() {
+    // run with our own effective uid AND gid. The stage token is a PUBLIC
+    // accident authenticator (see `TOKEN_MAGIC`), so this — unforgeable by the
+    // peer — is what stops a lower-privileged principal from driving a daemon
+    // image that gained privilege by changing uid/gid (setuid/setgid) into
+    // `run_daemon` over a crafted channel. (It does NOT cover a file-caps binary
+    // that keeps the invoker's ids — see `verify_channel_peer_creds`'s scope note.)
+    // Runs before the claim, while fd 3 is still just borrowed.
+    if let Err(err) = verify_channel_peer_creds() {
         eprintln!("daemon stage 2: {err}");
         std::process::exit(1);
     }

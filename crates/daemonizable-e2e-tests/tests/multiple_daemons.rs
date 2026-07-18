@@ -10,7 +10,7 @@
 //! daemon per test. These tests close that gap.
 //!
 //! Like `framework_e2e.rs`, they drive the full production path through the
-//! `daemonizable-test-app` helper binary — argv-sentinel stage dispatch, the real
+//! `daemonizable-test-app` helper binary — in-band channel-token stage dispatch, the real
 //! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
 //! channel — rather than the raw `start_background_process_with_exe` shortcut,
 //! so they cover `spawn_daemon` exactly as an application calls it.

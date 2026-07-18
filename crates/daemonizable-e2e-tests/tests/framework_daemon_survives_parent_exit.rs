@@ -9,7 +9,7 @@
 //! assertions, but its daemon exits with the parent, so nothing there
 //! observes a framework-spawned daemon alive after the foreground is gone.
 //! This test closes that gap: the production path end-to-end (`run::<App>()`
-//! argv-sentinel dispatch, `/proc/self/exe` re-exec spawn, build-id
+//! in-band channel-token dispatch, `/proc/self/exe` re-exec spawn, build-id
 //! handshake, typed RPC), the foreground process exits, and the daemon is
 //! observed STILL DOING WORK afterward.
 //!
