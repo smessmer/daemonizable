@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::ipc::error::{PipeRecvError, PipeSendError};
-use crate::ipc::pipe::{Receiver, Sender};
+use crate::ipc::channel::{Receiver, Sender};
+use crate::ipc::error::{ChannelRecvError, ChannelSendError};
 
 pub struct RpcClient<Request, Response>
 where
@@ -35,7 +35,7 @@ where
         self.sender.write_prelude(bytes)
     }
 
-    pub fn send_request(&mut self, request: &Request) -> Result<(), PipeSendError> {
+    pub fn send_request(&mut self, request: &Request) -> Result<(), ChannelSendError> {
         self.sender.send(request)
     }
 
@@ -43,7 +43,7 @@ where
     ///
     /// If a `Timeout` fires mid-frame (or a `MessageTooLarge` leaves an unread
     /// payload on the wire), the underlying receiver is poisoned: this and every
-    /// later `recv_response` return [`PipeRecvError::Desynchronized`], so a
+    /// later `recv_response` return [`ChannelRecvError::Desynchronized`], so a
     /// desynced stream surfaces as a loud typed error instead of silently
     /// misframed data. A clean idle timeout does not poison, so poll-with-short-
     /// timeout loops on an idle channel keep working.
@@ -51,26 +51,26 @@ where
     /// An extremely large `timeout` (e.g. `Duration::MAX`) is clamped rather
     /// than panicking on deadline overflow; for a genuinely unbounded wait, use
     /// [`recv_response_blocking`](Self::recv_response_blocking) instead.
-    pub fn recv_response(&mut self, timeout: Duration) -> Result<Response, PipeRecvError> {
+    pub fn recv_response(&mut self, timeout: Duration) -> Result<Response, ChannelRecvError> {
         self.receiver.recv_timeout(timeout)
     }
 
-    /// Block until a response arrives or the daemon closes its end of the pipe.
+    /// Block until a response arrives or the daemon closes its end of the channel.
     ///
     /// Unlike [`recv_response`](Self::recv_response), this has no timeout: it is
     /// for waiting on an operation of genuinely unbounded duration (e.g. a
     /// mount of a large vault on slow storage), where a fixed deadline would
     /// spuriously fail a slow-but-healthy daemon. Liveness still holds — if the
     /// daemon dies, its send end closes and this returns
-    /// [`PipeRecvError::SenderClosed`] immediately rather than hanging. A
+    /// [`ChannelRecvError::SenderClosed`] immediately rather than hanging. A
     /// daemon that is alive but wedged will block the caller; the caller stays
     /// interruptible via signals.
     ///
     /// A daemon response that exceeds the wire-format cap returns
-    /// [`PipeRecvError::MessageTooLarge`] and poisons the receiver; every later
+    /// [`ChannelRecvError::MessageTooLarge`] and poisons the receiver; every later
     /// receive (here or via [`recv_response`](Self::recv_response)) then returns
-    /// [`PipeRecvError::Desynchronized`]. Both are terminal — abandon the client.
-    pub fn recv_response_blocking(&mut self) -> Result<Response, PipeRecvError> {
+    /// [`ChannelRecvError::Desynchronized`]. Both are terminal — abandon the client.
+    pub fn recv_response_blocking(&mut self) -> Result<Response, ChannelRecvError> {
         self.receiver.recv()
     }
 
@@ -88,7 +88,7 @@ where
     pub(crate) fn recv_raw_handshake_with_timeout(
         &mut self,
         timeout: Duration,
-    ) -> Result<Vec<u8>, PipeRecvError> {
+    ) -> Result<Vec<u8>, ChannelRecvError> {
         self.receiver.recv_raw_timeout(timeout)
     }
 }

@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::MAX_MESSAGE_SIZE;
-use crate::ipc::error::PipeSendError;
+use crate::ipc::error::ChannelSendError;
 
 pub struct Sender<T>
 where
@@ -37,7 +37,7 @@ where
         OwnedFd::from(self.sender)
     }
 
-    pub fn send(&mut self, data: &T) -> Result<(), PipeSendError> {
+    pub fn send(&mut self, data: &T) -> Result<(), ChannelSendError> {
         let bytes = postcard::to_stdvec(data)?;
         self.write_length_prefixed(&bytes)
     }
@@ -46,7 +46,7 @@ where
     /// Used for the build-id handshake before typed RPC begins: encoding the
     /// handshake via postcard would defeat its purpose of validating that
     /// parent and child agree on the postcard schema.
-    pub(crate) fn send_raw(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
+    pub(crate) fn send_raw(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
         self.write_length_prefixed(bytes)
     }
 
@@ -59,9 +59,9 @@ where
         self.sender.write_all(bytes)
     }
 
-    fn write_length_prefixed(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
+    fn write_length_prefixed(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
         if bytes.len() > MAX_MESSAGE_SIZE {
-            return Err(PipeSendError::MessageTooLarge {
+            return Err(ChannelSendError::MessageTooLarge {
                 size: bytes.len(),
                 max: MAX_MESSAGE_SIZE,
             });

@@ -7,8 +7,8 @@ use std::os::unix::net::UnixStream;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::ipc::error::{InheritedFdsError, PipeRecvError, PipeSendError};
-use crate::ipc::pipe::{Receiver, Sender, endpoint_from_stream};
+use crate::ipc::channel::{Receiver, Sender, endpoint_from_stream};
+use crate::ipc::error::{ChannelRecvError, ChannelSendError, InheritedFdsError};
 
 pub struct RpcServer<Request, Response>
 where
@@ -60,19 +60,19 @@ where
     }
 
     /// Receive the next request from the parent. Blocks until a request
-    /// arrives; returns [`PipeRecvError::SenderClosed`] once the parent drops
+    /// arrives; returns [`ChannelRecvError::SenderClosed`] once the parent drops
     /// its client — the daemon's signal to shut down its request loop.
     ///
     /// A parent frame that exceeds the wire-format cap returns
-    /// [`PipeRecvError::MessageTooLarge`] and desynchronizes the stream; every
-    /// later call then returns [`PipeRecvError::Desynchronized`]. Both are
+    /// [`ChannelRecvError::MessageTooLarge`] and desynchronizes the stream; every
+    /// later call then returns [`ChannelRecvError::Desynchronized`]. Both are
     /// terminal — the daemon should exit its loop, just as it does on
     /// `SenderClosed`.
-    pub fn next_request(&mut self) -> Result<Request, PipeRecvError> {
+    pub fn next_request(&mut self) -> Result<Request, ChannelRecvError> {
         self.receiver.recv()
     }
 
-    pub fn send_response(&mut self, response: &Response) -> Result<(), PipeSendError> {
+    pub fn send_response(&mut self, response: &Response) -> Result<(), ChannelSendError> {
         self.sender.send(response)
     }
 
@@ -89,7 +89,7 @@ where
     /// garbage / timeout.
     ///
     /// [`RpcClient::recv_raw_handshake_with_timeout`]: super::RpcClient::recv_raw_handshake_with_timeout
-    pub(crate) fn send_raw_handshake(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
+    pub(crate) fn send_raw_handshake(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
         self.sender.send_raw(bytes)
     }
 }

@@ -47,7 +47,7 @@ dependencies = [
 
 [[package]]
 name = "daemonizable"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "command-fds",
  "daemonizable-macros",
@@ -60,7 +60,7 @@ dependencies = [
 
 [[package]]
 name = "daemonizable-e2e-tests"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "daemonizable",
  "interprocess",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "daemonizable-macros"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "proc-macro2",
  "quote",

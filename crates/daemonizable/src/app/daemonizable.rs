@@ -167,7 +167,7 @@ pub trait Daemonizable: Sized {
     /// so it can't parse flags) travels as an ordinary first RPC request on `rpc`.
     ///
     /// Diverges: drive the request loop until [`RpcServer::next_request`]
-    /// returns [`PipeRecvError::SenderClosed`](crate::PipeRecvError::SenderClosed)
+    /// returns [`ChannelRecvError::SenderClosed`](crate::ChannelRecvError::SenderClosed)
     /// (the parent dropped its client), then exit.
     fn run_daemon(rpc: RpcServer<Self::Request, Self::Response>) -> !;
 }

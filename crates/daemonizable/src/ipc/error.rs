@@ -2,24 +2,24 @@
 //!
 //! Library-crate policy: detailed `thiserror` enums instead of `anyhow`, so
 //! callers can match on failure modes (e.g. distinguish a peer that closed
-//! the pipe from a timeout) and the public API stays dependency-light.
+//! the channel from a timeout) and the public API stays dependency-light.
 
 use thiserror::Error;
 
 /// Creating an IPC channel pair failed.
 #[derive(Debug, Error)]
-pub enum PipeCreateError {
+pub enum ChannelCreateError {
     /// The underlying `socketpair(2)` call failed. `UnixStream::pair` sets
     /// `FD_CLOEXEC` on the created fds itself (atomically via `SOCK_CLOEXEC`
     /// where available), so a cloexec-setting failure folds into this same
     /// `io::Error` rather than a separate variant.
     #[error("Failed to create channel: {0}")]
-    CreatePipe(#[source] std::io::Error),
+    CreateSocket(#[source] std::io::Error),
 }
 
-/// Sending a message over an IPC pipe failed.
+/// Sending a message over an IPC channel failed.
 #[derive(Debug, Error)]
-pub enum PipeSendError {
+pub enum ChannelSendError {
     /// The message exceeds the wire format's maximum size.
     #[error("Message size {size} exceeds maximum {max}")]
     MessageTooLarge { size: usize, max: usize },
@@ -28,24 +28,24 @@ pub enum PipeSendError {
     #[error("Failed to encode message: {0}")]
     Encode(#[from] postcard::Error),
 
-    /// Writing to the pipe failed. A receiver that closed its end surfaces
+    /// Writing to the channel failed. A receiver that closed its end surfaces
     /// here as [`std::io::ErrorKind::BrokenPipe`].
-    #[error("Failed to write to pipe: {0}")]
+    #[error("Failed to write to channel: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// Receiving a message from an IPC pipe failed.
+/// Receiving a message from an IPC channel failed.
 #[derive(Debug, Error)]
-pub enum PipeRecvError {
+pub enum ChannelRecvError {
     /// The timeout expired before a full message arrived.
-    #[error("Timeout waiting for a message on the pipe")]
+    #[error("Timeout waiting for a message on the channel")]
     Timeout,
 
-    /// The sender closed its end of the pipe (EOF), before or in the middle
+    /// The sender closed its end of the channel (EOF), before or in the middle
     /// of a message. Normalized across blocking and timeout-bounded receives:
     /// EOF always surfaces as this variant, never as
     /// [`Io`](Self::Io)`(UnexpectedEof)`.
-    #[error("Sender closed the pipe")]
+    #[error("Sender closed the channel")]
     SenderClosed,
 
     /// The message's length prefix exceeds the wire format's maximum size.
@@ -56,7 +56,7 @@ pub enum PipeRecvError {
     /// frame and then failed (a mid-frame [`Timeout`](Self::Timeout), or a
     /// [`MessageTooLarge`](Self::MessageTooLarge) whose declared payload was
     /// left unread), so the stream is desynchronized. Every receive on a
-    /// poisoned `Receiver` fails with this without touching the pipe; a further
+    /// poisoned `Receiver` fails with this without touching the channel; a further
     /// read would misinterpret leftover payload bytes as a new length prefix.
     /// Abandon the connection. A clean idle timeout (nothing consumed) and a
     /// [`Decode`](Self::Decode) failure of a fully-read frame do *not* poison.
@@ -67,8 +67,8 @@ pub enum PipeRecvError {
     #[error("Failed to decode message: {0}")]
     Decode(#[from] postcard::Error),
 
-    /// Reading from the pipe failed.
-    #[error("Failed to read from pipe: {0}")]
+    /// Reading from the channel failed.
+    #[error("Failed to read from channel: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -78,7 +78,7 @@ pub enum HandshakeError {
     /// Receiving the handshake bytes failed (EOF, timeout, or I/O error) —
     /// e.g. the spawned binary exited or hangs without writing a handshake.
     #[error("Failed to receive build-id handshake from daemon: {0}")]
-    Recv(#[source] PipeRecvError),
+    Recv(#[source] ChannelRecvError),
 
     /// The daemon sent bytes that aren't valid UTF-8 — almost certainly a
     /// wrong binary writing unrelated data to the handshake fd.
@@ -95,9 +95,9 @@ pub enum HandshakeError {
 /// Spawning the daemon child process failed.
 #[derive(Debug, Error)]
 pub enum SpawnDaemonError {
-    /// Creating the parent↔child IPC pipes failed.
-    #[error("Failed to create IPC pipes: {0}")]
-    CreatePipes(#[from] PipeCreateError),
+    /// Creating the parent↔child IPC channel failed.
+    #[error("Failed to create IPC channel: {0}")]
+    CreateChannel(#[from] ChannelCreateError),
 
     /// The path to re-exec could not be determined. On non-Linux this is a
     /// failed `std::env::current_exe`. On Linux it means `/proc` was not

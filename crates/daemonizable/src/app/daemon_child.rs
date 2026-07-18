@@ -169,9 +169,9 @@ pub(super) fn run_as_daemon_stage1() -> ! {
     //     the parent's failed-spawn cleanup signals via kill(-child_pid); the
     //     child stays in that group across its exec.
     //   * BEFORE the handshake (sent by stage 2): the parent must validate —
-    //     and pipe-EOF liveness must track — the process that actually serves.
+    //     and channel-EOF liveness must track — the process that actually serves.
     //   * The intermediate must do NO work between fork and _exit — no
-    //     subprocess, no fd dup that escapes — so it cannot linger as a pipe
+    //     subprocess, no fd dup that escapes — so it cannot linger as a channel
     //     write-end holder.
     //
     // Alternative considered and rejected: clone3(CLONE_PARENT) would keep the
@@ -208,7 +208,7 @@ pub(super) fn run_as_daemon_stage1() -> ! {
             // exec failed. Only async-signal-safe calls are permitted here —
             // no eprintln! (allocates, locks) — so report with a raw write of
             // a static message and _exit. The parent independently observes
-            // the failure as EOF on the handshake pipe.
+            // the failure as EOF on the handshake channel.
             const MSG: &[u8] = b"daemon stage 1: execv for stage-2 re-exec failed\n";
             // SAFETY: `write` is async-signal-safe; it reads `MSG.len()` bytes
             // from `MSG`, a static buffer valid for exactly that length, and

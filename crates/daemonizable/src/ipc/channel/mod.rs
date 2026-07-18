@@ -1,18 +1,18 @@
 //! Typed, length-prefixed IPC channel primitive.
 //!
-//! [`pipe`] creates a connected [`Sender`]/[`Receiver`] pair over an `AF_UNIX`
-//! `SOCK_STREAM` socketpair whose fds are `FD_CLOEXEC` so they don't leak
-//! across the fork+exec daemon spawn. The two ends live in their own modules:
-//! [`mod@sender`] owns the write side, [`mod@receiver`] the read side
-//! (including the timeout-bounded read machinery). Both share the
-//! [`MAX_MESSAGE_SIZE`] wire-format cap defined here.
+//! [`endpoint_from_stream`] splits one `AF_UNIX` `SOCK_STREAM` socket into the
+//! typed [`Sender`]/[`Receiver`] halves that drive it, and the two ends live in
+//! their own modules: [`mod@sender`] owns the write side, [`mod@receiver`] the
+//! read side (including the timeout-bounded read machinery). The socket fds are
+//! `FD_CLOEXEC` so they don't leak across the fork+exec daemon spawn. Both ends
+//! share the [`MAX_MESSAGE_SIZE`] wire-format cap defined here.
 
 use std::os::unix::net::UnixStream;
 
 use serde::{Serialize, de::DeserializeOwned};
 
 #[cfg(test)]
-use super::error::PipeCreateError;
+use super::error::ChannelCreateError;
 
 mod receiver;
 mod sender;
@@ -68,7 +68,7 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// [`endpoint_from_stream`]; this one-way constructor exists to exercise the
 /// `Sender`/`Receiver` framing, timeout, and poison machinery in unit tests.
 #[cfg(test)]
-pub fn pipe<T>() -> Result<(Sender<T>, Receiver<T>), PipeCreateError>
+pub fn channel_pair<T>() -> Result<(Sender<T>, Receiver<T>), ChannelCreateError>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -77,7 +77,7 @@ where
     // unidirectionally: writes on the `Sender` end are read on the `Receiver`
     // end. (The daemon channel uses [`endpoint_from_stream`] to drive both
     // directions over a single fd; at this layer they are still one direction.)
-    let (sender, recver) = UnixStream::pair().map_err(PipeCreateError::CreatePipe)?;
+    let (sender, recver) = UnixStream::pair().map_err(ChannelCreateError::CreateSocket)?;
     Ok((Sender::new(sender), Receiver::new(recver)))
 }
 
@@ -108,7 +108,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::error::{PipeRecvError, PipeSendError};
+    use crate::ipc::error::{ChannelRecvError, ChannelSendError};
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use serde::Deserialize;
     use std::io::{Read, Write};
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn dropped_recver() {
-        let (mut sender, recver) = pipe::<u32>().unwrap();
+        let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
         // Writing to a socket whose peer has closed returns EPIPE (an error),
         // NOT a `SIGPIPE` that would kill the test process — std sets
@@ -134,12 +134,12 @@ mod tests {
         // `SIGPIPE` (which would abort the process, failing the test loudly).
         // std uses `MSG_NOSIGNAL` (Linux) / `SO_NOSIGPIPE` (Apple), so this
         // holds even for a process that reset SIGPIPE to its default.
-        let (mut sender, recver) = pipe::<u32>().unwrap();
+        let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
         for _ in 0..4 {
             let err = sender.send(&1).unwrap_err();
             assert!(
-                matches!(err, PipeSendError::Io(_)),
+                matches!(err, ChannelSendError::Io(_)),
                 "expected an Io(BrokenPipe) error, got {err:?}"
             );
         }
@@ -147,13 +147,13 @@ mod tests {
 
     #[test]
     fn channel_ends_have_cloexec_set() {
-        // Both ends of channels created by our `pipe()` wrapper must have
+        // Both ends of channels created by our `channel_pair()` wrapper must have
         // FD_CLOEXEC set, so they're closed automatically by the kernel when
         // the daemon child execs the new binary. `UnixStream::pair()` sets this
         // atomically via `SOCK_CLOEXEC` on Linux (and with a separate
         // `ioctl(FIOCLEX)` on macOS/iOS); either way std guarantees CLOEXEC on
         // the fds it creates.
-        let (sender, recver) = pipe::<u32>().unwrap();
+        let (sender, recver) = channel_pair::<u32>().unwrap();
         // Recover the owned fds so the descriptors stay valid for the fcntl
         // check below; they're closed when these `OwnedFd`s drop at the end.
         let sender_fd = sender.into_owned_fd();
@@ -175,14 +175,14 @@ mod tests {
 
         #[test]
         fn primitive_u32() {
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send(&42).unwrap();
             assert_eq!(recver.recv().unwrap(), 42);
         }
 
         #[test]
         fn string() {
-            let (mut sender, mut recver) = pipe::<String>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<String>().unwrap();
             sender.send(&"Hello, World!".to_string()).unwrap();
             assert_eq!(recver.recv().unwrap(), "Hello, World!");
         }
@@ -195,7 +195,7 @@ mod tests {
                 b: String,
             }
 
-            let (mut sender, mut recver) = pipe::<MyStruct>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<MyStruct>().unwrap();
             sender
                 .send(&MyStruct {
                     a: 42,
@@ -215,11 +215,11 @@ mod tests {
         fn dropped_sender() {
             // Blocking-path EOF must be normalized to `SenderClosed`, not
             // surface as the raw `Io(UnexpectedEof)` that `read_exact` reports.
-            let (sender, mut recver) = pipe::<u32>().unwrap();
+            let (sender, mut recver) = channel_pair::<u32>().unwrap();
             drop(sender);
             let error = recver.recv().unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::SenderClosed),
+                matches!(error, ChannelRecvError::SenderClosed),
                 "Unexpected error: {error:?}",
             );
         }
@@ -241,7 +241,7 @@ mod tests {
             let mut recver: Receiver<u32> = Receiver::new(a);
             let error = recver.recv().unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::SenderClosed),
+                matches!(error, ChannelRecvError::SenderClosed),
                 "Unexpected error: {error:?}",
             );
         }
@@ -259,7 +259,7 @@ mod tests {
             // instead of erroring" property is pinned deterministically by
             // the `recv_timeout` tests, which drive the wait path on a channel
             // that provably never receives data.
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
             });
@@ -291,14 +291,14 @@ mod tests {
 
         #[test]
         fn primitive_u32() {
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send(&42).unwrap();
             assert_eq!(recver.recv_timeout(Duration::from_secs(1)).unwrap(), 42);
         }
 
         #[test]
         fn string() {
-            let (mut sender, mut recver) = pipe::<String>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<String>().unwrap();
             sender.send(&"Hello, World!".to_string()).unwrap();
             assert_eq!(
                 recver.recv_timeout(Duration::from_secs(1)).unwrap(),
@@ -314,7 +314,7 @@ mod tests {
                 b: String,
             }
 
-            let (mut sender, mut recver) = pipe::<MyStruct>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<MyStruct>().unwrap();
             sender
                 .send(&MyStruct {
                     a: 42,
@@ -332,11 +332,11 @@ mod tests {
 
         #[test]
         fn dropped_sender() {
-            let (sender, mut recver) = pipe::<u32>().unwrap();
+            let (sender, mut recver) = channel_pair::<u32>().unwrap();
             drop(sender);
             let error = recver.recv_timeout(Duration::from_secs(1)).unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::SenderClosed),
+                matches!(error, ChannelRecvError::SenderClosed),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -350,7 +350,7 @@ mod tests {
             // interleaving can't be forced portably, both orders are correct,
             // and the genuinely-waiting case is pinned deterministically by
             // `timeout` below (a channel that provably never receives data).
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
             });
@@ -360,11 +360,11 @@ mod tests {
 
         #[test]
         fn timeout() {
-            let (_sender, mut recver) = pipe::<u32>().unwrap();
+            let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let response = recver.recv_timeout(Duration::from_secs(1));
             let error = response.unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::Timeout),
+                matches!(error, ChannelRecvError::Timeout),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -373,7 +373,7 @@ mod tests {
         #[test]
         fn zero_timeout_with_data_ready() {
             // Data already in channel, zero timeout should still succeed
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send(&42).unwrap();
             assert_eq!(recver.recv_timeout(Duration::ZERO).unwrap(), 42);
         }
@@ -381,10 +381,10 @@ mod tests {
         #[test]
         fn zero_timeout_without_data() {
             // No data, zero timeout should fail immediately
-            let (_sender, mut recver) = pipe::<u32>().unwrap();
+            let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let error = recver.recv_timeout(Duration::ZERO).unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::Timeout),
+                matches!(error, ChannelRecvError::Timeout),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -393,12 +393,12 @@ mod tests {
         #[test]
         fn very_short_timeout_without_data() {
             // Very short timeout (1ms) without data
-            let (_sender, mut recver) = pipe::<u32>().unwrap();
+            let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let start = Instant::now();
             let error = recver.recv_timeout(Duration::from_millis(1)).unwrap_err();
             let elapsed = start.elapsed();
             assert!(
-                matches!(error, PipeRecvError::Timeout),
+                matches!(error, ChannelRecvError::Timeout),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -412,7 +412,7 @@ mod tests {
         fn large_message() {
             // Large message that may require multiple read chunks
             // Note: socket buffers are finite, so we send/recv concurrently
-            let (mut sender, mut recver) = pipe::<Vec<u8>>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<Vec<u8>>().unwrap();
             let large_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
             let expected = large_data.clone();
 
@@ -429,7 +429,7 @@ mod tests {
         #[test]
         fn multiple_sequential_messages() {
             // Multiple messages in sequence
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             for i in 0..10 {
                 sender.send(&i).unwrap();
             }
@@ -442,12 +442,12 @@ mod tests {
         fn timeout_waiting_for_length_bytes() {
             // Sender sends nothing, timeout waiting for length prefix
             // This is essentially the same as the `timeout` test but with explicit timing check
-            let (_sender, mut recver) = pipe::<u32>().unwrap();
+            let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let start = Instant::now();
             let error = recver.recv_timeout(Duration::from_millis(50)).unwrap_err();
             let elapsed = start.elapsed();
             assert!(
-                matches!(error, PipeRecvError::Timeout),
+                matches!(error, ChannelRecvError::Timeout),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -484,7 +484,7 @@ mod tests {
             let error = recver.recv_timeout(Duration::from_millis(50)).unwrap_err();
             let elapsed = start.elapsed();
             assert!(
-                matches!(error, PipeRecvError::Timeout),
+                matches!(error, ChannelRecvError::Timeout),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -507,7 +507,7 @@ mod tests {
 
             let error = recver.recv_timeout(Duration::from_secs(1)).unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::SenderClosed),
+                matches!(error, ChannelRecvError::SenderClosed),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -526,7 +526,7 @@ mod tests {
 
             let error = recver.recv_timeout(Duration::from_secs(1)).unwrap_err();
             assert!(
-                matches!(error, PipeRecvError::SenderClosed),
+                matches!(error, ChannelRecvError::SenderClosed),
                 "Unexpected error: {:?}",
                 error,
             );
@@ -538,7 +538,7 @@ mod tests {
 
         #[test]
         fn roundtrip_short_payload() {
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send_raw(b"hello").unwrap();
             assert_eq!(
                 recver.recv_raw_timeout(Duration::from_secs(1)).unwrap(),
@@ -550,7 +550,7 @@ mod tests {
         fn roundtrip_empty_payload() {
             // Zero-length payload still goes over the wire as
             // [4-byte length=0] [0 bytes payload]. Receiver must complete.
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send_raw(b"").unwrap();
             assert_eq!(
                 recver.recv_raw_timeout(Duration::from_secs(1)).unwrap(),
@@ -565,7 +565,7 @@ mod tests {
             // OS-level buffer.
             let payload: Vec<u8> = (0..MAX_MESSAGE_SIZE - 4).map(|i| (i % 251) as u8).collect();
             let expected = payload.clone();
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send_raw(&payload).unwrap();
             });
@@ -587,7 +587,7 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    PipeSendError::MessageTooLarge {
+                    ChannelSendError::MessageTooLarge {
                         size,
                         max: MAX_MESSAGE_SIZE,
                     } if size == MAX_MESSAGE_SIZE + 1
@@ -598,7 +598,7 @@ mod tests {
 
         #[test]
         fn dropped_sender_gives_eof_to_recv_raw_timeout() {
-            let (sender, mut recver) = pipe::<u32>().unwrap();
+            let (sender, mut recver) = channel_pair::<u32>().unwrap();
             drop(sender);
             // EOF should be detected and surfaced as an error well before
             // the timeout fires.
@@ -633,7 +633,7 @@ mod tests {
                 a: u32,
                 b: String,
             }
-            let (mut sender, mut recver) = pipe::<Msg>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<Msg>().unwrap();
             sender
                 .send(&Msg {
                     a: 0x42,
@@ -671,25 +671,31 @@ mod tests {
             let err = recver
                 .recv_raw_timeout(Duration::from_millis(50))
                 .unwrap_err();
-            assert!(matches!(err, PipeRecvError::Timeout), "got {err:?}");
+            assert!(matches!(err, ChannelRecvError::Timeout), "got {err:?}");
             // The prefix is consumed; the receiver is now desynchronized and
             // every later receive fails fast without touching the socket.
             let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
-            assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
+            assert!(
+                matches!(err, ChannelRecvError::Desynchronized),
+                "got {err:?}"
+            );
             // Poison is visible on the blocking path too.
             let err = recver.recv().unwrap_err();
-            assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
+            assert!(
+                matches!(err, ChannelRecvError::Desynchronized),
+                "got {err:?}"
+            );
         }
 
         #[test]
         fn clean_idle_recv_timeout_does_not_poison() {
-            let (mut sender, mut recver) = pipe::<u32>().unwrap();
+            let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             // Nothing sent yet: this timeout consumes 0 bytes and must not
             // poison, so idle poll loops keep working.
             let err = recver
                 .recv_raw_timeout(Duration::from_millis(50))
                 .unwrap_err();
-            assert!(matches!(err, PipeRecvError::Timeout), "got {err:?}");
+            assert!(matches!(err, ChannelRecvError::Timeout), "got {err:?}");
             sender.send_raw(b"ok").unwrap();
             assert_eq!(
                 recver.recv_raw_timeout(Duration::from_secs(1)).unwrap(),
@@ -707,11 +713,14 @@ mod tests {
 
             let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
             assert!(
-                matches!(err, PipeRecvError::MessageTooLarge { .. }),
+                matches!(err, ChannelRecvError::MessageTooLarge { .. }),
                 "got {err:?}"
             );
             let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
-            assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
+            assert!(
+                matches!(err, ChannelRecvError::Desynchronized),
+                "got {err:?}"
+            );
         }
     }
 }

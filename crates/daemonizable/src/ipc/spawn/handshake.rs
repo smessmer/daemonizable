@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::ipc::error::{HandshakeError, PipeSendError};
+use crate::ipc::error::{ChannelSendError, HandshakeError};
 use crate::ipc::{RpcClient, RpcServer};
 
 /// How long the spawning parent will wait for the daemon to send its
@@ -58,7 +58,7 @@ where
 pub fn send_handshake<Request, Response>(
     server: &mut RpcServer<Request, Response>,
     build_id: &str,
-) -> Result<(), PipeSendError>
+) -> Result<(), ChannelSendError>
 where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned,
@@ -69,7 +69,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::{PipeRecvError, RpcConnection};
+    use crate::ipc::{ChannelRecvError, RpcConnection};
     use serde::Deserialize;
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ mod tests {
 
     #[test]
     fn accepts_matching_build_id() {
-        let (mut server, client) = RpcConnection::<Req, Resp>::new_pipe()
+        let (mut server, client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_build_id() {
-        let (mut server, client) = RpcConnection::<Req, Resp>::new_pipe()
+        let (mut server, client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn rejects_non_utf8_build_id() {
-        let (mut server, client) = RpcConnection::<Req, Resp>::new_pipe()
+        let (mut server, client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -133,7 +133,7 @@ mod tests {
         // Daemon dies (or was a non-application binary that just exited)
         // before writing the handshake. Parent's `recv_raw_timeout` sees
         // EOF and bails — must surface as an error rather than hang.
-        let (server, client) = RpcConnection::<Req, Resp>::new_pipe()
+        let (server, client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -142,7 +142,7 @@ mod tests {
             .err()
             .expect("missing handshake should be rejected");
         assert!(
-            matches!(err, HandshakeError::Recv(PipeRecvError::SenderClosed)),
+            matches!(err, HandshakeError::Recv(ChannelRecvError::SenderClosed)),
             "expected Recv(SenderClosed), got: {err:?}",
         );
     }
@@ -153,7 +153,7 @@ mod tests {
         // fd open but never writes. Without a timeout the parent would hang forever;
         // bounded `recv_raw_handshake_with_timeout` surfaces a timeout error
         // instead. Tiny timeout so the test doesn't actually wait 10s.
-        let (_server_keepalive, mut client) = RpcConnection::<Req, Resp>::new_pipe()
+        let (_server_keepalive, mut client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -161,7 +161,7 @@ mod tests {
             .recv_raw_handshake_with_timeout(Duration::from_millis(50))
             .expect_err("hung daemon should be rejected via timeout");
         assert!(
-            matches!(err, PipeRecvError::Timeout),
+            matches!(err, ChannelRecvError::Timeout),
             "expected Timeout, got: {err:?}",
         );
     }

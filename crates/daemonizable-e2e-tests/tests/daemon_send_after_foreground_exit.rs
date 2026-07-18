@@ -3,8 +3,8 @@
 //! and must observe a clean `BrokenPipe` error — not a false success, not a
 //! hang. (The mirror scenario — the foreground sending to an exited daemon —
 //! is `test_child_send_request_after_daemon_exited` in
-//! `daemon_child_lifecycle.rs`; the in-process pipe primitive is covered by
-//! the `dropped_recver` unit test in `ipc/pipe`.)
+//! `daemon_child_lifecycle.rs`; the in-process channel primitive is covered by
+//! the `dropped_recver` unit test in `ipc/channel`.)
 //!
 //! Mechanics: like `daemon_survives_parent_exit.rs`, the test launches the
 //! `daemonizable-test-spawn-then-exit` helper, which stands in for a
@@ -19,7 +19,7 @@
 //!     to change away from the spawner's pid (passed down via the
 //!     environment). The kernel reparents the daemon only during the
 //!     spawner's teardown, after the spawner's fds are closed — so once the
-//!     reparent is visible, the response pipe has no reader left and the
+//!     reparent is visible, the channel has no reader left and the
 //!     send outcome is deterministic.
 //!   - The daemon publishes the outcome file atomically (write + rename), so
 //!     the test's existence poll can never read a partial result.

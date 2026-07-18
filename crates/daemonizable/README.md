@@ -278,9 +278,9 @@ it doesn't stop at "started": the RPC channel stays open, so the parent
 can wait for whatever *its* definition of ready is before exiting (CryFS
 exits 0 only after the daemon reports the filesystem is actually mounted).
 If the daemon dies instead of answering, the parent gets an EOF error
-rather than a hang. The inherited pipe fds are re-marked close-on-exec as
+rather than a hang. The inherited channel fd is re-marked close-on-exec as
 soon as the daemon claims them, so subprocesses the daemon spawns don't
-inherit the RPC pipe ends and can't hold that EOF open past the daemon's
+inherit the RPC channel end and can't hold that EOF open past the daemon's
 own exit.
 
 ### The crates, specifically
@@ -435,7 +435,7 @@ faith into an operation that can fail loudly.
   ESRCH falls back to a direct kill for a child that died before `setsid`)
   and the intermediate reaped before the error is returned. A grandchild the
   group signal misses (it left the group via its own `setsid`/`setpgid`)
-  still self-terminates via pipe EOF within ~10 s once the client is dropped
+  still self-terminates via channel EOF within ~10 s once the client is dropped
   — so failed-spawn teardown of the daemon is asynchronous, not synchronous
   with the returned error.
 - Two caveats on [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) itself: it can block

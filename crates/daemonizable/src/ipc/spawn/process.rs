@@ -1,5 +1,5 @@
 //! Parent-side fork+exec machinery: re-exec the current binary (or a test
-//! helper) as a background child, wire up the IPC pipes, and — for the real
+//! helper) as a background child, wire up the IPC channel, and — for the real
 //! daemon path — validate the build-id handshake. The validated daemon is a
 //! *grandchild*: the re-exec'd child (stage 1) forks once more so the daemon
 //! is never a session leader, and the forked child immediately re-execs into
@@ -331,7 +331,7 @@ where
             //     group, whose id is our pgid, not child_pid); the direct
             //     child.kill() gets it instead
             // A grandchild the group-kill somehow misses (it left the group via
-            // its own setsid/setpgid) still self-terminates via pipe EOF once
+            // its own setsid/setpgid) still self-terminates via channel EOF once
             // the client is dropped on the error return.
             //
             // `Pid::from_raw(-child_pid)` is the process group: nix passes it
@@ -394,7 +394,7 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    let rpc_channel = RpcConnection::<Request, Response>::new_pipe()?;
+    let rpc_channel = RpcConnection::<Request, Response>::new_channel()?;
     let (mut client, child_fd) = rpc_channel.into_client_and_child_fd();
 
     // Pre-queue the stage-identity tokens (if any) BEFORE the spawn, so they sit

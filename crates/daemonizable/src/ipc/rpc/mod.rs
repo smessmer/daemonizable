@@ -19,7 +19,7 @@ pub use server::RpcServer;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::error::PipeRecvError;
+    use crate::ipc::error::ChannelRecvError;
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
 
@@ -34,7 +34,7 @@ mod tests {
             v: u32,
         }
 
-        let connection = RpcConnection::<Request, Response>::new_pipe().unwrap();
+        let connection = RpcConnection::<Request, Response>::new_channel().unwrap();
         let (mut server, mut client) = connection.into_server_and_client().unwrap();
 
         client.send_request(&Request { v: 42 }).unwrap();
@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn recv_response_blocking_returns_the_response() {
-        let (mut server, mut client) = RpcConnection::<u32, u32>::new_pipe()
+        let (mut server, mut client) = RpcConnection::<u32, u32>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -70,7 +70,7 @@ mod tests {
         // parent's blocking receive returns an error immediately instead of
         // hanging. Both `dup`-clones that make up the server endpoint must close
         // for the client to see EOF; dropping the whole `RpcServer` closes both.
-        let (server, mut client) = RpcConnection::<u32, u32>::new_pipe()
+        let (server, mut client) = RpcConnection::<u32, u32>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -80,7 +80,7 @@ mod tests {
             .recv_response_blocking()
             .expect_err("a blocking receive must fail once the daemon's end is closed, not hang");
         assert!(
-            matches!(err, PipeRecvError::SenderClosed),
+            matches!(err, ChannelRecvError::SenderClosed),
             "expected SenderClosed (normalized blocking-path EOF), got: {err:?}"
         );
     }
@@ -92,7 +92,7 @@ mod tests {
         // close, so the daemon's blocking `next_request` sees EOF promptly
         // rather than hanging. This is what lets a daemon shut its request loop
         // down when its foreground peer exits.
-        let (mut server, client) = RpcConnection::<u32, u32>::new_pipe()
+        let (mut server, client) = RpcConnection::<u32, u32>::new_channel()
             .unwrap()
             .into_server_and_client()
             .unwrap();
@@ -102,7 +102,7 @@ mod tests {
             .next_request()
             .expect_err("next_request must fail once the client's end is closed, not hang");
         assert!(
-            matches!(err, PipeRecvError::SenderClosed),
+            matches!(err, ChannelRecvError::SenderClosed),
             "expected SenderClosed, got: {err:?}"
         );
     }
