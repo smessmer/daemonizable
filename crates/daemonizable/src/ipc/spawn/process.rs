@@ -15,7 +15,7 @@ use command_fds::{CommandFdExt, FdMapping};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::handshake::validate_handshake_and_build_client;
-use super::{CHILD_REQUEST_RECV_FD, CHILD_RESPONSE_SEND_FD, DAEMON_STAGE1_ARGV};
+use super::{DAEMON_CHANNEL_FD, DAEMON_STAGE1_ARGV};
 use crate::ipc::RpcClient;
 use crate::ipc::RpcConnection;
 use crate::ipc::error::SpawnDaemonError;
@@ -173,11 +173,11 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
 /// engine behind `Daemonizer::spawn_daemon`. Re-execs the current binary
 /// with the [`DAEMON_STAGE1_ARGV`] sentinel as its only argument (stage
 /// identity rides argv, see the sentinel docs in `spawn::mod`; the child
-/// receives its two pipe ends as fds `CHILD_REQUEST_RECV_FD` (3) and
-/// `CHILD_RESPONSE_SEND_FD` (4); every other fd the framework or Rust's std
-/// opened carries `FD_CLOEXEC`, so the kernel closes those during `execve` —
-/// fds the application deliberately created *non*-CLOEXEC still survive into
-/// the daemon) and validates the build-id handshake.
+/// receives its full-duplex channel as fd `DAEMON_CHANNEL_FD` (3); every
+/// other fd the framework or Rust's std opened carries `FD_CLOEXEC`, so the
+/// kernel closes those during `execve` — fds the application deliberately
+/// created *non*-CLOEXEC still survive into the daemon) and validates the
+/// build-id handshake.
 ///
 /// The handshake is a raw (not postcard-encoded) frame *from* the daemon
 /// child, bounded by `HANDSHAKE_TIMEOUT`, and the spawn is rejected if the
@@ -188,7 +188,7 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
 ///   - a parent that accidentally exec'd a non-application binary (no
 ///     handshake arrives → EOF or timeout),
 ///   - any future operator mistake exec'ing a stranger binary that happens
-///     to write something to fd 4 (handshake bytes won't match the
+///     to write something to the channel fd (handshake bytes won't match the
 ///     expected build id).
 ///
 /// The re-exec'd child (stage 1, see `app::daemon_child`) forks a second time
@@ -368,8 +368,8 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    let rpc_pipes = RpcConnection::<Request, Response>::new_pipe()?;
-    let (client, child_in_fd, child_out_fd) = rpc_pipes.into_client_and_child_fds();
+    let rpc_channel = RpcConnection::<Request, Response>::new_pipe()?;
+    let (client, child_fd) = rpc_channel.into_client_and_child_fd();
 
     let mut cmd = Command::new(exe);
     if let Some(argv0) = argv0 {
@@ -389,20 +389,13 @@ where
     // through `std::process::Command` today), so this switch is a code-shape
     // and edge-case-correctness improvement rather than a safety improvement
     // — but it puts the migration one line away when the stdlib API lands.
-    cmd.fd_mappings(vec![
-        FdMapping {
-            parent_fd: child_in_fd,
-            child_fd: CHILD_REQUEST_RECV_FD,
-        },
-        FdMapping {
-            parent_fd: child_out_fd,
-            child_fd: CHILD_RESPONSE_SEND_FD,
-        },
-    ])
+    cmd.fd_mappings(vec![FdMapping {
+        parent_fd: child_fd,
+        child_fd: DAEMON_CHANNEL_FD,
+    }])
     // Invariant, not an error path: a collision needs two mappings onto the
-    // same child fd, and we map two distinct owned parent fds onto the
-    // distinct constants 3 and 4.
-    .expect("fd mappings onto the distinct fds 3 and 4 cannot collide");
+    // same child fd, and we map a single owned parent fd onto fd 3.
+    .expect("a single fd mapping onto fd 3 cannot collide");
 
     let child = cmd.spawn().map_err(|source| SpawnDaemonError::Spawn {
         path: exe.to_owned(),

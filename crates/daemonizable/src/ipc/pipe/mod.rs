@@ -11,6 +11,7 @@ use std::os::unix::net::UnixStream;
 
 use serde::{Serialize, de::DeserializeOwned};
 
+#[cfg(test)]
 use super::error::PipeCreateError;
 
 mod receiver;
@@ -62,6 +63,11 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// peer surfaces as an `EPIPE` error rather than a `SIGPIPE`.)
 ///
 /// T: The type of the data that will be sent through the channel.
+///
+/// Test-only: production builds the full-duplex daemon channel through
+/// [`endpoint_from_stream`]; this one-way constructor exists to exercise the
+/// `Sender`/`Receiver` framing, timeout, and poison machinery in unit tests.
+#[cfg(test)]
 pub fn pipe<T>() -> Result<(Sender<T>, Receiver<T>), PipeCreateError>
 where
     T: Serialize + DeserializeOwned,
@@ -69,10 +75,34 @@ where
     // `UnixStream::pair()` returns two connected endpoints of one socketpair.
     // A `SOCK_STREAM` socketpair is full-duplex, but here we use it
     // unidirectionally: writes on the `Sender` end are read on the `Receiver`
-    // end. (The daemon channel collapses these into a single full-duplex fd; at
-    // this layer they are still one logical direction.)
+    // end. (The daemon channel uses [`endpoint_from_stream`] to drive both
+    // directions over a single fd; at this layer they are still one direction.)
     let (sender, recver) = UnixStream::pair().map_err(PipeCreateError::CreatePipe)?;
     Ok((Sender::new(sender), Receiver::new(recver)))
+}
+
+/// Split one full-duplex socket endpoint into a typed [`Sender<S>`] and
+/// [`Receiver<R>`] that both drive the SAME underlying socket. The two wrappers
+/// hold `dup`-clones of one fd (`try_clone` → `F_DUPFD_CLOEXEC`, so the clone is
+/// born `FD_CLOEXEC`), so one can be written while the other is read
+/// concurrently — full duplex on a single fd.
+///
+/// EOF liveness note: because both wrappers reference the same open file
+/// description, the peer observes EOF only once BOTH are dropped. The daemon
+/// channel keeps exactly these two clones per side, so a dropped endpoint closes
+/// the whole side and the peer's read unblocks.
+///
+/// `try_clone` (a `dup`) can fail (EMFILE/ENFILE); the caller maps the
+/// `io::Error` into its own error type.
+pub(crate) fn endpoint_from_stream<S, R>(
+    stream: UnixStream,
+) -> std::io::Result<(Sender<S>, Receiver<R>)>
+where
+    S: Serialize + DeserializeOwned,
+    R: Serialize + DeserializeOwned,
+{
+    let clone = stream.try_clone()?;
+    Ok((Sender::new(clone), Receiver::new(stream)))
 }
 
 #[cfg(test)]

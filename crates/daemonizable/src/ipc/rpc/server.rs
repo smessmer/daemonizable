@@ -3,11 +3,12 @@
 //! handshake that precedes typed RPC.
 
 use std::os::fd::OwnedFd;
+use std::os::unix::net::UnixStream;
 
 use serde::{Serialize, de::DeserializeOwned};
 
-use crate::ipc::error::{PipeRecvError, PipeSendError};
-use crate::ipc::pipe::{Receiver, Sender};
+use crate::ipc::error::{InheritedFdsError, PipeRecvError, PipeSendError};
+use crate::ipc::pipe::{Receiver, Sender, endpoint_from_stream};
 
 pub struct RpcServer<Request, Response>
 where
@@ -27,27 +28,35 @@ where
         Self { sender, receiver }
     }
 
-    /// Reconstruct an `RpcServer` from the daemon's inherited pipe ends, already
-    /// adopted into owning [`OwnedFd`]s. The fork+exec daemon child receives its
-    /// pipe ends as fds 3 (request-recv) and 4 (response-send);
-    /// `rpc_server_from_inherited_fds` validates and takes ownership of them
-    /// (the one raw-fd `unsafe`), then hands the two `OwnedFd`s here.
+    /// Reconstruct an `RpcServer` from the daemon's single inherited channel
+    /// fd, already adopted into an owning [`OwnedFd`]. The fork+exec daemon child
+    /// receives its full-duplex channel as fd 3 (`DAEMON_CHANNEL_FD`);
+    /// `rpc_server_from_inherited_fds` validates and takes ownership of it (the
+    /// one raw-fd `unsafe`), then hands the `OwnedFd` here.
     ///
-    /// Safe: ownership is established by the `OwnedFd` arguments. `in_fd` should
-    /// be the read end of a pipe whose write end is held by the parent's
-    /// `RpcClient`, and `out_fd` the corresponding write end — but that is a
-    /// *correctness* contract (swapping them yields a broken RPC channel, not
-    /// undefined behavior), not a safety one.
+    /// Splits the one socket into the server's send/recv halves via
+    /// [`endpoint_from_stream`] (an internal `dup`), so the daemon can serve a
+    /// response while awaiting the next request. The `dup` can fail
+    /// (EMFILE/ENFILE) → [`InheritedFdsError::CloneFd`]; on that error the
+    /// adopted fd is closed as the `OwnedFd` drops.
     ///
     /// Crate-internal: the daemon child never constructs its own `RpcServer`
     /// (it receives one, already built, in `Daemonizable::run_daemon`). This
     /// constructor exists only for the one internal caller
     /// `rpc_server_from_inherited_fds`, so it stays off the public API rather
     /// than exposing an fd-adopting constructor on a type every daemon app holds.
-    pub(crate) fn from_owned_fds(in_fd: OwnedFd, out_fd: OwnedFd) -> Self {
-        let receiver = Receiver::from_owned_fd(in_fd);
-        let sender = Sender::from_owned_fd(out_fd);
-        Self::new(sender, receiver)
+    pub(crate) fn from_owned_fd(fd: OwnedFd) -> Result<Self, InheritedFdsError> {
+        Self::from_stream(UnixStream::from(fd))
+            .map_err(|source| InheritedFdsError::CloneFd { source })
+    }
+
+    /// Build a server from one full-duplex socket endpoint, cloning it into the
+    /// send/recv halves. Shared by [`from_owned_fd`](Self::from_owned_fd) (the
+    /// fork+exec claim) and the in-process `RpcConnection::into_server_and_client`.
+    pub(crate) fn from_stream(stream: UnixStream) -> std::io::Result<Self> {
+        // The server SENDS `Response` and RECEIVES `Request` over the shared fd.
+        let (sender, receiver) = endpoint_from_stream::<Response, Request>(stream)?;
+        Ok(Self::new(sender, receiver))
     }
 
     /// Receive the next request from the parent. Blocks until a request

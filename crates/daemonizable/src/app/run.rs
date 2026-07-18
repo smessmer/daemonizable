@@ -59,13 +59,15 @@ static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 /// (libc runs it inside `fork()` itself, for `std::process::Command` spawns
 /// just the same); a constructor thread mutating the environment via C
 /// `setenv` concurrently with *any* env read in the process is the usual
-/// libc `environ` caveat; and constructors must not claim or close raw file
-/// descriptors 3/4 (they carry the RPC pipe ends the daemon image takes
-/// exclusive ownership of; they are open in both stage images, so an
-/// ordinary `open` in a constructor can never land on those numbers
+/// libc `environ` caveat; and constructors must not claim, close, read from,
+/// or write to raw file descriptor 3 (it carries the full-duplex RPC channel
+/// the daemon image takes exclusive ownership of — a constructor *write*
+/// injects bytes ahead of the build-id handshake and a *read* steals request
+/// bytes, either way corrupting the channel; it is open in both stage images,
+/// so an ordinary `open` in a constructor can never land on that number
 /// accidentally) — and should avoid fork+exec'ing long-lived helpers of
-/// their own from the stage images, which would inherit duplicate pipe ends
-/// during the pre-claim window and can suppress the parent's EOF liveness.
+/// their own from the stage images, which would inherit a duplicate channel
+/// end during the pre-claim window and can suppress the parent's EOF liveness.
 ///
 /// Dispatches on the process role: a normal invocation calls
 /// [`A::run_foreground`](Daemonizable::run_foreground) with the [`Daemonizer`]
@@ -184,7 +186,7 @@ mod tests {
     /// The ONLY in-process test allowed to call `run` — the once-guard is a
     /// process-global, so any second test calling `run` would race this one
     /// for the first-call slot. Marker-PRESENT dispatch can't be tested
-    /// in-process at all (the child arm claims fds 3/4 and exits the
+    /// in-process at all (the child arm claims fd 3 and exits the
     /// process); that path is covered by the spawned-binary e2e tests.
     #[test]
     fn run_dispatches_to_foreground_and_panics_on_second_call() {

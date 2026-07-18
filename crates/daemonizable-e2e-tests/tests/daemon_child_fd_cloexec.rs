@@ -1,18 +1,18 @@
-//! Regression test for FD_CLOEXEC restoration on the daemon's inherited RPC fds.
+//! Regression test for FD_CLOEXEC restoration on the daemon's inherited channel fd.
 //!
-//! When the parent spawns the daemon, the two RPC pipe ends are `dup2`'d onto
-//! fixed fds 3 and 4, which clears their FD_CLOEXEC (that's how they survive the
-//! `execve` into the daemon). `rpc_server_from_inherited_fds` re-sets the flag
-//! so the daemon's *own* subprocesses don't inherit those fds. Without that,
-//! a daemon-spawned child inherits the response pipe's write end (fd 4) across
-//! its own fork+exec; because EOF only fires once every write end is closed,
-//! such a child outliving the daemon suppresses the EOF the parent waits on —
-//! so `recv_response` would hang on a long-dead daemon.
+//! When the parent spawns the daemon, the channel socket end is `dup2`'d onto
+//! fixed fd 3, which clears its FD_CLOEXEC (that's how it survives the `execve`
+//! into the daemon). `rpc_server_from_inherited_fds` re-sets the flag so the
+//! daemon's *own* subprocesses don't inherit it. Without that, a daemon-spawned
+//! child inherits the channel end (fd 3) across its own fork+exec; because EOF
+//! only fires once every copy of an end is closed, such a child outliving the
+//! daemon suppresses the EOF the parent waits on — so `recv_response` would hang
+//! on a long-dead daemon.
 //!
 //! This test spawns the `daemonizable-test-background` helper as a daemon in a
 //! mode where it fork+execs a long-lived `sleep` grandchild and then exits. With
-//! CLOEXEC restored, the grandchild does not hold fd 4, so the parent's receive
-//! returns `SenderClosed` (EOF) as soon as the daemon exits. If the fds leaked,
+//! CLOEXEC restored, the grandchild does not hold fd 3, so the parent's receive
+//! returns `SenderClosed` (EOF) as soon as the daemon exits. If the fd leaked,
 //! no EOF arrives and the receive times out instead — which this test reports
 //! as a failure.
 
@@ -93,16 +93,16 @@ fn rpc_fds_do_not_leak_into_daemon_spawned_child() {
     };
 
     // The daemon fork+execs a `sleep` grandchild and exits. With FD_CLOEXEC
-    // restored on the inherited fds, the grandchild does not hold the response
-    // pipe's write end, so once the daemon exits the parent's receive returns
-    // EOF (SenderClosed) well within the timeout. If the fds leaked, the
-    // grandchild keeps fd 4 open for its full sleep and this times out.
+    // restored on the inherited channel fd, the grandchild does not hold the
+    // channel end, so once the daemon exits the parent's receive returns
+    // EOF (SenderClosed) well within the timeout. If the fd leaked, the
+    // grandchild keeps fd 3 open for its full sleep and this times out.
     let result = client.recv_response(Duration::from_secs(5));
 
     assert!(
         matches!(result, Err(PipeRecvError::SenderClosed)),
-        "expected SenderClosed (EOF) once the daemon exited, got {result:?}; the RPC \
-         fds leaked into the daemon-spawned child, keeping the response pipe's write \
-         end open past the daemon's exit"
+        "expected SenderClosed (EOF) once the daemon exited, got {result:?}; the channel \
+         fd leaked into the daemon-spawned child, keeping the channel end open past the \
+         daemon's exit"
     );
 }

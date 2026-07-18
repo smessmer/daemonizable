@@ -393,8 +393,9 @@ channel:
   optional `chroot`, explicit `umask` (currently silently inherited — it
   survives `execve`), signal-mask reset (the mask, unlike handlers, also
   survives `execve`), fd hygiene for non-CLOEXEC fds inherited from the
-  CLI's own environment (`close_range(5, ~0)` on Linux, sparing the channel
-  fds 3/4), and `detach_stdio` gaining redirect-to-log-file targets (log
+  CLI's own environment (`close_range` on Linux, above the framework's own
+  channel fd 3 and the daemon server's runtime clone of it), and
+  `detach_stdio` gaining redirect-to-log-file targets (log
   files opened before the privilege drop, so root-owned log directories
   work). Defaults stay policy-free: every battery is opt-in.*
 - **Initialization runs three times.** The daemon spawn loads the binary

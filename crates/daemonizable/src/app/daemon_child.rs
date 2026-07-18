@@ -44,10 +44,10 @@ use crate::ipc::{
 /// reports on the still-attached stderr; the parent additionally observes any
 /// stage-1 death as EOF on the handshake pipe.
 pub(super) fn run_as_daemon_stage1() -> ! {
-    // Probe fds 3/4 (no ownership taken — the authoritative claim happens in
+    // Probe fd 3 (no ownership taken — the authoritative claim happens in
     // stage 2) so the overwhelmingly-common failure mode — a curious user
     // passing the stage-1 sentinel by hand from a shell, with nothing plumbed
-    // onto fds 3/4 — fails HERE, pre-fork: explanatory message on the
+    // onto fd 3 — fails HERE, pre-fork: explanatory message on the
     // inherited stderr, exit code 2 for the shell, no session created, no
     // process left behind.
     if let Err(err) = validate_inherited_fds() {
@@ -219,8 +219,8 @@ pub(super) fn run_as_daemon_stage1() -> ! {
             // `_exit`, not `std::process::exit`/return — `_exit` skips atexit
             // handlers and C stdio flushing (a buffered write from a
             // hand-written main preamble must flush at most once, in the
-            // daemon) and skips Rust drops. Its inherited copies of fds 3/4
-            // close with it; the stage-2 child's copies keep the pipes open.
+            // daemon) and skips Rust drops. Its inherited copy of fd 3
+            // closes with it; the stage-2 child's copy keeps the channel open.
             //
             // SAFETY: `libc::_exit(0)` takes a plain int, passes no pointers,
             // owns/aliases nothing, is async-signal-safe and unconditionally
@@ -296,26 +296,26 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
         std::process::exit(1);
     }
 
-    // SAFETY: `rpc_server_from_inherited_fds` requires fds 3/4 to be this
-    // process's exclusively-owned inherited RPC pipe ends (see its `# Safety`).
+    // SAFETY: `rpc_server_from_inherited_fds` requires fd 3 to be this
+    // process's exclusively-owned inherited channel socket (see its `# Safety`).
     // The load-bearing argument is positional, not trust in the argv sentinel
     // (which any user can pass by hand): this call runs in a fresh post-exec
     // image before all app code — `run` executed only the once-guard CAS and
     // one argv read before dispatching here, and the leader check above reads
     // process ids, not fds — so no live `OwnedFd`/`File` in this process can
-    // own fd 3 or 4, and the claim mints the *sole* owners of whatever sits
-    // there. In the intended configuration that is the parent's pipe ends:
-    // `dup2`'d onto fds 3/4 across the first exec, then preserved untouched
-    // across stage 1's fork and second exec (stage 1 only probes them;
-    // FD_CLOEXEC is restored by this claim, below, exactly once, in the image
-    // that keeps them). A hand-launched `app __daemonizable-daemon` with
-    // closed or non-pipe fds is rejected by the callee's fstat probe with a
-    // clean error; even deliberately plumbed FIFOs yield a broken RPC
+    // own fd 3, and the claim mints the *sole* owner of whatever sits
+    // there. In the intended configuration that is the parent's socketpair end:
+    // `dup2`'d onto fd 3 across the first exec, then preserved untouched
+    // across stage 1's fork and second exec (stage 1 only probes it;
+    // FD_CLOEXEC is restored by this claim, exactly once, in the image
+    // that keeps it). A hand-launched `app __daemonizable-daemon` with
+    // a closed or non-socket fd is rejected by the callee's fstat probe with a
+    // clean error; even a deliberately plumbed socket yields a broken RPC
     // channel, never aliased ownership. It is also the sole claim. Residual
     // assumption, stated in [`run`](super::run)'s docs: no pre-main
-    // constructor deliberately claimed or closed raw fds 3/4 — they are open
-    // in this image, so a constructor's own `open`s cannot land on those
-    // numbers accidentally.
+    // constructor deliberately claimed or closed raw fd 3 — it is open
+    // in this image, so a constructor's own `open`s cannot land on that
+    // number accidentally.
     let mut server: RpcServer<A::Request, A::Response> =
         match unsafe { rpc_server_from_inherited_fds() } {
             Ok(s) => s,
@@ -357,7 +357,8 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     //   DropPrivileges) — a deliberate, framework-level addition, distinct from
     //   the app-facing payload that once lived here. Ordering within this
     //   block: umask → sigmask reset → close_range (must NOT close the
-    //   inherited pipe fds 3/4) → pid file (this process IS the final daemon —
+    //   inherited channel fd 3, nor the server's runtime dup of it) → pid file
+    //   (this process IS the final daemon —
     //   stage 1's fork already happened — so std::process::id() here is the
     //   pid to record) → chown pid file → open log files → chroot →
     //   initgroups/setgid → setuid → report result. Note: setuid must stay in
