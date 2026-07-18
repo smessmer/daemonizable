@@ -25,14 +25,16 @@
 //! path deliberately bypasses the framework's child arm. The framework's own
 //! `setsid` (and that the daemon is not a session leader) is covered by
 //! `framework_e2e.rs`, which asserts the daemon's session differs from the test
-//! process's AND from the daemon's own pid.
+//! process's AND from the daemon's own pid; the framework-path counterpart of
+//! THIS test — parent exits, framework-spawned daemon observed still doing
+//! work — is `framework_daemon_survives_parent_exit.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nix::sys::signal::{Signal, kill};
+use daemonizable_e2e_tests::DaemonGuard;
 use nix::unistd::{Pid, getsid};
 
 /// The `daemonizable-test-background` helper, run as the daemon (in
@@ -45,35 +47,6 @@ fn background_exe() -> PathBuf {
 /// that launches the daemon and then exits.
 fn spawner_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-spawn-then-exit"))
-}
-
-/// RAII handle that kills the daemon on drop, so an assertion failure in the
-/// test doesn't leak the (init- or subreaper-parented, detached) daemon
-/// process. SIGTERM first; SIGKILL after a 2 s grace period. Never panics from
-/// Drop.
-struct DaemonGuard(Pid);
-
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        let _ = kill(self.0, Signal::SIGTERM);
-        let term_deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match kill(self.0, None) {
-                Ok(()) if Instant::now() >= term_deadline => {
-                    eprintln!(
-                        "daemon {} did not exit on SIGTERM within 2s; sending SIGKILL",
-                        self.0,
-                    );
-                    let _ = kill(self.0, Signal::SIGKILL);
-                    break;
-                }
-                Ok(()) => thread::sleep(Duration::from_millis(20)),
-                // ESRCH: gone already. Anything else: stop probing — we're
-                // in Drop and can't usefully react.
-                Err(_) => break,
-            }
-        }
-    }
 }
 
 #[test]

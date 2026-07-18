@@ -19,6 +19,14 @@
 //! together (the advertised `Copy + Send + Sync` `Daemonizer` use), and
 //! `--spawn-interleaved` keeps two daemons live and interleaves requests to
 //! prove the two channels never cross-talk.
+//!
+//! One knob rides the environment instead of argv, because it must reach the
+//! *daemon* image (argv does not survive the re-exec spawn; the environment
+//! passes through both daemon-stage execs untouched):
+//! `DAEMONIZABLE_TEST_APP_SENTINEL`, used by
+//! `tests/framework_daemon_survives_parent_exit.rs`, switches `run_daemon`
+//! into a long-lived mode that outlives the foreground process — see the
+//! comment in `run_daemon`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -191,6 +199,53 @@ impl Daemonizable for TestApp {
         let sid = nix::unistd::getsid(None)
             .expect("getsid for the calling process")
             .as_raw();
+
+        // Sentinel mode (`DAEMONIZABLE_TEST_APP_SENTINEL` set — inherited from
+        // the test through the foreground process and both daemon-stage
+        // execs): the daemon must OUTLIVE the foreground process, which is
+        // what `tests/framework_daemon_survives_parent_exit.rs` asserts.
+        // Answer the parent's single round-trip first (its response carries
+        // pid/sid into the outfile the test reads), then behave like a real
+        // long-lived daemon: detach stdio and keep working — writing an
+        // incrementing tick to the sentinel path forever, never watching for
+        // RPC EOF. The detach is load-bearing for the test harness, not just
+        // verisimilitude: the test captures the foreground process with
+        // `Command::output()`, which reads until ALL write ends of the
+        // stdout/stderr pipes close — including the copies this daemon
+        // inherited across the spawn — so without it the test would hang.
+        if let Some(sentinel) = std::env::var_os("DAEMONIZABLE_TEST_APP_SENTINEL") {
+            let sentinel = PathBuf::from(sentinel);
+            let request = rpc
+                .next_request()
+                .expect("daemon: expected the parent's request");
+            rpc.send_response(&TestResponse {
+                v: request.v + 1,
+                daemon_cwd: daemon_cwd.clone(),
+                marker: marker.to_string(),
+                argv1: argv1.to_string(),
+                pid,
+                sid,
+            })
+            .expect("daemon: failed to send response");
+            if let Err(err) = daemonizable::detach_stdio() {
+                // Still on the inherited stderr (detach failed), so this
+                // reaches the test's captured output; exiting makes the test
+                // fail its liveness check with that diagnostic available.
+                eprintln!("daemon: detach_stdio failed: {err}");
+                std::process::exit(1);
+            }
+            drop(rpc);
+            let mut tick: u64 = 0;
+            loop {
+                tick += 1;
+                // Best-effort: stdio is detached, so there's nowhere useful to
+                // report a write failure; a persistently failing write shows
+                // up as the test's "sentinel stopped changing" assertion.
+                let _ = std::fs::write(&sentinel, tick.to_string());
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+
         // Echo+1 until the parent drops its client (EOF), then exit cleanly.
         while let Ok(request) = rpc.next_request() {
             rpc.send_response(&TestResponse {
