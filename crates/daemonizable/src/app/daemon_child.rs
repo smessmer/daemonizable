@@ -1,14 +1,15 @@
 //! The re-exec'd daemon child's two-stage startup sequence, run straight from
-//! [`run`](super::run) before any app code.
+//! [`run`](super::run) before any app code. `run`'s dispatch peeks and consumes
+//! the stage's in-band token off the channel fd before calling into these.
 //!
-//! **Stage 1** (argv sentinel `DAEMON_STAGE1_ARGV`; a fresh image the parent
-//! spawned): validate the inherited fds, `setsid`, fork — and the forked
-//! child immediately re-execs this binary into stage 2, so the only
+//! **Stage 1** (its token is `TOKEN_MAGIC ‖ TOKEN_STAGE1`; a fresh image the
+//! parent spawned): verify stage 2's token is queued, `setsid`, fork — and the
+//! forked child immediately re-execs this binary into stage 2, so the only
 //! post-fork instructions this crate runs are `execv` and, on its failure,
-//! `write`/`_exit`. **Stage 2** (argv sentinel `DAEMON_STAGE2_ARGV`; another
-//! fresh image): claim the inherited fds, detach the working directory,
-//! complete the build-id handshake, then hand off to the application's
-//! daemon entry point.
+//! `write`/`_exit`. **Stage 2** (its token is `TOKEN_MAGIC ‖ TOKEN_STAGE2`;
+//! another fresh image): guard provenance (topology + peer credentials), claim
+//! the channel fd, detach the working directory, complete the build-id
+//! handshake, then hand off to the application's daemon entry point.
 //!
 //! The exec between the forks is what makes the second fork sound without
 //! any single-threadedness argument: even if pre-main constructors spawned
@@ -18,12 +19,12 @@
 //! which libc runs inside `fork()` itself — a handler that is not fork-safe
 //! under threads is broken for any fork+exec spawn, including
 //! `std::process::Command`, and is its registrant's responsibility.) Stage
-//! identity rides argv in both stages, so neither image ever reads or
-//! mutates the environment for dispatch — see [`DAEMON_STAGE2_ARGV`]'s doc
-//! for the full argument; the short version is that argv is not inherited by
-//! the daemon's children (nothing to scrub — no `env::remove_var`) and the
-//! environment passes through both execs untouched (no `environ` walk to
-//! race a constructor thread's `setenv`).
+//! identity rides an in-band channel token in both stages (see `TOKEN_MAGIC`'s
+//! doc), so the daemon's argv stays empty and neither image ever reads or
+//! mutates the environment for dispatch: the environment passes through both
+//! execs untouched (no `environ` walk to race a constructor thread's `setenv`,
+//! and no marker to scrub — the tokens live only in the socket buffer and are
+//! consumed before any framed byte).
 
 use std::ffi::CString;
 use std::os::unix::ffi::OsStringExt;
@@ -31,27 +32,33 @@ use std::path::PathBuf;
 
 use super::Daemonizable;
 use crate::ipc::{
-    DAEMON_STAGE2_ARGV, RpcServer, daemon_exe_path, rpc_server_from_inherited_fds, send_handshake,
-    validate_inherited_fds,
+    RpcServer, channel_has_stage2_token, daemon_exe_path, rpc_server_from_inherited_fds,
+    send_handshake, verify_channel_peer_uid,
 };
 
 /// Stage 1: the parent's direct child lands here, straight from
-/// [`run`](super::run) — before any app code. Order matters: validate fds
-/// (exit 2) → `setsid` (exit 1) → resolve the re-exec path and build the
+/// [`run`](super::run) — before any app code. `run`'s dispatch already peeked
+/// and consumed stage 1's token off fd 3. Order matters: verify token 2 is
+/// queued (exit 2) → `setsid` (exit 1) → resolve the re-exec path and build the
 /// `execv` argv (exit 1) → fork (failure exit 1) → the forked child execs
 /// stage 2 (exec failure `_exit(126)`), while this process — the short-lived
 /// session-leader intermediate — `_exit(0)`s. Every failure before the fork
 /// reports on the still-attached stderr; the parent additionally observes any
-/// stage-1 death as EOF on the handshake pipe.
+/// stage-1 death as EOF on the channel.
 pub(super) fn run_as_daemon_stage1() -> ! {
-    // Probe fd 3 (no ownership taken — the authoritative claim happens in
-    // stage 2) so the overwhelmingly-common failure mode — a curious user
-    // passing the stage-1 sentinel by hand from a shell, with nothing plumbed
-    // onto fd 3 — fails HERE, pre-fork: explanatory message on the
-    // inherited stderr, exit code 2 for the shell, no session created, no
-    // process left behind.
-    if let Err(err) = validate_inherited_fds() {
-        eprintln!("daemon stage 1: {err}");
+    // Verify — MANDATORY, before setsid — that the parent also queued stage 2's
+    // token behind stage 1's (a non-consuming, non-blocking peek). The genuine
+    // spawn writes BOTH tokens; a crafted socket carrying only token 1 is
+    // rejected HERE, pre-fork (explanatory message on the inherited stderr, exit
+    // 2, no session created, no process left behind) — rather than the stage-2
+    // image later finding no token and silently running foreground code in a
+    // detached process. `run` reached this arm only because token 1 matched, so
+    // this doubles as the fd-3-is-a-usable-socket check the old fstat probe did.
+    if !channel_has_stage2_token() {
+        eprintln!(
+            "daemon stage 1: the channel is missing stage 2's token. This entry point is \
+             internal to this binary; do not invoke it directly."
+        );
         std::process::exit(2);
     }
 
@@ -112,10 +119,12 @@ pub(super) fn run_as_daemon_stage1() -> ! {
     // post-fork, allocating exactly where allocation is forbidden.
     //
     // argv: [inherited argv0 (cosmetic — keeps `ps` output stable across the
-    // stages), stage-2 sentinel]. The `expect`s guard conditions that cannot
-    // occur (a Unix path and an exec'd argv[0] are NUL-free C strings by
-    // construction; the sentinel is a NUL-free literal): a panic here would
-    // be a framework bug, runs pre-fork, and surfaces on the attached stderr.
+    // stages)] and NOTHING ELSE. Stage identity rides an in-band channel token,
+    // not argv, so the daemon's argv is empty (`run_daemon` sees no injected
+    // argument). The `expect`s guard conditions that cannot occur (a Unix path
+    // and an exec'd argv[0] are NUL-free C strings by construction): a panic
+    // here would be a framework bug, runs pre-fork, and surfaces on the attached
+    // stderr.
     let exe_c = CString::new(exe.into_os_string().into_vec())
         .expect("unix executable paths contain no NUL byte");
     let argv0 = std::env::args_os()
@@ -123,9 +132,7 @@ pub(super) fn run_as_daemon_stage1() -> ! {
         .filter(|a| !a.is_empty())
         .map(|a| CString::new(a.into_vec()).expect("argv[0] is a NUL-free C string"))
         .unwrap_or_else(|| exe_c.clone());
-    let sentinel =
-        CString::new(DAEMON_STAGE2_ARGV).expect("DAEMON_STAGE2_ARGV contains no NUL byte");
-    let argv_storage = [argv0, sentinel];
+    let argv_storage = [argv0];
     // The NULL-terminated pointer array in the shape execv consumes, pointing
     // into the storage above. Also built pre-fork: the child only
     // dereferences. The trailing NULL is load-bearing — execv walks the array
@@ -262,47 +269,73 @@ fn resolve_bare_name_via_path(exe: PathBuf) -> Result<PathBuf, PathBuf> {
     Err(exe)
 }
 
-/// Stage 2: the final daemon image, re-exec'd by stage 1 with the argv
-/// sentinel, lands here straight from [`run`](super::run) — before any app
-/// code. Order: refuse to run as a session/group leader (exit 1) → claim fds
-/// (exit 2) → `chdir("/")` (warn only) → send the build-id handshake (exit
-/// 127) → hand off to the app. This image never forks and never touches its
-/// environment: threads that pre-main constructors may have spawned here are
-/// ordinary daemon threads, hazardous to nothing in this function.
+/// Stage 2: the final daemon image, re-exec'd by stage 1, lands here straight
+/// from [`run`](super::run) — before any app code. `run`'s dispatch already
+/// peeked and consumed stage 2's token off fd 3. Order: provenance guard
+/// (session/group topology, exit 1) → peer-credential check (exit 1) → claim
+/// the channel fd (exit 2) → `chdir("/")` (warn only) → send the build-id
+/// handshake (exit 127) → hand off to the app. This image never forks and never
+/// touches its environment: threads that pre-main constructors may have spawned
+/// here are ordinary daemon threads, hazardous to nothing in this function.
 ///
 /// Do NOT add `setsid`/`setpgid` here: the parent's failed-spawn cleanup
 /// signals `kill(-stage1_pid)`, and it reaches this process only because it
 /// stays in stage 1's process group (which `execve` preserved).
 pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
-    // Provenance check, best-effort: in the intended flow this image is a
-    // non-leader member of stage 1's session and process group (sid == pgid
-    // == stage 1's pid ≠ our pid), so a process that finds itself a session
-    // or group leader here was NOT started by stage 1 — it is a hand-run
-    // `app __daemonizable-daemon` from a shell or supervisor. Running on
-    // would produce a silently-degraded "daemon" (launcher's session,
-    // possibly able to acquire a controlling terminal), a configuration the
-    // historical single-stage arm made unrepresentable; keep it
-    // unrepresentable. (A non-leader hand-run with deliberately plumbed
-    // FIFOs still gets past this — provenance cannot be authenticated from
-    // inheritable state — but a non-leader also cannot acquire a controlling
-    // terminal, so the core guarantee survives even that misuse.)
+    // Provenance guard on the session/group topology. In the intended flow this
+    // image is a non-leader grandchild of stage 1, so sid == pgid == stage 1's
+    // pid ≠ our pid. Refuse if any of that fails:
+    //   * a session or group LEADER was not started by stage 1's setsid+fork —
+    //     it is a hand-run from a shell/supervisor, which running on would turn
+    //     into a silently-degraded "daemon" (launcher's session, possibly able
+    //     to acquire a controlling terminal), a configuration the historical
+    //     single-stage arm made unrepresentable — keep it so;
+    //   * sid != pgid means we are NOT in stage 1's setsid'd group even though
+    //     we're a non-leader. This catches the token-eaten degradation: if a
+    //     pre-main constructor in the stage-1 IMAGE consumed token 1, that
+    //     image's own dispatch would see token 2 and run THIS arm in the
+    //     parent's direct child — which never setsid'd/double-forked and so sits
+    //     in the foreground's session/group (sid != pgid for any foreground that
+    //     isn't itself a session leader, i.e. every ordinary CLI launch).
+    // (A non-leader hand-run with a deliberately plumbed same-uid socket, in a
+    // matching session/group, still gets past this — provenance can't be fully
+    // authenticated from inheritable state — but the peer-cred check below and
+    // "a non-leader can't acquire a controlling terminal" keep the core
+    // guarantees.)
     let pid = nix::unistd::getpid();
-    let is_session_leader = nix::unistd::getsid(None).map(|sid| sid == pid) == Ok(true);
-    if is_session_leader || nix::unistd::getpgrp() == pid {
+    let sid = nix::unistd::getsid(None).ok();
+    let pgid = nix::unistd::getpgrp();
+    let is_session_leader = sid == Some(pid);
+    let is_group_leader = pgid == pid;
+    let in_stage1_group = sid == Some(pgid);
+    if is_session_leader || is_group_leader || !in_stage1_group {
         eprintln!(
-            "daemon stage 2: refusing to run as a session/process-group leader; this entry \
-             point is internal and must be reached through the framework's daemon spawn"
+            "daemon stage 2: session/process-group topology is not that of a framework-spawned \
+             daemon; this entry point is internal and must be reached through the framework's \
+             daemon spawn"
         );
+        std::process::exit(1);
+    }
+
+    // Peer-credential check: the process on the other end of the channel must
+    // run as our own real uid. The stage token is a PUBLIC accident
+    // authenticator (see `TOKEN_MAGIC`), so this — unforgeable by the peer — is
+    // what stops a lower-privileged principal from driving a setuid/file-cap
+    // daemon image into `run_daemon` over a crafted channel. Runs before the
+    // claim, while fd 3 is still just borrowed.
+    if let Err(err) = verify_channel_peer_uid() {
+        eprintln!("daemon stage 2: {err}");
         std::process::exit(1);
     }
 
     // SAFETY: `rpc_server_from_inherited_fds` requires fd 3 to be this
     // process's exclusively-owned inherited channel socket (see its `# Safety`).
-    // The load-bearing argument is positional, not trust in the argv sentinel
-    // (which any user can pass by hand): this call runs in a fresh post-exec
-    // image before all app code — `run` executed only the once-guard CAS and
-    // one argv read before dispatching here, and the leader check above reads
-    // process ids, not fds — so no live `OwnedFd`/`File` in this process can
+    // The load-bearing argument is positional, not trust in the channel token
+    // (a public constant any user can write): this call runs in a fresh post-exec
+    // image before all app code — `run` executed only the once-guard CAS and the
+    // dispatch peek/consume before dispatching here, and the guards above read
+    // process ids and peer credentials, not fds — so no live `OwnedFd`/`File` in
+    // this process can
     // own fd 3, and the claim mints the *sole* owner of whatever sits
     // there. In the intended configuration that is the parent's socketpair end:
     // `dup2`'d onto fd 3 across the first exec, then preserved untouched
@@ -366,10 +399,12 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     //   a different uid and make the parent's kill(-child_pid) cleanup hit
     //   EPERM.
 
-    // Neither stage sentinel can leak to the daemon's children: both ride
-    // argv, which children don't inherit, and no environment marker exists
-    // anywhere in this design (see DAEMON_STAGE2_ARGV's doc). Processes
-    // spawned from `run_daemon` below therefore can't be misdetected as
-    // daemon stages.
+    // The stage tokens can't leak to the daemon's children: they live only in
+    // the channel socket buffer and were consumed by dispatch before we got
+    // here, and the channel fd itself is CLOEXEC (restored by the claim above),
+    // so a child never inherits it — and even if it did, the tokens are already
+    // gone. No environment marker or argv sentinel exists anywhere in this
+    // design (see `TOKEN_MAGIC`'s doc). Processes spawned from `run_daemon`
+    // below therefore can't be misdetected as daemon stages.
     A::run_daemon(server)
 }

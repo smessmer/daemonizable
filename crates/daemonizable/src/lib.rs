@@ -330,8 +330,9 @@
 //! replace the on-disk binary"); [runc](https://github.com/opencontainers/runc)
 //! re-execs itself as `runc init` with a bootstrap pipe fd passed through an
 //! environment variable — a stage marker plus inherited fds, the same shape
-//! used here (this crate carries its stage markers in argv rather than the
-//! environment); and `systemctl daemon-reexec` re-execs PID 1 itself.
+//! used here (this crate carries its stage marker in-band on the channel fd
+//! rather than in argv or the environment); and `systemctl daemon-reexec`
+//! re-execs PID 1 itself.
 //!
 //! ## What this approach costs
 //!
@@ -542,3 +543,14 @@ pub use ipc::{
     InheritedFdsError, RpcConnection, rpc_server_from_inherited_fds, send_handshake,
     spawn_daemon_process_with_exe, start_background_process_with_exe,
 };
+
+/// Test-only: the raw stage-identity token bytes (`TOKEN_MAGIC ‖ stage`) a
+/// parent pre-queues onto the channel fd, so e2e tests can craft channel
+/// contents (a valid token, a single token, wrong magic) and exercise dispatch
+/// and the daemon-stage guards from a spawned binary. `stage` is 1 or 2.
+/// `#[doc(hidden)]`, `testutils`-gated — not part of the stable surface.
+#[cfg(any(test, feature = "testutils"))]
+#[doc(hidden)]
+pub fn stage_token_bytes(stage: u8) -> Vec<u8> {
+    ipc::stage_token(stage).to_vec()
+}

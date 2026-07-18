@@ -334,8 +334,9 @@ mistakes). This is well-trodden ground: Docker/Moby ships a dedicated
 replace the on-disk binary"); [runc](https://github.com/opencontainers/runc)
 re-execs itself as `runc init` with a bootstrap pipe fd passed through an
 environment variable — a stage marker plus inherited fds, the same shape
-used here (this crate carries its stage markers in argv rather than the
-environment); and `systemctl daemon-reexec` re-execs PID 1 itself.
+used here (this crate carries its stage marker in-band on the channel fd
+rather than in argv or the environment); and `systemctl daemon-reexec`
+re-execs PID 1 itself.
 
 ### What this approach costs
 

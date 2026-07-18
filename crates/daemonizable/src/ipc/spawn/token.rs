@@ -1,0 +1,274 @@
+//! In-band stage-identity tokens on the channel fd, and the peer-credential
+//! check that authenticates a genuine channel.
+//!
+//! Stage identity rides the head of [`DAEMON_CHANNEL_FD`] (see [`TOKEN_MAGIC`]'s
+//! doc for the protocol and threat model). This module owns the parent's token
+//! bytes, the dispatch-time probe (`recv(MSG_PEEK|MSG_DONTWAIT)` + a pure
+//! classifier), the token consume, and the stage-2 `SO_PEERCRED`/`getpeereid`
+//! provenance check.
+
+use std::os::fd::BorrowedFd;
+
+use nix::errno::Errno;
+use nix::sys::socket::{MsgFlags, recv};
+
+use super::{DAEMON_CHANNEL_FD, TOKEN_LEN, TOKEN_MAGIC, TOKEN_STAGE1, TOKEN_STAGE2};
+
+/// Which arm dispatch on the channel fd selects.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum StageDispatch {
+    /// Not a framework channel (or no token queued) — run the app's foreground.
+    Foreground,
+    /// The channel head is `TOKEN_MAGIC ‖ TOKEN_STAGE1`.
+    DaemonStage1,
+    /// The channel head is `TOKEN_MAGIC ‖ TOKEN_STAGE2`.
+    DaemonStage2,
+}
+
+/// Pure classifier for a `MSG_PEEK` result on the channel fd: given what
+/// `recv(MSG_PEEK|MSG_DONTWAIT)` returned — either the peeked bytes or the
+/// errno — decide which arm to take. **Never consumes anything**, so any
+/// outcome but an exact token match leaves the fd untouched.
+///
+/// The mapping is a catch-all, not an errno allowlist: `EAGAIN`/`EWOULDBLOCK`
+/// (connected socket, nothing queued), `EINVAL` (Linux `AF_UNIX` listening
+/// socket), `ENOTCONN` (macOS/BSD listening socket), `EBADF` (closed fd),
+/// `ENOTSOCK` (a FIFO / regular file / tty), `ECONNRESET`, and every other
+/// errno all mean "not a token to route on" → [`Foreground`](StageDispatch::Foreground).
+/// A `recv` of `0` (peer closed, nothing queued) and any short read
+/// (`< TOKEN_LEN` bytes, so not a full token yet) do too.
+fn classify(peeked: Result<&[u8], Errno>) -> StageDispatch {
+    let Ok(bytes) = peeked else {
+        // Any errno at all → not a routable channel.
+        return StageDispatch::Foreground;
+    };
+    // Need a whole token; a short read (including 0 == peer closed) is not one.
+    if bytes.len() < TOKEN_LEN || bytes[..TOKEN_MAGIC.len()] != TOKEN_MAGIC {
+        return StageDispatch::Foreground;
+    }
+    match bytes[TOKEN_MAGIC.len()] {
+        TOKEN_STAGE1 => StageDispatch::DaemonStage1,
+        TOKEN_STAGE2 => StageDispatch::DaemonStage2,
+        // Right magic, unknown stage tag: a future/garbage token → Foreground,
+        // consume nothing (the boring, safe choice).
+        _ => StageDispatch::Foreground,
+    }
+}
+
+/// Non-consuming peek of up to `TOKEN_LEN` bytes at the head of the channel fd.
+/// Runs in EVERY `run()` invocation — including plain foreground and any process
+/// that merely inherited a stranger on fd 3 — so it must be side-effect-free:
+/// `MSG_PEEK` never removes bytes, and `MSG_DONTWAIT` guarantees it can't block.
+///
+/// Uses the bare-`RawFd` `nix::sys::socket::recv` (a safe fn — no fd ownership,
+/// no `BorrowedFd`): a closed or non-socket fd 3 returns an errno the classifier
+/// folds into `Foreground`, never UB.
+fn peek_token(buf: &mut [u8; TOKEN_LEN]) -> Result<&[u8], Errno> {
+    loop {
+        match recv(
+            DAEMON_CHANNEL_FD,
+            buf,
+            MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(n) => return Ok(&buf[..n]),
+            Err(Errno::EINTR) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Dispatch-time channel probe: peek the head of fd 3, classify it, and on a
+/// stage match CONSUME exactly [`TOKEN_LEN`] bytes so the next reader (stage 2's
+/// own probe, or the framed RPC) starts clean. On no match, consumes nothing.
+pub(crate) fn dispatch_from_channel() -> StageDispatch {
+    let mut buf = [0u8; TOKEN_LEN];
+    let decision = classify(peek_token(&mut buf));
+    if matches!(
+        decision,
+        StageDispatch::DaemonStage1 | StageDispatch::DaemonStage2
+    ) {
+        // The peek proved TOKEN_LEN bytes are queued and we are the only reader
+        // of fd 3 at this point (dispatch runs before any app code), so this
+        // non-blocking consume removes exactly the token.
+        consume_token();
+    }
+    decision
+}
+
+/// Consume exactly [`TOKEN_LEN`] bytes from fd 3 (the token a prior peek
+/// matched). Non-blocking (`MSG_DONTWAIT`) with an `EINTR` retry; a partial read
+/// loops until the full token is gone. Called only after a peek confirmed a full
+/// token is queued and while this process is the sole reader, so the loop
+/// terminates.
+fn consume_token() {
+    let mut consumed = 0;
+    let mut scratch = [0u8; TOKEN_LEN];
+    while consumed < TOKEN_LEN {
+        match recv(
+            DAEMON_CHANNEL_FD,
+            &mut scratch[consumed..],
+            MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(0) => return, // peer closed mid-token (shouldn't happen post-peek); stop
+            Ok(n) => consumed += n,
+            Err(Errno::EINTR) => continue,
+            // EAGAIN can't occur (peek saw the bytes, we're the sole reader); any
+            // other error means a broken channel the stage will fail on anyway.
+            Err(_) => return,
+        }
+    }
+}
+
+/// Non-consuming check that the head of fd 3 is `TOKEN_MAGIC ‖ TOKEN_STAGE2`.
+/// Stage 1 calls this AFTER dispatch consumed token 1, to prove the parent
+/// queued token 2 as well — a crafted socket carrying only token 1 is rejected
+/// here (in stage 1, before `setsid`), instead of the stage-2 image later
+/// finding no token and silently running foreground code in a detached process.
+pub(crate) fn channel_has_stage2_token() -> bool {
+    let mut buf = [0u8; TOKEN_LEN];
+    classify(peek_token(&mut buf)) == StageDispatch::DaemonStage2
+}
+
+/// Error establishing the channel peer's identity, or a peer whose real uid
+/// doesn't match ours.
+#[derive(Debug)]
+pub(crate) enum PeerCredError {
+    /// Reading the peer credentials failed (`getsockopt`/`getpeereid` errno).
+    Lookup(Errno),
+    /// The peer's real uid differs from ours — a cross-privilege forgery.
+    UidMismatch { peer: u32, ours: u32 },
+}
+
+impl std::fmt::Display for PeerCredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PeerCredError::Lookup(e) => {
+                write!(f, "could not read the channel peer's credentials: {e}")
+            }
+            PeerCredError::UidMismatch { peer, ours } => write!(
+                f,
+                "channel peer uid {peer} does not match our uid {ours}; refusing to serve a \
+                 channel from a different user"
+            ),
+        }
+    }
+}
+
+/// Authenticate the channel: the process on the other end of fd 3 must run as
+/// our own effective uid. See [`TOKEN_MAGIC`]'s threat model — the token is a
+/// public accident-authenticator, so this credential check (unforgeable by the
+/// peer, captured by the kernel at socketpair/connect time) is what stops a
+/// lower-privileged principal from driving a setuid/file-cap daemon image into
+/// `run_daemon` over a crafted channel. A same-uid peer is not a privilege
+/// crossing (it could `ptrace` us), so it passes.
+///
+/// Compares EFFECTIVE uid (`geteuid`), because that is what `SO_PEERCRED`
+/// (Linux fills `ucred.uid` from the peer's `cred->euid`) and `getpeereid`
+/// (POSIX: effective uid) report. In the genuine flow the peer is our own
+/// parent running the SAME binary, so its effective uid equals ours whether or
+/// not the binary is setuid — the socketpair is created before any privilege
+/// drop, and the daemon re-execs the same image so setuid is re-applied. A
+/// lower-privileged attacker (a different euid) is rejected; comparing real uid
+/// instead would wrongly reject a legitimate setuid-root foreground (euid 0,
+/// real uid = invoking user).
+pub(crate) fn verify_channel_peer_uid() -> Result<(), PeerCredError> {
+    // SAFETY: fd 3 (`DAEMON_CHANNEL_FD`) is open here — dispatch's peek and token
+    // consume just succeeded on it, and nothing has closed it since (the caller
+    // only read process ids before this) — so borrowing it for the credential
+    // read is I/O-safe. The borrow does not outlive this function and takes no
+    // ownership (the fd is adopted later, by the claim).
+    let fd = unsafe { BorrowedFd::borrow_raw(DAEMON_CHANNEL_FD) };
+    let peer = peer_uid(fd).map_err(PeerCredError::Lookup)?;
+    let ours = nix::unistd::geteuid().as_raw();
+    if peer != ours {
+        return Err(PeerCredError::UidMismatch { peer, ours });
+    }
+    Ok(())
+}
+
+/// The effective uid of the process connected to the other end of `fd`.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_uid(fd: BorrowedFd<'_>) -> Result<u32, Errno> {
+    // Linux/Android: SO_PEERCRED via getsockopt (reports the peer's euid).
+    let creds = nix::sys::socket::getsockopt(&fd, nix::sys::socket::sockopt::PeerCredentials)?;
+    Ok(creds.uid())
+}
+
+/// The effective uid of the process connected to the other end of `fd`.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn peer_uid(fd: BorrowedFd<'_>) -> Result<u32, Errno> {
+    // BSD/macOS: LOCAL_PEERCRED under the hood, via getpeereid (effective uid).
+    let (uid, _gid) = nix::unistd::getpeereid(fd)?;
+    Ok(uid.as_raw())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn magic_with(stage: u8) -> Vec<u8> {
+        let mut v = TOKEN_MAGIC.to_vec();
+        v.push(stage);
+        v
+    }
+
+    #[test]
+    fn classify_decision_table() {
+        // Errors of every stripe → Foreground (catch-all, not an allowlist).
+        for errno in [
+            Errno::EAGAIN,
+            Errno::EINVAL,   // Linux AF_UNIX listening socket
+            Errno::ENOTCONN, // macOS/BSD listening socket
+            Errno::EBADF,    // closed fd
+            Errno::ENOTSOCK, // FIFO / file / tty
+            Errno::ECONNRESET,
+            Errno::EIO, // any other errno
+        ] {
+            assert_eq!(
+                classify(Err(errno)),
+                StageDispatch::Foreground,
+                "errno {errno:?} must map to Foreground"
+            );
+        }
+
+        // Peer closed / nothing queued (ret == 0) and short reads → Foreground,
+        // no full token yet.
+        assert_eq!(classify(Ok(&[])), StageDispatch::Foreground);
+        assert_eq!(classify(Ok(&[TOKEN_MAGIC[0]])), StageDispatch::Foreground);
+        assert_eq!(
+            classify(Ok(&TOKEN_MAGIC[..])), // 32 bytes: magic but no stage tag
+            StageDispatch::Foreground
+        );
+
+        // Wrong magic of full length → Foreground.
+        let mut wrong = magic_with(TOKEN_STAGE1);
+        wrong[0] ^= 0xff;
+        assert_eq!(classify(Ok(&wrong)), StageDispatch::Foreground);
+
+        // Exact tokens route to their stages.
+        assert_eq!(
+            classify(Ok(&magic_with(TOKEN_STAGE1))),
+            StageDispatch::DaemonStage1
+        );
+        assert_eq!(
+            classify(Ok(&magic_with(TOKEN_STAGE2))),
+            StageDispatch::DaemonStage2
+        );
+
+        // Right magic, unknown stage tag → Foreground.
+        for tag in [0u8, 3, 255] {
+            assert_eq!(
+                classify(Ok(&magic_with(tag))),
+                StageDispatch::Foreground,
+                "unknown stage tag {tag} must map to Foreground"
+            );
+        }
+
+        // A valid token followed by trailing bytes still classifies (the peek
+        // buffer is TOKEN_LEN, so extra queued bytes aren't even peeked, but a
+        // classifier fed a longer slice must key only on the first token).
+        let mut trailing = magic_with(TOKEN_STAGE1);
+        trailing.extend_from_slice(b"more data");
+        assert_eq!(classify(Ok(&trailing)), StageDispatch::DaemonStage1);
+    }
+}

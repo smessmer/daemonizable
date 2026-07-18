@@ -11,17 +11,20 @@
 //! - [`mod@inherited`] — the daemon child's one-time claim of the channel fd it
 //!   inherited across `execve` ([`rpc_server_from_inherited_fds`]).
 //!
-//! The channel fd number and stage-sentinel argv tokens shared across those
-//! modules live here.
+//! The channel fd number and the in-band stage-identity tokens shared across
+//! those modules live here.
 
 mod handshake;
 mod inherited;
 mod process;
+mod token;
 
 pub use handshake::send_handshake;
 pub use inherited::rpc_server_from_inherited_fds;
-pub(crate) use inherited::validate_inherited_fds;
 pub(crate) use process::{daemon_exe_path, spawn_daemon_process};
+pub(crate) use token::{
+    StageDispatch, channel_has_stage2_token, dispatch_from_channel, verify_channel_peer_uid,
+};
 // Test-only spawn helpers: gated so they don't ship in the default published
 // surface (their crate-root re-exports in `lib.rs` are `testutils`-gated too).
 #[cfg(any(test, feature = "testutils"))]
@@ -36,30 +39,70 @@ pub use process::{spawn_daemon_process_with_exe, start_background_process_with_e
 /// the OS assigns, typically 4, and is CLOEXEC so it never leaks to children.)
 const DAEMON_CHANNEL_FD: i32 = 3;
 
-/// The argv[1] sentinel identifying a re-exec'd binary as stage 1 of the
-/// daemon-child startup (set by the parent's spawn as the child's only
-/// argument). See [`DAEMON_STAGE2_ARGV`] for why stage identity rides argv
-/// rather than the environment.
-pub(crate) const DAEMON_STAGE1_ARGV: &str = "__daemonizable-stage1";
+/// Length of a stage-identity token: the 32-byte [`TOKEN_MAGIC`] prefix plus a
+/// one-byte stage tag.
+pub(crate) const TOKEN_LEN: usize = TOKEN_MAGIC.len() + 1;
 
-/// The argv[1] sentinel identifying a re-exec'd binary as stage 2 — the final
-/// daemon image (set by stage 1's re-exec as the image's only argument).
+/// Stage-identity tag bytes appended to [`TOKEN_MAGIC`] to form the two tokens.
+pub(crate) const TOKEN_STAGE1: u8 = 1;
+pub(crate) const TOKEN_STAGE2: u8 = 2;
+
+/// Fixed 32-byte magic prefixing each in-band stage-identity token.
 ///
-/// Stage identity rides argv, not the environment, for two structural
-/// reasons. First, argv is not inherited by child processes: nothing ever
-/// needs scrubbing before the daemon spawns children of its own, which is
-/// what lets this crate avoid `env::remove_var` (and its no-concurrent-
-/// env-readers contract) entirely. Second, with no environment marker to
-/// filter out, stage 1 can re-exec with the inherited environment untouched
-/// (`execv`), so the daemon's environment is byte-identical to the
-/// foreground's and stage 1 never has to walk `environ` — which would race a
-/// C-level `setenv` from any constructor-spawned thread.
+/// # How stage identity is carried
 ///
-/// The names are namespaced/ugly on purpose. Dispatch in [`crate::run`]
-/// checks argv[1] against them before any app code runs, so an application
-/// *flag* can never collide; these are, however, reserved tokens — a process
-/// whose first argument is exactly one of them (hand-invocation, or argument
-/// passthrough of hostile data) is routed to the corresponding daemon stage,
-/// where the fd validation rejects anything the framework didn't plumb (see
-/// the stage functions in `app::daemon_child` for what a hand-run observes).
-pub(crate) const DAEMON_STAGE2_ARGV: &str = "__daemonizable-daemon";
+/// The parent pre-queues two tokens — `TOKEN_MAGIC ‖ TOKEN_STAGE1` then
+/// `TOKEN_MAGIC ‖ TOKEN_STAGE2` — into the channel socket ([`DAEMON_CHANNEL_FD`])
+/// before spawning. Dispatch in [`crate::run`] peeks the head of that fd with
+/// `recv(MSG_PEEK|MSG_DONTWAIT)`: a leading `TOKEN_MAGIC ‖ TOKEN_STAGE1`
+/// routes to stage 1 (consuming those [`TOKEN_LEN`] bytes), a leading
+/// `TOKEN_MAGIC ‖ TOKEN_STAGE2` routes to stage 2, and everything else —
+/// closed fd, non-socket (a make jobserver FIFO), an empty or foreign socket,
+/// wrong bytes — falls through to the foreground arm having consumed nothing.
+/// Stage 1 and stage 2 are separate processes that share the inherited fd, so
+/// they consume their tokens in order: stage 1's dispatch eats token 1, stage
+/// 2's (in the re-exec'd image) eats token 2, then the framed RPC begins.
+///
+/// Why in-band on the channel fd rather than argv or the environment: the
+/// daemon's argv stays empty (`run_daemon` sees no injected argument) and its
+/// environment is byte-identical to the foreground's, and there is nothing to
+/// scrub before the daemon spawns children of its own — the tokens live only
+/// in the socket buffer and are consumed before any of them.
+///
+/// # Threat model — an accident authenticator, NOT a forgery defense
+///
+/// `TOKEN_MAGIC` is a FIXED, PUBLIC constant (as public as the old argv
+/// sentinel strings were). Its sole job is to make a *coincidental* match with
+/// unrelated inherited data astronomically unlikely (2⁻²⁵⁶), so a foreign fd
+/// on number 3 — a systemd socket-activation socket, a make jobserver FIFO —
+/// is not mistaken for a framework channel. It does NOT stop a deliberate
+/// forger: anyone who can plant a socket on fd 3 can also write these public
+/// bytes into it.
+///
+/// The real defense against a forged channel is downstream, in
+/// [`run_as_daemon_stage2`](crate::run) (all applied *before* any application
+/// code runs):
+/// - a **peer-credential check** (`SO_PEERCRED` / `getpeereid`): the fd-3
+///   peer's effective uid must equal ours, which rejects the load-bearing case —
+///   a lower-privileged principal trying to drive a setuid/file-cap daemon
+///   image into `run_daemon` over an attacker-controlled channel;
+/// - the **session/group-leader guard**: a genuine daemon is a non-leader
+///   grandchild (`sid == pgid == stage 1's pid ≠ own pid`), so a hand-run from
+///   a shell or a setsid-wrapped launcher is refused.
+///
+/// A same-uid local process that plants a crafted channel can still reach
+/// `run_daemon` (it could equally `ptrace` us), so — exactly as with the old
+/// argv sentinel — applications must not treat `run_daemon`'s RPC input as
+/// authenticated-by-provenance. See `run`'s docs for the `AT_SECURE` note.
+pub(crate) const TOKEN_MAGIC: [u8; 32] = [
+    0x54, 0x97, 0x91, 0xf3, 0xcc, 0x75, 0xa4, 0x5c, 0x7c, 0x42, 0x9c, 0xbd, 0x37, 0x14, 0x89, 0xb1,
+    0x67, 0x7b, 0x6b, 0xf3, 0xf3, 0x38, 0x49, 0x44, 0x05, 0x0a, 0x7f, 0x6d, 0xfa, 0x9c, 0xbe, 0x94,
+];
+
+/// Build the `TOKEN_LEN`-byte stage token `TOKEN_MAGIC ‖ stage`.
+pub(crate) fn stage_token(stage: u8) -> [u8; TOKEN_LEN] {
+    let mut token = [0u8; TOKEN_LEN];
+    token[..TOKEN_MAGIC.len()].copy_from_slice(&TOKEN_MAGIC);
+    token[TOKEN_MAGIC.len()] = stage;
+    token
+}
