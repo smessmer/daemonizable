@@ -6,7 +6,7 @@
 //! instead of forking an in-process fn pointer, so they no longer suffer the
 //! parallel-test fd-inheritance flake.
 
-use daemonizable::{PipeRecvError, RpcServer, rpc_server_from_inherited_fds};
+use daemonizable::{PipeRecvError, PipeSendError, RpcServer, rpc_server_from_inherited_fds};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +126,12 @@ fn main() {
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
+            // 30s: not a synchronization point — the test kills the sleeper
+            // by the pid recorded below. The duration must merely outlast,
+            // with a wide margin, the 5s recv_response wait in
+            // daemon_child_fd_cloexec (a leaked fd 4 has to stay open past
+            // that whole wait for the test to detect it), while still
+            // self-cleaning eventually if the kill-based cleanup never ran.
             let child = std::process::Command::new("sleep")
                 .arg("30")
                 .spawn()
@@ -167,6 +173,55 @@ fn main() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
+        }
+        "send_after_parent_exit" => {
+            // Used by daemon_send_after_foreground_exit: the daemon side of a
+            // send whose foreground peer is ALREADY GONE. Our parent is the
+            // spawner helper (`daemonizable-test-spawn-then-exit`), standing
+            // in for a foreground CLI that exits right after the spawn; it
+            // hands us its pid via the environment. Wait until it is fully
+            // dead, then attempt `send_response` and record the outcome —
+            // the test asserts it was a clean `BrokenPipe`, not a success and
+            // not a hang.
+            //
+            // The wait is an observed event, not a delay: we poll for the
+            // moment `getppid()` stops being the spawner's pid. The kernel
+            // reparents us only during the spawner's teardown, after its fds
+            // are closed — so once the reparent is visible, the response
+            // pipe's only other end is guaranteed gone and the send outcome
+            // is deterministic. (If the spawner died before we even started,
+            // `getppid()` never equals its pid and the loop exits at once.)
+            let outfile = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_OUTFILE")
+                    .expect("DAEMONIZABLE_TEST_OUTFILE not set"),
+            );
+            let spawner_pid: i32 = std::env::var("DAEMONIZABLE_TEST_SPAWNER_PID")
+                .expect("DAEMONIZABLE_TEST_SPAWNER_PID not set")
+                .parse()
+                .expect("DAEMONIZABLE_TEST_SPAWNER_PID not an int");
+            let pid_file = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
+            );
+            // Publish our pid first so the test can clean us up if an
+            // assertion fails before we exit on our own.
+            std::fs::write(&pid_file, std::process::id().to_string())
+                .expect("daemon: write pid file");
+            while nix::unistd::getppid().as_raw() == spawner_pid {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let outcome = match rpc.send_response(&Response { response: 1 }) {
+                Err(PipeSendError::Io(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                    "send:broken_pipe".to_string()
+                }
+                Ok(()) => "send:unexpected_success".to_string(),
+                Err(other) => format!("send:unexpected_error:{other:?}"),
+            };
+            // Publish atomically (write to a sibling path, then rename) so
+            // the test's existence poll can never observe a partial write.
+            let tmp = outfile.with_extension("tmp");
+            std::fs::write(&tmp, &outcome).expect("daemon: write outcome tmp file");
+            std::fs::rename(&tmp, &outfile).expect("daemon: publish outcome file");
+            std::process::exit(0);
         }
         "wrong_handshake_then_idle" => {
             // Used by failed_spawn_cleanup. Drives the parent's handshake

@@ -138,8 +138,10 @@ fn pipes_do_not_leak_into_daemon() {
     // even if it panics.
     let _guard = DaemonGuard(daemon_pid);
 
-    // Give the daemon a touch more time to actually run its write attempt.
-    thread::sleep(Duration::from_millis(100));
+    // No wait is needed before the check below: the helper attempts its leak
+    // write BEFORE publishing the pid file (see `write_to_fd_then_idle`), so
+    // having observed the pid file above already proves the write attempt
+    // happened — ordering by observed events, not by timing.
 
     // Read from the sentinel pipe with a short deadline. Expect EOF (no
     // data) because the daemon's inherited copy of the fd was closed by
