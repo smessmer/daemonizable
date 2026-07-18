@@ -16,7 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use daemonizable::{
-    HandshakeError, PipeRecvError, SpawnDaemonError, spawn_daemon_process_with_exe,
+    ChannelRecvError, HandshakeError, SpawnDaemonError, spawn_daemon_process_with_exe,
 };
 use nix::errno::Errno;
 use nix::sys::signal::kill;
@@ -164,7 +164,7 @@ fn failed_spawn_reaps_a_child_that_died_before_the_handshake() {
     assert!(
         matches!(
             err,
-            SpawnDaemonError::Handshake(HandshakeError::Recv(PipeRecvError::SenderClosed))
+            SpawnDaemonError::Handshake(HandshakeError::Recv(ChannelRecvError::SenderClosed))
         ),
         "expected Handshake(Recv(SenderClosed)), got: {err:?}"
     );

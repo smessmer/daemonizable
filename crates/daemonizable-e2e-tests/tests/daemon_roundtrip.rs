@@ -8,7 +8,7 @@
 //! The helper binary's `echo` behavior expects `i32`-payload Request/Response,
 //! so this test uses those rather than free-form byte payloads. Variation
 //! comes from the request values themselves; sizes are exercised separately
-//! by the existing in-process `ipc::pipe::tests::recv_timeout::large_message`
+//! by the existing in-process `ipc::channel::tests::recv_timeout::large_message`
 //! and `multiple_sequential_messages` unit tests.
 
 use std::ffi::OsStr;
@@ -49,7 +49,7 @@ fn roundtrip_many_requests() {
         assert_eq!(response, Response { response: i + 1 });
     }
 
-    // Dropping the client closes its end of both pipes; the daemon's
+    // Dropping the client closes its end of the channel; the daemon's
     // `next_request` should observe EOF and the daemon should `exit(0)`.
     drop(client);
 }

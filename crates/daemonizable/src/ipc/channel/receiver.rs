@@ -16,7 +16,7 @@ use nix::sys::socket::{MsgFlags, recv};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::MAX_MESSAGE_SIZE;
-use crate::ipc::error::PipeRecvError;
+use crate::ipc::error::ChannelRecvError;
 
 pub struct Receiver<T>
 where
@@ -24,7 +24,7 @@ where
 {
     recver: UnixStream,
     /// Set once a receive consumes part of a message frame and then fails,
-    /// leaving the stream desynchronized (see [`PipeRecvError::Desynchronized`]).
+    /// leaving the stream desynchronized (see [`ChannelRecvError::Desynchronized`]).
     /// Once set, every receive fails fast without touching the socket.
     poisoned: bool,
     _p: PhantomData<T>,
@@ -49,7 +49,7 @@ where
         OwnedFd::from(self.recver)
     }
 
-    pub fn recv(&mut self) -> Result<T, PipeRecvError> {
+    pub fn recv(&mut self) -> Result<T, ChannelRecvError> {
         let buf = self.read_length_prefixed()?;
         // A decode failure here does NOT poison: the whole frame was read off
         // the wire correctly, so the stream is still synchronized.
@@ -65,12 +65,15 @@ where
     /// If a `Timeout` fires after part of a frame was already consumed, or the
     /// length prefix declares an oversized payload that is then left unread, the
     /// stream is desynchronized: the `Receiver` is poisoned and all subsequent
-    /// receives fail with [`PipeRecvError::Desynchronized`]. A clean idle
+    /// receives fail with [`ChannelRecvError::Desynchronized`]. A clean idle
     /// timeout (nothing consumed) does not poison, so polling an idle channel
     /// with short timeouts keeps working.
-    pub(crate) fn recv_raw_timeout(&mut self, timeout: Duration) -> Result<Vec<u8>, PipeRecvError> {
+    pub(crate) fn recv_raw_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, ChannelRecvError> {
         if self.poisoned {
-            return Err(PipeRecvError::Desynchronized);
+            return Err(ChannelRecvError::Desynchronized);
         }
         let timeout_at = deadline_from(timeout);
 
@@ -85,7 +88,7 @@ where
             timeout_at,
             &mut prefix_read,
         ) {
-            if matches!(err, PipeRecvError::Timeout) && prefix_read > 0 {
+            if matches!(err, ChannelRecvError::Timeout) && prefix_read > 0 {
                 self.poisoned = true;
             }
             return Err(err);
@@ -96,7 +99,7 @@ where
             // The prefix is consumed but the declared payload is still on the
             // wire; a later read would misframe it. Poison.
             self.poisoned = true;
-            return Err(PipeRecvError::MessageTooLarge {
+            return Err(ChannelRecvError::MessageTooLarge {
                 size: len,
                 max: MAX_MESSAGE_SIZE,
             });
@@ -109,7 +112,7 @@ where
         if let Err(err) =
             read_exact_with_timeout(self.recver.as_fd(), &mut buf, timeout_at, &mut payload_read)
         {
-            if matches!(err, PipeRecvError::Timeout) {
+            if matches!(err, ChannelRecvError::Timeout) {
                 self.poisoned = true;
             }
             return Err(err);
@@ -125,7 +128,7 @@ where
     /// An extremely large `timeout` (e.g. `Duration::MAX`) is clamped rather
     /// than panicking on deadline overflow; for a genuinely unbounded wait, use
     /// the blocking [`recv`](Self::recv) instead.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, PipeRecvError>
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, ChannelRecvError>
     where
         T: Send,
     {
@@ -133,9 +136,9 @@ where
         Ok(postcard::from_bytes(&buf)?)
     }
 
-    fn read_length_prefixed(&mut self) -> Result<Vec<u8>, PipeRecvError> {
+    fn read_length_prefixed(&mut self) -> Result<Vec<u8>, ChannelRecvError> {
         if self.poisoned {
-            return Err(PipeRecvError::Desynchronized);
+            return Err(ChannelRecvError::Desynchronized);
         }
         // The socket is blocking (never toggled — see `Receiver`'s timeout
         // path), so `read_exact` blocks until the frame arrives or the peer
@@ -151,7 +154,7 @@ where
             // truncated frame surfaces as SenderClosed, which is terminal EOF
             // and needs no poisoning.)
             self.poisoned = true;
-            return Err(PipeRecvError::MessageTooLarge {
+            return Err(ChannelRecvError::MessageTooLarge {
                 size: len,
                 max: MAX_MESSAGE_SIZE,
             });
@@ -194,15 +197,15 @@ fn deadline_from(timeout: Duration) -> Instant {
 /// (a clean `shutdown`/close with the read queue drained) or as
 /// `ConnectionReset` (the peer was killed/closed while its OWN receive queue
 /// still held unread bytes — an `AF_UNIX` behavior pipes never exhibit).
-/// Normalize both into [`PipeRecvError::SenderClosed`] so EOF has a single
+/// Normalize both into [`ChannelRecvError::SenderClosed`] so EOF has a single
 /// variant across blocking and timeout-bounded receives (the timeout path
 /// detects the same conditions via `recv() == Ok(0)` / `ECONNRESET`).
-fn normalize_blocking_read_err(e: std::io::Error) -> PipeRecvError {
+fn normalize_blocking_read_err(e: std::io::Error) -> ChannelRecvError {
     match e.kind() {
         std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset => {
-            PipeRecvError::SenderClosed
+            ChannelRecvError::SenderClosed
         }
-        _ => PipeRecvError::Io(e),
+        _ => ChannelRecvError::Io(e),
     }
 }
 
@@ -222,7 +225,7 @@ fn read_exact_with_timeout(
     buf: &mut [u8],
     timeout_at: Instant,
     bytes_read: &mut usize,
-) -> Result<(), PipeRecvError> {
+) -> Result<(), ChannelRecvError> {
     // `PollTimeout` holds milliseconds in a `u16`, so a single `poll` call can
     // wait at most ~65.5s; the impl loops across windows up to the real
     // deadline. `u16::MAX` is the production window; tests pass a small one to
@@ -236,7 +239,7 @@ fn read_exact_with_timeout_impl(
     timeout_at: Instant,
     max_poll_window_ms: u16,
     bytes_read: &mut usize,
-) -> Result<(), PipeRecvError> {
+) -> Result<(), ChannelRecvError> {
     *bytes_read = 0;
     while *bytes_read < buf.len() {
         // Read without blocking first. `MSG_DONTWAIT` makes this recv
@@ -249,7 +252,7 @@ fn read_exact_with_timeout_impl(
             &mut buf[*bytes_read..],
             MsgFlags::MSG_DONTWAIT,
         ) {
-            Ok(0) => return Err(PipeRecvError::SenderClosed),
+            Ok(0) => return Err(ChannelRecvError::SenderClosed),
             Ok(n) => {
                 *bytes_read += n;
                 continue;
@@ -258,14 +261,14 @@ fn read_exact_with_timeout_impl(
             Err(Errno::EAGAIN) => {}
             Err(Errno::EINTR) => continue,
             // Peer died with unread data queued on its side — treat as EOF.
-            Err(Errno::ECONNRESET) => return Err(PipeRecvError::SenderClosed),
-            Err(e) => return Err(PipeRecvError::Io(std::io::Error::from(e))),
+            Err(Errno::ECONNRESET) => return Err(ChannelRecvError::SenderClosed),
+            Err(e) => return Err(ChannelRecvError::Io(std::io::Error::from(e))),
         }
 
         // Not ready: wait for readiness using poll() instead of busy-waiting.
         let remaining = timeout_at.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(PipeRecvError::Timeout);
+            return Err(ChannelRecvError::Timeout);
         }
         let poll_fd = PollFd::new(fd, PollFlags::POLLIN);
         // Cap each poll wait at `max_poll_window_ms`. When `remaining` exceeds
@@ -281,7 +284,7 @@ fn read_exact_with_timeout_impl(
         match poll(&mut [poll_fd], PollTimeout::from(timeout_ms)) {
             Ok(_) => continue,             // readable, or window expired — retry the recv
             Err(Errno::EINTR) => continue, // interrupted, retry
-            Err(e) => return Err(PipeRecvError::Io(e.into())),
+            Err(e) => return Err(ChannelRecvError::Io(e.into())),
         }
     }
     Ok(())
@@ -299,7 +302,7 @@ mod tests {
     // previously-panicking line without actually waiting.
     #[test]
     fn recv_timeout_with_overflowing_duration_does_not_panic() {
-        let (mut sender, mut recver) = crate::ipc::pipe::pipe::<u32>().unwrap();
+        let (mut sender, mut recver) = crate::ipc::channel::channel_pair::<u32>().unwrap();
         sender.send(&7).unwrap();
         assert_eq!(
             recver.recv_timeout(Duration::MAX).unwrap(),
@@ -382,7 +385,7 @@ mod tests {
             "timed out after {elapsed:?}; should have waited the full deadline, not one poll window"
         );
         assert!(
-            matches!(err, PipeRecvError::Timeout),
+            matches!(err, ChannelRecvError::Timeout),
             "expected a timeout error, got: {err:?}"
         );
         drop(sender); // keep the send end open until here so this is a timeout, not EOF

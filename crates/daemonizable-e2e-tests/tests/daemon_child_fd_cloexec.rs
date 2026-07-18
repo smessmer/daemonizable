@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
-use daemonizable::{PipeRecvError, start_background_process_with_exe};
+use daemonizable::{ChannelRecvError, start_background_process_with_exe};
 use nix::sys::signal::{Signal, kill};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
@@ -100,7 +100,7 @@ fn rpc_fds_do_not_leak_into_daemon_spawned_child() {
     let result = client.recv_response(Duration::from_secs(5));
 
     assert!(
-        matches!(result, Err(PipeRecvError::SenderClosed)),
+        matches!(result, Err(ChannelRecvError::SenderClosed)),
         "expected SenderClosed (EOF) once the daemon exited, got {result:?}; the channel \
          fd leaked into the daemon-spawned child, keeping the channel end open past the \
          daemon's exit"

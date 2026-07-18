@@ -274,9 +274,9 @@
 //! can wait for whatever *its* definition of ready is before exiting (CryFS
 //! exits 0 only after the daemon reports the filesystem is actually mounted).
 //! If the daemon dies instead of answering, the parent gets an EOF error
-//! rather than a hang. The inherited pipe fds are re-marked close-on-exec as
+//! rather than a hang. The inherited channel fd is re-marked close-on-exec as
 //! soon as the daemon claims them, so subprocesses the daemon spawns don't
-//! inherit the RPC pipe ends and can't hold that EOF open past the daemon's
+//! inherit the RPC channel end and can't hold that EOF open past the daemon's
 //! own exit.
 //!
 //! ## The crates, specifically
@@ -431,7 +431,7 @@
 //!   ESRCH falls back to a direct kill for a child that died before `setsid`)
 //!   and the intermediate reaped before the error is returned. A grandchild the
 //!   group signal misses (it left the group via its own `setsid`/`setpgid`)
-//!   still self-terminates via pipe EOF within ~10 s once the client is dropped
+//!   still self-terminates via channel EOF within ~10 s once the client is dropped
 //!   — so failed-spawn teardown of the daemon is asynchronous, not synchronous
 //!   with the returned error.
 //! - Two caveats on [`Daemonizer::spawn_daemon`] itself: it can block
@@ -478,7 +478,7 @@
 // channel ends across execve, silently defeating EOF liveness (EOF only fires
 // once ALL peer-end copies close). There we rely on the documented
 // spawn-at-startup caller contract instead. See the race discussion in
-// ipc/pipe/mod.rs.
+// ipc/channel/mod.rs.
 
 mod app;
 mod ipc;
@@ -494,18 +494,18 @@ pub use daemonizable_macros::main;
 
 // Re-exported so applications can name the typed handles they receive: the
 // client handle from `Daemonizer::spawn_daemon` and the server handle passed
-// to `Daemonizable::run_daemon`. `RpcConnection` — the pipe-pair owner used to
+// to `Daemonizable::run_daemon`. `RpcConnection` — the channel owner used to
 // build an in-process client+server for unit tests — is a `testutils`-only
 // construct (re-exported below), never named by production app code.
 pub use ipc::{RpcClient, RpcServer};
 
 // Typed errors returned by the IPC layer (thiserror, not anyhow) so callers
-// can match on failure modes, e.g. distinguish a peer that closed the pipe
-// (`PipeRecvError::SenderClosed`) from a timeout. Only errors reachable from
+// can match on failure modes, e.g. distinguish a peer that closed the channel
+// (`ChannelRecvError::SenderClosed`) from a timeout. Only errors reachable from
 // the stable public API are here; `InheritedFdsError` is produced solely by the
 // `testutils` fd-claim helper and is re-exported alongside it below.
 pub use ipc::{
-    DetachStdioError, HandshakeError, PipeCreateError, PipeRecvError, PipeSendError,
+    ChannelCreateError, ChannelRecvError, ChannelSendError, DetachStdioError, HandshakeError,
     SpawnDaemonError,
 };
 

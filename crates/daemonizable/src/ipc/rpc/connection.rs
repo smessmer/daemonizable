@@ -9,8 +9,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::RpcClient;
 #[cfg(any(test, feature = "testutils"))]
 use super::RpcServer;
-use crate::ipc::error::PipeCreateError;
-use crate::ipc::pipe::{Receiver, Sender, endpoint_from_stream};
+use crate::ipc::channel::{Receiver, Sender, endpoint_from_stream};
+use crate::ipc::error::ChannelCreateError;
 
 pub struct RpcConnection<Request, Response>
 where
@@ -35,12 +35,13 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    pub fn new_pipe() -> Result<Self, PipeCreateError> {
+    pub fn new_channel() -> Result<Self, ChannelCreateError> {
         // One full-duplex socketpair: the parent keeps one end (split into the
         // client's send/recv halves), the child gets the other.
-        let (parent_end, child_end) = UnixStream::pair().map_err(PipeCreateError::CreatePipe)?;
+        let (parent_end, child_end) =
+            UnixStream::pair().map_err(ChannelCreateError::CreateSocket)?;
         let (client_sender, client_receiver) =
-            endpoint_from_stream(parent_end).map_err(PipeCreateError::CreatePipe)?;
+            endpoint_from_stream(parent_end).map_err(ChannelCreateError::CreateSocket)?;
         Ok(Self {
             client_sender,
             client_receiver,
@@ -69,10 +70,12 @@ where
     #[cfg(any(test, feature = "testutils"))]
     pub fn into_server_and_client(
         self,
-    ) -> Result<(RpcServer<Request, Response>, RpcClient<Request, Response>), PipeCreateError> {
+    ) -> Result<(RpcServer<Request, Response>, RpcClient<Request, Response>), ChannelCreateError>
+    {
         // The in-process server clones the child end internally; a `dup` failure
-        // surfaces as a channel-creation error, same class as `new_pipe`'s.
-        let server = RpcServer::from_stream(self.child_end).map_err(PipeCreateError::CreatePipe)?;
+        // surfaces as a channel-creation error, same class as `new_channel`'s.
+        let server =
+            RpcServer::from_stream(self.child_end).map_err(ChannelCreateError::CreateSocket)?;
         let client = RpcClient::new(self.client_sender, self.client_receiver);
         Ok((server, client))
     }

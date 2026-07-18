@@ -16,7 +16,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use daemonizable::{PipeRecvError, PipeSendError, RpcClient, start_background_process_with_exe};
+use daemonizable::{
+    ChannelRecvError, ChannelSendError, RpcClient, start_background_process_with_exe,
+};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
@@ -58,7 +60,7 @@ fn test_child_panicking_after_request() {
     rpc.send_request(&Request { request: 42 }).unwrap();
     let response = rpc.recv_response(Duration::from_secs(2)).unwrap_err();
     assert!(
-        matches!(response, PipeRecvError::SenderClosed),
+        matches!(response, ChannelRecvError::SenderClosed),
         "expected SenderClosed, got: {response:?}"
     );
 }
@@ -68,7 +70,7 @@ fn test_child_panicking_before_request() {
     let mut rpc = spawn_daemon("panic_before_request");
     let response = rpc.recv_response(Duration::from_secs(2)).unwrap_err();
     assert!(
-        matches!(response, PipeRecvError::SenderClosed),
+        matches!(response, ChannelRecvError::SenderClosed),
         "expected SenderClosed, got: {response:?}"
     );
 }
@@ -79,7 +81,7 @@ fn test_child_exiting_after_request() {
     rpc.send_request(&Request { request: 42 }).unwrap();
     let response = rpc.recv_response(Duration::from_secs(2)).unwrap_err();
     assert!(
-        matches!(response, PipeRecvError::SenderClosed),
+        matches!(response, ChannelRecvError::SenderClosed),
         "expected SenderClosed, got: {response:?}"
     );
 }
@@ -89,7 +91,7 @@ fn test_child_exiting_before_request() {
     let mut rpc = spawn_daemon("exit_before_request");
     let response = rpc.recv_response(Duration::from_secs(2)).unwrap_err();
     assert!(
-        matches!(response, PipeRecvError::SenderClosed),
+        matches!(response, ChannelRecvError::SenderClosed),
         "expected SenderClosed, got: {response:?}"
     );
 }
@@ -101,11 +103,11 @@ fn test_child_send_request_after_daemon_exited() {
     // fail with `BrokenPipe` — not succeed into a buffer no one will read,
     // and not hang. Every synchronization point is an observed event, never
     // a delay:
-    //   1. EOF on the response pipe (`SenderClosed`) proves the daemon
-    //      reached its exit path and closed its pipe ends.
+    //   1. EOF on the channel (`SenderClosed`) proves the daemon
+    //      reached its exit path and closed its channel end.
     //   2. `waitpid` reaps the daemon (our direct child on this raw spawn
     //      path); once it returns, the process is fully gone, so every fd it
-    //      held — including the request pipe's read end — is closed and the
+    //      held — including the request direction — is closed and the
     //      send outcome below is deterministic.
     let tmp = tempfile::tempdir().unwrap();
     let pid_file = tmp.path().join("daemon.pid");
@@ -123,11 +125,11 @@ fn test_child_send_request_after_daemon_exited() {
 
     let err = rpc.recv_response(Duration::from_secs(5)).unwrap_err();
     assert!(
-        matches!(err, PipeRecvError::SenderClosed),
+        matches!(err, ChannelRecvError::SenderClosed),
         "expected SenderClosed, got: {err:?}"
     );
 
-    // The daemon wrote its pid file before touching its pipe ends
+    // The daemon wrote its pid file before touching its channel end
     // (`write_pid_then_exit`), so after the EOF above the file is guaranteed
     // present and complete — read it directly, no existence polling. The
     // blocking reap returns promptly for the same reason: EOF is only
@@ -145,7 +147,7 @@ fn test_child_send_request_after_daemon_exited() {
 
     let err = rpc.send_request(&Request { request: 1 }).unwrap_err();
     assert!(
-        matches!(&err, PipeSendError::Io(io) if io.kind() == std::io::ErrorKind::BrokenPipe),
+        matches!(&err, ChannelSendError::Io(io) if io.kind() == std::io::ErrorKind::BrokenPipe),
         "expected Io(BrokenPipe) when sending to an exited daemon, got: {err:?}"
     );
 }

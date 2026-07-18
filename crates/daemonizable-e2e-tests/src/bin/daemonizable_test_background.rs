@@ -6,7 +6,7 @@
 //! instead of forking an in-process fn pointer, so they no longer suffer the
 //! parallel-test fd-inheritance flake.
 
-use daemonizable::{PipeRecvError, PipeSendError, RpcServer, rpc_server_from_inherited_fds};
+use daemonizable::{ChannelRecvError, ChannelSendError, RpcServer, rpc_server_from_inherited_fds};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,7 +46,7 @@ fn main() {
             let request = match rpc.next_request() {
                 Ok(r) => r,
                 // Parent dropped the client → EOF → clean exit.
-                Err(PipeRecvError::SenderClosed) => std::process::exit(0),
+                Err(ChannelRecvError::SenderClosed) => std::process::exit(0),
                 Err(err) => {
                     // Any other error is a real daemon-side failure; surface
                     // it on stderr so a hung/failing parent test isn't the
@@ -188,7 +188,7 @@ fn main() {
             // moment `getppid()` stops being the spawner's pid. The kernel
             // reparents us only during the spawner's teardown, after its fds
             // are closed — so once the reparent is visible, the response
-            // pipe's only other end is guaranteed gone and the send outcome
+            // channel's only other end is guaranteed gone and the send outcome
             // is deterministic. (If the spawner died before we even started,
             // `getppid()` never equals its pid and the loop exits at once.)
             let outfile = std::path::PathBuf::from(
@@ -210,7 +210,7 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             let outcome = match rpc.send_response(&Response { response: 1 }) {
-                Err(PipeSendError::Io(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
+                Err(ChannelSendError::Io(err)) if err.kind() == std::io::ErrorKind::BrokenPipe => {
                     "send:broken_pipe".to_string()
                 }
                 Ok(()) => "send:unexpected_success".to_string(),

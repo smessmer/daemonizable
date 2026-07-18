@@ -1,11 +1,11 @@
+mod channel;
 mod cloexec;
 mod error;
-mod pipe;
 mod rpc;
 mod spawn;
 
 pub use error::{
-    DetachStdioError, HandshakeError, PipeCreateError, PipeRecvError, PipeSendError,
+    ChannelCreateError, ChannelRecvError, ChannelSendError, DetachStdioError, HandshakeError,
     SpawnDaemonError,
 };
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
