@@ -68,10 +68,12 @@ path = "src/bin/daemonizable_test_detach_stdio.rs"
 name = "daemonizable-test-detach-stdio-preclosed"
 path = "src/bin/daemonizable_test_detach_stdio_preclosed.rs"
 
-# Helper for tests/daemon_survives_parent_exit.rs. Stands in for a parent CLI:
-# launches the daemon via start_background_process_with_exe and exits, so the
-# test can assert the daemon survives its spawner's exit — without forking the
-# multithreaded libtest harness.
+# Helper for tests/daemon_survives_parent_exit.rs and
+# tests/daemon_send_after_foreground_exit.rs. Stands in for a parent CLI:
+# launches the daemon via start_background_process_with_exe and exits, so a
+# test can assert what the daemon observes after its spawner is gone (that it
+# survives; that its sends fail cleanly) — without forking the multithreaded
+# libtest harness.
 [[bin]]
 name = "daemonizable-test-spawn-then-exit"
 path = "src/bin/daemonizable_test_spawn_then_exit.rs"

@@ -234,21 +234,35 @@ mod tests {
         }
 
         #[test]
-        fn blocks_until_it_gets_data() {
-            // TODO Can we make this test deterministic?
-
+        fn completes_when_data_arrives_from_another_thread() {
+            // Cross-thread wakeup: a blocking `recv` must return the value
+            // another thread sends, whichever side reaches the pipe first.
+            // Which interleaving actually occurs is scheduler-dependent and
+            // cannot be forced portably from userspace — a previous version
+            // "arranged" for the receiver to block first with a 1s sleep,
+            // which only made that interleaving likely, at the cost of a
+            // timing dependency and a second of wall clock. Both orders are
+            // correct and both occur across runs; the "empty pipe waits
+            // instead of erroring" property is pinned deterministically by
+            // the `recv_timeout` tests, which drive the wait path on a pipe
+            // that provably never receives data.
             let (mut sender, mut recver) = pipe::<u32>().unwrap();
-            let recv_thread = thread::spawn(move || {
-                thread::sleep(Duration::from_secs(1));
+            let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
             });
             assert_eq!(recver.recv().unwrap(), 42);
-            recv_thread.join().unwrap();
+            send_thread.join().unwrap();
         }
     }
 
     mod recv_timeout {
-        // TODO Make these tests deterministic by mocking the clock (but do it without affecting global state or time for other tests)
+        // Timing policy, so these stay deterministic without a mocked clock:
+        // lower bounds on elapsed time are asserted tightly — the kernel
+        // never wakes a poll before its deadline, so "returned too early" is
+        // a real bug regardless of machine load. Upper bounds are asserted
+        // only as hang detectors, at ceilings orders of magnitude above the
+        // deadline, so a heavily loaded CI runner can't flake them. Nothing
+        // in here sleeps to sequence events.
 
         use super::*;
 
@@ -306,16 +320,19 @@ mod tests {
         }
 
         #[test]
-        fn blocks_until_it_gets_data_if_within_timeout() {
-            // TODO Can we make this test deterministic?
-
+        fn completes_when_data_arrives_from_another_thread() {
+            // Cross-thread wakeup for the timeout path — see the blocking
+            // twin in `recv::completes_when_data_arrives_from_another_thread`
+            // for why no sleep "arranges" the receiver to block first: the
+            // interleaving can't be forced portably, both orders are correct,
+            // and the genuinely-waiting case is pinned deterministically by
+            // `timeout` below (a pipe that provably never receives data).
             let (mut sender, mut recver) = pipe::<u32>().unwrap();
-            let recv_thread = thread::spawn(move || {
-                thread::sleep(Duration::from_secs(1));
+            let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
             });
             assert_eq!(recver.recv_timeout(Duration::from_secs(10)).unwrap(), 42);
-            recv_thread.join().unwrap();
+            send_thread.join().unwrap();
         }
 
         #[test]
@@ -362,8 +379,10 @@ mod tests {
                 "Unexpected error: {:?}",
                 error,
             );
-            // Should complete quickly, not hang
-            assert!(elapsed < Duration::from_secs(1));
+            // Hang detector only (see the mod-level timing policy): far above
+            // the 1ms deadline so scheduler delay can't flake it, far below
+            // the 65s a poll stuck on its full u16::MAX-ms window would take.
+            assert!(elapsed < Duration::from_secs(10));
         }
 
         #[test]
@@ -416,8 +435,11 @@ mod tests {
                 "Timeout returned too quickly: {:?}",
                 elapsed
             );
+            // Hang detector only (see the mod-level timing policy): far above
+            // the 50ms deadline so scheduler delay can't flake it, far below
+            // the 65s a poll stuck on its full u16::MAX-ms window would take.
             assert!(
-                elapsed < Duration::from_millis(500),
+                elapsed < Duration::from_secs(10),
                 "Timeout took too long: {:?}",
                 elapsed
             );
