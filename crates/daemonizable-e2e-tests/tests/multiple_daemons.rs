@@ -164,15 +164,16 @@ fn foreground_spawns_many_daemons_sequentially_each_isolated() {
 }
 
 // Concurrent `spawn_daemon` from several threads is race-free only on targets
-// with `pipe2(O_CLOEXEC)` (Linux/Android, the *BSDs, …), where the pipe fds are
-// close-on-exec from creation. macOS/iOS lack `pipe2`, so the crate documents a
-// narrow spawn-time window there in which one thread's `Command::spawn` can leak
-// another thread's not-yet-CLOEXEC pipe ends across `execve` — which would keep
-// a daemon's channel open past its client drop, defeat EOF liveness, and hang
-// this test's `Command::output()`. That is exactly the case the library's
-// caller contract says to avoid (spawn before starting other subprocesses), so
-// exercising the concurrent path is only valid on the pipe2 platforms; the
-// serial `--spawn-many` / `--spawn-interleaved` tests cover macOS.
+// with `SOCK_CLOEXEC` (Linux/Android, the *BSDs, …), where the channel fds are
+// close-on-exec from creation. macOS/iOS lack `SOCK_CLOEXEC`, so the crate
+// documents a narrow spawn-time window there in which one thread's
+// `Command::spawn` can leak another thread's not-yet-CLOEXEC channel ends across
+// `execve` — which would keep a daemon's channel open past its client drop,
+// defeat EOF liveness, and hang this test's `Command::output()`. That is exactly
+// the case the library's caller contract says to avoid (spawn before starting
+// other subprocesses), so exercising the concurrent path is only valid on the
+// SOCK_CLOEXEC platforms; the serial `--spawn-many` / `--spawn-interleaved`
+// tests cover macOS.
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[test]
 fn foreground_spawns_many_daemons_concurrently_from_threads() {

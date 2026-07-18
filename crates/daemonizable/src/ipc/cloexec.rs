@@ -1,9 +1,11 @@
 //! Shared helper for setting `FD_CLOEXEC` on a file descriptor.
 //!
-//! Two call sites need this: the macOS pipe-creation fallback (platforms
-//! without `pipe2(O_CLOEXEC)`), and the daemon child restoring the flag on the
-//! RPC fds it inherited across `execve` (the spawn's `dup2` onto fds 3/4 clears
-//! it). Keeping the flag-preserving read-modify-write in one place means each
+//! The daemon child uses this to restore the flag on the RPC fd(s) it inherited
+//! across `execve` — the spawn's `dup2` onto the fixed fd numbers clears
+//! `FD_CLOEXEC` so they survive the exec, and it must be re-set so the daemon's
+//! own subprocesses don't inherit the channel. (Channel *creation* no longer
+//! needs this: `UnixStream::pair` sets `FD_CLOEXEC` on the fds it creates
+//! itself.) Keeping the flag-preserving read-modify-write in one place means the
 //! caller just hands over a `BorrowedFd` it already holds.
 
 use std::os::fd::BorrowedFd;
@@ -32,8 +34,12 @@ mod tests {
 
     #[test]
     fn sets_cloexec_on_a_fd_that_lacks_it() {
-        // A raw interprocess pipe end does not have CLOEXEC set by default.
-        let (sender, _recver) = interprocess::unnamed_pipe::pipe().unwrap();
+        use std::os::unix::net::UnixStream;
+
+        // `UnixStream::pair` sets CLOEXEC, so clear it first to observe
+        // `set_cloexec` re-adding it (mirrors the daemon-side restore, where
+        // the spawn's `dup2` had cleared the flag).
+        let (sender, _recver) = UnixStream::pair().unwrap();
         let fd = sender.as_fd();
 
         // Precondition: clear the flag so we can observe set_cloexec setting it.

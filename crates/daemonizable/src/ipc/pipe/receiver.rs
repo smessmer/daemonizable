@@ -1,17 +1,16 @@
-//! The read half of the typed IPC pipe: [`Receiver`], plus the
+//! The read half of the typed IPC channel: [`Receiver`], plus the
 //! timeout-bounded read machinery it uses to enforce deadlines without
 //! busy-waiting.
 
 use std::io::Read;
 use std::marker::PhantomData;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-// `set_nonblocking` on the raw `interprocess` recver comes from this extension
-// trait; it's used both by [`Receiver`]'s timeout receives and by the tests
-// that drive the poll loop directly.
-use interprocess::os::unix::unnamed_pipe::UnnamedPipeExt;
+use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+use nix::sys::socket::{MsgFlags, recv};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::MAX_MESSAGE_SIZE;
@@ -21,10 +20,10 @@ pub struct Receiver<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    recver: interprocess::unnamed_pipe::Recver,
+    recver: UnixStream,
     /// Set once a receive consumes part of a message frame and then fails,
     /// leaving the stream desynchronized (see [`PipeRecvError::Desynchronized`]).
-    /// Once set, every receive fails fast without touching the pipe.
+    /// Once set, every receive fails fast without touching the socket.
     poisoned: bool,
     _p: PhantomData<T>,
 }
@@ -33,7 +32,7 @@ impl<T> Receiver<T>
 where
     T: Serialize + DeserializeOwned,
 {
-    pub(super) fn new(recver: interprocess::unnamed_pipe::Recver) -> Self {
+    pub(super) fn new(recver: UnixStream) -> Self {
         Self {
             recver,
             poisoned: false,
@@ -42,10 +41,11 @@ where
     }
 
     /// Construct a typed `Receiver` from a raw owned file descriptor that the
-    /// caller has verified is the read end of a pipe inherited across `execve`.
-    /// Used by the fork+exec daemon child to rebuild its `RpcServer`.
+    /// caller has verified is one end of a connected `AF_UNIX` socket inherited
+    /// across `execve`. Used by the fork+exec daemon child to rebuild its
+    /// `RpcServer`.
     pub fn from_owned_fd(fd: OwnedFd) -> Self {
-        Self::new(interprocess::unnamed_pipe::Recver::from(fd))
+        Self::new(UnixStream::from(fd))
     }
 
     /// Surrender the typed wrapper and recover the underlying owned file
@@ -64,8 +64,8 @@ where
     /// Receive a length-prefixed raw byte payload without postcard decoding,
     /// bounded by `timeout`. Used by the parent CLI to bound how long it'll
     /// wait for the daemon's build-id handshake — without a timeout,
-    /// exec'ing a binary that opens fd 4 but never writes (or hangs) would
-    /// hang the CLI forever.
+    /// exec'ing a binary that opens the channel fd but never writes (or hangs)
+    /// would hang the CLI forever.
     ///
     /// If a `Timeout` fires after part of a frame was already consumed, or the
     /// length prefix declares an oversized payload that is then left unread, the
@@ -77,7 +77,6 @@ where
         if self.poisoned {
             return Err(PipeRecvError::Desynchronized);
         }
-        self.recver.set_nonblocking(true)?;
         let timeout_at = deadline_from(timeout);
 
         // Length prefix. A timeout that consumed 0 bytes is a clean idle poll
@@ -86,7 +85,7 @@ where
         let mut len_bytes = [0u8; 4];
         let mut prefix_read = 0;
         if let Err(err) = read_exact_with_timeout(
-            &mut self.recver,
+            self.recver.as_fd(),
             &mut len_bytes,
             timeout_at,
             &mut prefix_read,
@@ -113,7 +112,7 @@ where
         let mut buf = vec![0u8; len];
         let mut payload_read = 0;
         if let Err(err) =
-            read_exact_with_timeout(&mut self.recver, &mut buf, timeout_at, &mut payload_read)
+            read_exact_with_timeout(self.recver.as_fd(), &mut buf, timeout_at, &mut payload_read)
         {
             if matches!(err, PipeRecvError::Timeout) {
                 self.poisoned = true;
@@ -143,7 +142,9 @@ where
         if self.poisoned {
             return Err(PipeRecvError::Desynchronized);
         }
-        self.recver.set_nonblocking(false)?;
+        // The socket is blocking (never toggled — see `Receiver`'s timeout
+        // path), so `read_exact` blocks until the frame arrives or the peer
+        // closes.
         let mut len_bytes = [0u8; 4];
         self.recver
             .read_exact(&mut len_bytes)
@@ -194,23 +195,35 @@ fn deadline_from(timeout: Duration) -> Instant {
         .unwrap_or(now)
 }
 
-/// `read_exact` on a blocking pipe reports a closed write end as
-/// `UnexpectedEof`. Normalize that into [`PipeRecvError::SenderClosed`] so
-/// EOF has a single variant across blocking and timeout-bounded receives
-/// (the timeout path detects EOF itself via `read() == Ok(0)`).
+/// `read_exact` on a blocking socket reports a closed peer as `UnexpectedEof`
+/// (a clean `shutdown`/close with the read queue drained) or as
+/// `ConnectionReset` (the peer was killed/closed while its OWN receive queue
+/// still held unread bytes — an `AF_UNIX` behavior pipes never exhibit).
+/// Normalize both into [`PipeRecvError::SenderClosed`] so EOF has a single
+/// variant across blocking and timeout-bounded receives (the timeout path
+/// detects the same conditions via `recv() == Ok(0)` / `ECONNRESET`).
 fn normalize_blocking_read_err(e: std::io::Error) -> PipeRecvError {
-    if e.kind() == std::io::ErrorKind::UnexpectedEof {
-        PipeRecvError::SenderClosed
-    } else {
-        PipeRecvError::Io(e)
+    match e.kind() {
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset => {
+            PipeRecvError::SenderClosed
+        }
+        _ => PipeRecvError::Io(e),
     }
 }
 
-/// Reads exactly `buf.len()` bytes or fails. `*bytes_read` is updated with how
-/// many bytes were consumed; on a `Timeout` the caller inspects it to tell a
-/// clean idle timeout (0) from a mid-frame one (>0).
-fn read_exact_with_timeout<R: Read + AsFd>(
-    reader: &mut R,
+/// Reads exactly `buf.len()` bytes or fails, bounded by `timeout_at`. `*bytes_read`
+/// is updated with how many bytes were consumed; on a `Timeout` the caller
+/// inspects it to tell a clean idle timeout (0) from a mid-frame one (>0).
+///
+/// The socket is left BLOCKING throughout: readiness is awaited with `poll`,
+/// and the actual read uses `recv(MSG_DONTWAIT)` so it never blocks even on a
+/// spurious poll wake-up. This deliberately avoids toggling the description's
+/// `O_NONBLOCK` — the sender may share this same open file description (they are
+/// two ends... two clones of one socket once the channel is collapsed to a
+/// single fd), and flipping `O_NONBLOCK` would corrupt the sender's blocking
+/// writes.
+fn read_exact_with_timeout(
+    fd: BorrowedFd<'_>,
     buf: &mut [u8],
     timeout_at: Instant,
     bytes_read: &mut usize,
@@ -219,11 +232,11 @@ fn read_exact_with_timeout<R: Read + AsFd>(
     // wait at most ~65.5s; the impl loops across windows up to the real
     // deadline. `u16::MAX` is the production window; tests pass a small one to
     // drive the multi-window path without a 65s wait.
-    read_exact_with_timeout_impl(reader, buf, timeout_at, u16::MAX, bytes_read)
+    read_exact_with_timeout_impl(fd, buf, timeout_at, u16::MAX, bytes_read)
 }
 
-fn read_exact_with_timeout_impl<R: Read + AsFd>(
-    reader: &mut R,
+fn read_exact_with_timeout_impl(
+    fd: BorrowedFd<'_>,
     buf: &mut [u8],
     timeout_at: Instant,
     max_poll_window_ms: u16,
@@ -231,37 +244,49 @@ fn read_exact_with_timeout_impl<R: Read + AsFd>(
 ) -> Result<(), PipeRecvError> {
     *bytes_read = 0;
     while *bytes_read < buf.len() {
-        match reader.read(&mut buf[*bytes_read..]) {
+        // Read without blocking first. `MSG_DONTWAIT` makes this recv
+        // non-blocking regardless of the socket's (blocking) mode. Reading
+        // before polling means data already waiting is consumed even when the
+        // deadline has already passed (e.g. a `Duration::ZERO` timeout with a
+        // ready frame).
+        match recv(
+            fd.as_raw_fd(),
+            &mut buf[*bytes_read..],
+            MsgFlags::MSG_DONTWAIT,
+        ) {
             Ok(0) => return Err(PipeRecvError::SenderClosed),
-            Ok(n) => *bytes_read += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Wait for data using poll() instead of busy-waiting
-                loop {
-                    let remaining = timeout_at.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        return Err(PipeRecvError::Timeout);
-                    }
-
-                    let poll_fd = PollFd::new(reader.as_fd(), PollFlags::POLLIN);
-                    // Cap each poll wait at `max_poll_window_ms`. When `remaining`
-                    // exceeds that window a single `poll` expires before the real
-                    // deadline — so on expiry we loop back to the
-                    // `remaining.is_zero()` check above rather than erroring, which
-                    // would cut any timeout longer than one window short.
-                    let timeout_ms: u16 = remaining
-                        .as_millis()
-                        .try_into()
-                        .unwrap_or(max_poll_window_ms)
-                        .min(max_poll_window_ms);
-                    match poll(&mut [poll_fd], PollTimeout::from(timeout_ms)) {
-                        Ok(0) => continue, // poll window expired; re-check the real deadline
-                        Ok(_) => break,    // Data available, retry read
-                        Err(nix::errno::Errno::EINTR) => continue, // Interrupted, retry poll
-                        Err(e) => return Err(PipeRecvError::Io(e.into())),
-                    }
-                }
+            Ok(n) => {
+                *bytes_read += n;
+                continue;
             }
-            Err(e) => return Err(PipeRecvError::Io(e)),
+            // Nothing available yet → fall through to poll below.
+            Err(Errno::EAGAIN) => {}
+            Err(Errno::EINTR) => continue,
+            // Peer died with unread data queued on its side — treat as EOF.
+            Err(Errno::ECONNRESET) => return Err(PipeRecvError::SenderClosed),
+            Err(e) => return Err(PipeRecvError::Io(std::io::Error::from(e))),
+        }
+
+        // Not ready: wait for readiness using poll() instead of busy-waiting.
+        let remaining = timeout_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(PipeRecvError::Timeout);
+        }
+        let poll_fd = PollFd::new(fd, PollFlags::POLLIN);
+        // Cap each poll wait at `max_poll_window_ms`. When `remaining` exceeds
+        // that window a single `poll` expires before the real deadline — so on
+        // expiry we loop back (retry the recv, then re-check the real deadline)
+        // rather than erroring, which would cut any timeout longer than one
+        // window short.
+        let timeout_ms: u16 = remaining
+            .as_millis()
+            .try_into()
+            .unwrap_or(max_poll_window_ms)
+            .min(max_poll_window_ms);
+        match poll(&mut [poll_fd], PollTimeout::from(timeout_ms)) {
+            Ok(_) => continue,             // readable, or window expired — retry the recv
+            Err(Errno::EINTR) => continue, // interrupted, retry
+            Err(e) => return Err(PipeRecvError::Io(e.into())),
         }
     }
     Ok(())
@@ -313,10 +338,9 @@ mod tests {
         use std::io::Write;
         use std::thread;
 
-        // Drive the poll loop against a raw pipe so we can write unframed bytes
-        // directly (the typed `Sender::send` would length-prefix them).
-        let (mut raw_sender, mut raw_recver) = interprocess::unnamed_pipe::pipe().unwrap();
-        raw_recver.set_nonblocking(true).unwrap();
+        // Drive the poll loop against a raw socketpair so we can write unframed
+        // bytes directly (the typed `Sender::send` would length-prefix them).
+        let (mut raw_sender, raw_recver) = UnixStream::pair().unwrap();
 
         let writer = thread::spawn(move || {
             // Arrives after ~3 windows of the 20ms cap below.
@@ -328,7 +352,7 @@ mod tests {
         let mut buf = [0u8; 4];
         let mut bytes_read = 0;
         read_exact_with_timeout_impl(
-            &mut raw_recver,
+            raw_recver.as_fd(),
             &mut buf,
             Instant::now() + Duration::from_secs(5),
             /* max_poll_window_ms */ 20,
@@ -344,14 +368,13 @@ mod tests {
     // buggy `Ok(0) => bail!` would return after ~20ms.
     #[test]
     fn read_exact_with_timeout_waits_full_deadline_not_one_poll_window() {
-        let (sender, mut recver) = crate::ipc::pipe::pipe::<u32>().unwrap();
-        recver.recver.set_nonblocking(true).unwrap();
+        let (sender, recver) = UnixStream::pair().unwrap();
 
         let mut buf = [0u8; 4];
         let mut bytes_read = 0;
         let start = Instant::now();
         let err = read_exact_with_timeout_impl(
-            &mut recver.recver,
+            recver.as_fd(),
             &mut buf,
             start + Duration::from_millis(120),
             /* max_poll_window_ms */ 20,

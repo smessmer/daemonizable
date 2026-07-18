@@ -1,10 +1,13 @@
-//! Typed, length-prefixed IPC pipe primitive.
+//! Typed, length-prefixed IPC channel primitive.
 //!
-//! [`pipe`] creates a connected [`Sender`]/[`Receiver`] pair whose fds are set
-//! `FD_CLOEXEC` so they don't leak across the fork+exec daemon spawn. The two
-//! ends live in their own modules: [`mod@sender`] owns the write side,
-//! [`mod@receiver`] the read side (including the timeout-bounded read
-//! machinery). Both share the [`MAX_MESSAGE_SIZE`] wire-format cap defined here.
+//! [`pipe`] creates a connected [`Sender`]/[`Receiver`] pair over an `AF_UNIX`
+//! `SOCK_STREAM` socketpair whose fds are `FD_CLOEXEC` so they don't leak
+//! across the fork+exec daemon spawn. The two ends live in their own modules:
+//! [`mod@sender`] owns the write side, [`mod@receiver`] the read side
+//! (including the timeout-bounded read machinery). Both share the
+//! [`MAX_MESSAGE_SIZE`] wire-format cap defined here.
+
+use std::os::unix::net::UnixStream;
 
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -19,7 +22,8 @@ pub use sender::Sender;
 /// Maximum message size (1 MiB). Protects against DoS from malicious/buggy senders.
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-/// Create a new pipe that can be used across forking for interprocess communication.
+/// Create a new channel that can be used across forking for interprocess
+/// communication.
 ///
 /// Both ends are CLOEXEC so they're closed by the kernel during `execve`. The
 /// fork+exec daemon spawn relies on this: only fds explicitly remapped via
@@ -28,110 +32,47 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 ///
 /// # Closing the CLOEXEC race
 ///
-/// CLOEXEC has to be established *atomically* with pipe creation. Were it set
-/// in a second step (`fcntl(F_SETFD)` after `pipe()`), a concurrent thread that
-/// `fork()`s — directly, or indirectly via `Command::spawn` — in the window
-/// between the two calls would leak the still-inheritable pipe fds into an
+/// CLOEXEC has to be established *atomically* with socket creation. Were it set
+/// in a second step (`fcntl(F_SETFD)` after `socketpair()`), a concurrent thread
+/// that `fork()`s — directly, or indirectly via `Command::spawn` — in the window
+/// between the two calls would leak the still-inheritable socket fds into an
 /// unrelated child. Symptoms range from leaked fds to EOF never being delivered
-/// on the pipe (the rightful owner can't detect the far end being dropped while
-/// a stranger holds a duplicate write end).
+/// (the rightful owner can't detect the far end being dropped while a stranger
+/// holds a duplicate of the peer end).
 ///
-/// On Linux/Android, the *BSDs, and every other target that provides it, we
-/// create the pipe with `pipe2(O_CLOEXEC)`, which sets CLOEXEC in the same
-/// syscall — the window doesn't exist and the race is closed outright.
+/// [`UnixStream::pair`] is std's `socketpair(AF_UNIX, SOCK_STREAM, 0)`. On
+/// Linux/Android and every target with `SOCK_CLOEXEC`, std passes it so both
+/// fds are created close-on-exec in the same syscall — the window doesn't exist
+/// and the race is closed outright.
 ///
-/// **macOS/iOS have no `pipe2`** (nor `SOCK_CLOEXEC` for `socketpair`, nor any
-/// equivalent atomic primitive), so there we fall back to `pipe()` +
-/// `fcntl(F_SETFD)` and the window reopens. The standard workaround would be a
-/// process-wide fork lock that every fork site honors (CPython's `subprocess`
-/// does this with `_posixsubprocess._fork_lock`), but Rust's
-/// `std::process::Command` exposes no such lock we could take, so on those
-/// targets we rely on a usage-level invariant instead: no other thread may
-/// `fork()`/`Command::spawn()` while a pipe is being created. A running thread
-/// pool or async runtime is not itself a problem — only an actual concurrent
-/// fork in the CLOEXEC-set window is — but the simplest way to guarantee that
-/// is to spawn the daemon at startup, before the process begins spawning other
-/// subprocesses. This is a documented caller contract, not something the
-/// library can enforce at runtime on those platforms.
+/// **macOS/iOS have no `SOCK_CLOEXEC`**, so std creates the pair and then sets
+/// `FD_CLOEXEC` with a separate `ioctl(FIOCLEX)` on each fd, and the window
+/// reopens. The standard workaround would be a process-wide fork lock that every
+/// fork site honors (CPython's `subprocess` does this with
+/// `_posixsubprocess._fork_lock`), but Rust's `std::process::Command` exposes no
+/// such lock we could take, so on those targets we rely on a usage-level
+/// invariant instead: no other thread may `fork()`/`Command::spawn()` while a
+/// channel is being created. A running thread pool or async runtime is not
+/// itself a problem — only an actual concurrent fork in the CLOEXEC-set window
+/// is — but the simplest way to guarantee that is to spawn the daemon at
+/// startup, before the process begins spawning other subprocesses. This is a
+/// documented caller contract, not something the library can enforce at runtime
+/// on those platforms. (std also sets `SO_NOSIGPIPE` on the socket on Apple
+/// platforms, and passes `MSG_NOSIGNAL` on Linux writes, so a write to a closed
+/// peer surfaces as an `EPIPE` error rather than a `SIGPIPE`.)
 ///
-/// T: The type of the data that will be sent through the pipe.
+/// T: The type of the data that will be sent through the channel.
 pub fn pipe<T>() -> Result<(Sender<T>, Receiver<T>), PipeCreateError>
 where
     T: Serialize + DeserializeOwned,
 {
-    let (sender, recver) = create_pipe_ends()?;
+    // `UnixStream::pair()` returns two connected endpoints of one socketpair.
+    // A `SOCK_STREAM` socketpair is full-duplex, but here we use it
+    // unidirectionally: writes on the `Sender` end are read on the `Receiver`
+    // end. (The daemon channel collapses these into a single full-duplex fd; at
+    // this layer they are still one logical direction.)
+    let (sender, recver) = UnixStream::pair().map_err(PipeCreateError::CreatePipe)?;
     Ok((Sender::new(sender), Receiver::new(recver)))
-}
-
-/// Atomic path: `pipe2(O_CLOEXEC)` creates both ends with CLOEXEC already set,
-/// so there is no window in which the fds are inheritable. Compiled on exactly
-/// the targets for which `nix::unistd::pipe2` is available.
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_os = "emscripten",
-    target_os = "hurd",
-    target_os = "redox",
-    target_os = "netbsd",
-    target_os = "openbsd",
-    target_os = "cygwin",
-))]
-fn create_pipe_ends() -> Result<
-    (
-        interprocess::unnamed_pipe::Sender,
-        interprocess::unnamed_pipe::Recver,
-    ),
-    PipeCreateError,
-> {
-    use nix::fcntl::OFlag;
-    // `pipe2` returns (read end, write end); our `Sender` wraps the write end.
-    let (read_fd, write_fd) = nix::unistd::pipe2(OFlag::O_CLOEXEC)
-        .map_err(|errno| PipeCreateError::CreatePipe(std::io::Error::from(errno)))?;
-    Ok((
-        interprocess::unnamed_pipe::Sender::from(write_fd),
-        interprocess::unnamed_pipe::Recver::from(read_fd),
-    ))
-}
-
-/// Fallback path for targets without `pipe2` (macOS/iOS): create the pipe, then
-/// set CLOEXEC in a separate `fcntl` call. This reopens the create-vs-fork race
-/// documented on [`pipe`], mitigated by the caller's spawn-at-startup contract.
-#[cfg(not(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "solaris",
-    target_os = "illumos",
-    target_os = "emscripten",
-    target_os = "hurd",
-    target_os = "redox",
-    target_os = "netbsd",
-    target_os = "openbsd",
-    target_os = "cygwin",
-)))]
-fn create_pipe_ends() -> Result<
-    (
-        interprocess::unnamed_pipe::Sender,
-        interprocess::unnamed_pipe::Recver,
-    ),
-    PipeCreateError,
-> {
-    use std::os::fd::AsFd;
-
-    use crate::ipc::cloexec::set_cloexec;
-
-    let (sender, recver) =
-        interprocess::unnamed_pipe::pipe().map_err(PipeCreateError::CreatePipe)?;
-    for fd in [sender.as_fd(), recver.as_fd()] {
-        set_cloexec(fd)
-            .map_err(|(operation, source)| PipeCreateError::SetCloexec { operation, source })?;
-    }
-    Ok((sender, recver))
 }
 
 #[cfg(test)]
@@ -140,7 +81,7 @@ mod tests {
     use crate::ipc::error::{PipeRecvError, PipeSendError};
     use nix::fcntl::{FcntlArg, FdFlag, fcntl};
     use serde::Deserialize;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::fd::AsFd;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -149,19 +90,39 @@ mod tests {
     fn dropped_recver() {
         let (mut sender, recver) = pipe::<u32>().unwrap();
         drop(recver);
+        // Writing to a socket whose peer has closed returns EPIPE (an error),
+        // NOT a `SIGPIPE` that would kill the test process — std sets
+        // `MSG_NOSIGNAL`/`SO_NOSIGPIPE` on the write path. That this test
+        // returns rather than dying is itself the SIGPIPE-suppression check.
         assert!(sender.send(&42).is_err());
     }
 
     #[test]
-    fn pipe_ends_have_cloexec_set() {
-        // Both ends of pipes created by our `pipe()` wrapper must have
+    fn writing_after_peer_close_errors_without_sigpipe() {
+        // Stronger form of `dropped_recver`: multiple sends after the peer
+        // closed must each surface as an ordinary error and never raise
+        // `SIGPIPE` (which would abort the process, failing the test loudly).
+        // std uses `MSG_NOSIGNAL` (Linux) / `SO_NOSIGPIPE` (Apple), so this
+        // holds even for a process that reset SIGPIPE to its default.
+        let (mut sender, recver) = pipe::<u32>().unwrap();
+        drop(recver);
+        for _ in 0..4 {
+            let err = sender.send(&1).unwrap_err();
+            assert!(
+                matches!(err, PipeSendError::Io(_)),
+                "expected an Io(BrokenPipe) error, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_ends_have_cloexec_set() {
+        // Both ends of channels created by our `pipe()` wrapper must have
         // FD_CLOEXEC set, so they're closed automatically by the kernel when
-        // the daemon child execs the new binary. The underlying `interprocess`
-        // crate does not set CLOEXEC itself; on pipe2 targets (Linux and most
-        // other unixes) we create the fds via nix `pipe2(O_CLOEXEC)` — the
-        // flag is set atomically at creation and `interprocess` only wraps the
-        // ends — and only the macOS/iOS fallback sets the flag in a separate
-        // fcntl step after creation (see `create_pipe_ends`).
+        // the daemon child execs the new binary. `UnixStream::pair()` sets this
+        // atomically via `SOCK_CLOEXEC` on Linux (and with a separate
+        // `ioctl(FIOCLEX)` on macOS/iOS); either way std guarantees CLOEXEC on
+        // the fds it creates.
         let (sender, recver) = pipe::<u32>().unwrap();
         // Recover the owned fds so the descriptors stay valid for the fcntl
         // check below; they're closed when these `OwnedFd`s drop at the end.
@@ -174,7 +135,7 @@ mod tests {
             );
             assert!(
                 flags.contains(FdFlag::FD_CLOEXEC),
-                "{label} end of pipe is missing FD_CLOEXEC (flags={flags:?})",
+                "{label} end of channel is missing FD_CLOEXEC (flags={flags:?})",
             );
         }
     }
@@ -233,18 +194,40 @@ mod tests {
             );
         }
 
+        // On Linux, closing an AF_UNIX stream socket while unread bytes remain
+        // in ITS receive queue makes the peer's next read fail with
+        // `ECONNRESET` rather than a clean EOF — a case pipes never produced.
+        // The blocking receive must normalize that to `SenderClosed` too, not
+        // surface a raw `Io(ConnectionReset)`.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn peer_reset_with_unread_data_is_sender_closed() {
+            use std::os::unix::net::UnixStream;
+            let (a, b) = UnixStream::pair().unwrap();
+            // Put unread data into b's receive queue (a -> b), then close b
+            // without reading it: a's subsequent read gets ECONNRESET.
+            (&a).write_all(b"unread junk").unwrap();
+            drop(b);
+            let mut recver: Receiver<u32> = Receiver::new(a);
+            let error = recver.recv().unwrap_err();
+            assert!(
+                matches!(error, PipeRecvError::SenderClosed),
+                "Unexpected error: {error:?}",
+            );
+        }
+
         #[test]
         fn completes_when_data_arrives_from_another_thread() {
             // Cross-thread wakeup: a blocking `recv` must return the value
-            // another thread sends, whichever side reaches the pipe first.
+            // another thread sends, whichever side reaches the socket first.
             // Which interleaving actually occurs is scheduler-dependent and
             // cannot be forced portably from userspace — a previous version
             // "arranged" for the receiver to block first with a 1s sleep,
             // which only made that interleaving likely, at the cost of a
             // timing dependency and a second of wall clock. Both orders are
-            // correct and both occur across runs; the "empty pipe waits
+            // correct and both occur across runs; the "empty channel waits
             // instead of erroring" property is pinned deterministically by
-            // the `recv_timeout` tests, which drive the wait path on a pipe
+            // the `recv_timeout` tests, which drive the wait path on a channel
             // that provably never receives data.
             let (mut sender, mut recver) = pipe::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
@@ -265,6 +248,16 @@ mod tests {
         // in here sleeps to sequence events.
 
         use super::*;
+
+        /// A raw socketpair for driving unframed bytes at a `Receiver`: `.0` is
+        /// the write end (a plain `UnixStream`), `.1` is wrapped in the typed
+        /// `Receiver` under test. Replaces the old raw-`interprocess`-pipe
+        /// fixtures so the framing/poison tests run over the real socket
+        /// transport.
+        fn raw_channel<T: Serialize + DeserializeOwned>() -> (UnixStream, Receiver<T>) {
+            let (writer, reader) = UnixStream::pair().unwrap();
+            (writer, Receiver::new(reader))
+        }
 
         #[test]
         fn primitive_u32() {
@@ -326,7 +319,7 @@ mod tests {
             // for why no sleep "arranges" the receiver to block first: the
             // interleaving can't be forced portably, both orders are correct,
             // and the genuinely-waiting case is pinned deterministically by
-            // `timeout` below (a pipe that provably never receives data).
+            // `timeout` below (a channel that provably never receives data).
             let (mut sender, mut recver) = pipe::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
@@ -349,7 +342,7 @@ mod tests {
 
         #[test]
         fn zero_timeout_with_data_ready() {
-            // Data already in pipe, zero timeout should still succeed
+            // Data already in channel, zero timeout should still succeed
             let (mut sender, mut recver) = pipe::<u32>().unwrap();
             sender.send(&42).unwrap();
             assert_eq!(recver.recv_timeout(Duration::ZERO).unwrap(), 42);
@@ -388,12 +381,12 @@ mod tests {
         #[test]
         fn large_message() {
             // Large message that may require multiple read chunks
-            // Note: pipe buffers are typically 64KB, so we need to send/recv concurrently
+            // Note: socket buffers are finite, so we send/recv concurrently
             let (mut sender, mut recver) = pipe::<Vec<u8>>().unwrap();
             let large_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
             let expected = large_data.clone();
 
-            // Send in a separate thread to avoid blocking on full pipe buffer
+            // Send in a separate thread to avoid blocking on full socket buffer
             let send_thread = thread::spawn(move || {
                 sender.send(&large_data).unwrap();
             });
@@ -448,11 +441,7 @@ mod tests {
         #[test]
         fn timeout_waiting_for_payload() {
             // Sender sends length but not payload - tests timeout during payload read
-            use interprocess::unnamed_pipe::pipe as raw_pipe;
-            use std::io::Write;
-
-            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
-            let mut recver: Receiver<u32> = Receiver::new(raw_recver);
+            let (mut raw_sender, mut recver) = raw_channel::<u32>();
 
             // Send only the length prefix (4 bytes), not the payload
             let fake_len: u32 = 100;
@@ -480,11 +469,7 @@ mod tests {
         #[test]
         fn sender_closes_after_partial_length() {
             // Sender sends partial length then closes
-            use interprocess::unnamed_pipe::pipe as raw_pipe;
-            use std::io::Write;
-
-            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
-            let mut recver: Receiver<u32> = Receiver::new(raw_recver);
+            let (mut raw_sender, mut recver) = raw_channel::<u32>();
 
             // Send only 2 of 4 length bytes, then close
             raw_sender.write_all(&[1, 2]).unwrap();
@@ -501,11 +486,7 @@ mod tests {
         #[test]
         fn sender_closes_after_partial_payload() {
             // Sender sends length + partial payload then closes
-            use interprocess::unnamed_pipe::pipe as raw_pipe;
-            use std::io::Write;
-
-            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
-            let mut recver: Receiver<Vec<u8>> = Receiver::new(raw_recver);
+            let (mut raw_sender, mut recver) = raw_channel::<Vec<u8>>();
 
             // Send length indicating 100 bytes, but only send 10
             let len: u32 = 100;
@@ -550,8 +531,8 @@ mod tests {
         #[test]
         fn roundtrip_near_max_payload() {
             // A payload just under MAX_MESSAGE_SIZE must round-trip cleanly.
-            // Send/recv concurrently so we don't deadlock against the pipe's
-            // OS-level buffer (~64 KiB on Linux).
+            // Send/recv concurrently so we don't deadlock against the socket's
+            // OS-level buffer.
             let payload: Vec<u8> = (0..MAX_MESSAGE_SIZE - 4).map(|i| (i % 251) as u8).collect();
             let expected = payload.clone();
             let (mut sender, mut recver) = pipe::<u32>().unwrap();
@@ -569,7 +550,7 @@ mod tests {
             // we can verify that `send_raw` enforces the same limit as
             // `send`: it bails before touching the underlying fd, so a
             // dummy peer-less sender suffices.
-            let (sender, _recver) = interprocess::unnamed_pipe::pipe().unwrap();
+            let (sender, _recver) = UnixStream::pair().unwrap();
             let mut sender: Sender<u32> = Sender::new(sender);
             let oversized = vec![0u8; MAX_MESSAGE_SIZE + 1];
             let err = sender.send_raw(&oversized).unwrap_err();
@@ -601,7 +582,7 @@ mod tests {
             // little-endian u32 length. The fork+exec daemon child relies on
             // this format being stable across build_id mismatches (otherwise
             // the handshake check itself can't be validated).
-            let (sender, mut raw_recver) = interprocess::unnamed_pipe::pipe().unwrap();
+            let (sender, mut raw_recver) = UnixStream::pair().unwrap();
             let mut typed_sender: Sender<u32> = Sender::new(sender);
             typed_sender.send_raw(b"abc").unwrap();
             drop(typed_sender);
@@ -643,13 +624,16 @@ mod tests {
     /// timeout stays retryable.
     mod poison {
         use super::*;
-        use interprocess::unnamed_pipe::pipe as raw_pipe;
-        use std::io::Write;
+
+        /// Same raw-socketpair fixture as `recv_timeout::raw_channel`.
+        fn raw_channel<T: Serialize + DeserializeOwned>() -> (UnixStream, Receiver<T>) {
+            let (writer, reader) = UnixStream::pair().unwrap();
+            (writer, Receiver::new(reader))
+        }
 
         #[test]
         fn mid_frame_recv_timeout_poisons_receiver() {
-            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
-            let mut recver: Receiver<u32> = Receiver::new(raw_recver);
+            let (mut raw_sender, mut recver) = raw_channel::<u32>();
             // Length prefix promises 100 payload bytes; send none of them.
             raw_sender.write_all(&100u32.to_le_bytes()).unwrap();
             let _keep_sender = raw_sender; // hold open so this is a timeout, not EOF
@@ -659,7 +643,7 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, PipeRecvError::Timeout), "got {err:?}");
             // The prefix is consumed; the receiver is now desynchronized and
-            // every later receive fails fast without touching the pipe.
+            // every later receive fails fast without touching the socket.
             let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
             assert!(matches!(err, PipeRecvError::Desynchronized), "got {err:?}");
             // Poison is visible on the blocking path too.
@@ -685,8 +669,7 @@ mod tests {
 
         #[test]
         fn message_too_large_poisons_receiver() {
-            let (mut raw_sender, raw_recver) = raw_pipe().unwrap();
-            let mut recver: Receiver<u32> = Receiver::new(raw_recver);
+            let (mut raw_sender, mut recver) = raw_channel::<u32>();
             // Prefix consumed, oversized payload left unread → desynced.
             let too_big = (MAX_MESSAGE_SIZE as u32) + 1;
             raw_sender.write_all(&too_big.to_le_bytes()).unwrap();

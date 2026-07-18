@@ -6,22 +6,15 @@
 
 use thiserror::Error;
 
-/// Creating an IPC pipe pair failed.
+/// Creating an IPC channel pair failed.
 #[derive(Debug, Error)]
 pub enum PipeCreateError {
-    /// The underlying `pipe(2)` call failed.
-    #[error("Failed to create pipe: {0}")]
+    /// The underlying `socketpair(2)` call failed. `UnixStream::pair` sets
+    /// `FD_CLOEXEC` on the created fds itself (atomically via `SOCK_CLOEXEC`
+    /// where available), so a cloexec-setting failure folds into this same
+    /// `io::Error` rather than a separate variant.
+    #[error("Failed to create channel: {0}")]
     CreatePipe(#[source] std::io::Error),
-
-    /// Setting `FD_CLOEXEC` on a freshly created pipe end failed. The flag is
-    /// required so pipe fds don't leak into fork+exec'd children.
-    #[error("fcntl({operation}) failed while setting FD_CLOEXEC: {source}")]
-    SetCloexec {
-        /// Which fcntl operation failed (`"F_GETFD"` or `"F_SETFD"`).
-        operation: &'static str,
-        #[source]
-        source: std::io::Error,
-    },
 }
 
 /// Sending a message over an IPC pipe failed.
@@ -158,12 +151,12 @@ pub enum InheritedFdsError {
         source: std::io::Error,
     },
 
-    /// The fd is open but not a pipe — whatever happened to be open on that
+    /// The fd is open but not a socket — whatever happened to be open on that
     /// fd number is not the parent's IPC channel.
     #[error(
-        "fd {fd} ({label}) is not a pipe (st_mode={st_mode:#o}). This entry point is internal to this binary; do not invoke it directly."
+        "fd {fd} ({label}) is not a socket (st_mode={st_mode:#o}). This entry point is internal to this binary; do not invoke it directly."
     )]
-    NotAPipe {
+    NotASocket {
         fd: i32,
         label: &'static str,
         st_mode: libc::mode_t,
