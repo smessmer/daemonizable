@@ -43,11 +43,12 @@ trybuild.workspace = true
 name = "daemonizable-test-background"
 path = "src/bin/daemonizable_test_background.rs"
 
-# Minimal Daemonizable app used by the framework end-to-end test
-# (tests/framework_e2e.rs). Goes through the full production path —
-# run::<App>() env-marker dispatch, fork+exec re-exec spawn, build-id
-# handshake — where the test-background helper drives the raw IPC primitives
-# directly.
+# Minimal Daemonizable app used by the framework end-to-end tests
+# (tests/framework_e2e.rs, tests/multiple_daemons.rs,
+# tests/framework_daemon_survives_parent_exit.rs). Goes through the full
+# production path — run::<App>() argv-sentinel dispatch, fork+exec re-exec
+# spawn, build-id handshake — where the test-background helper drives the raw
+# IPC primitives directly.
 [[bin]]
 name = "daemonizable-test-app"
 path = "src/bin/daemonizable_test_app.rs"
