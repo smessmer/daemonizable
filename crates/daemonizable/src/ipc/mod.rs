@@ -9,9 +9,11 @@ pub use error::{
     SpawnDaemonError,
 };
 pub use rpc::{RpcClient, RpcConnection, RpcServer};
+#[cfg(any(test, feature = "testutils"))]
+pub(crate) use spawn::stage_token;
 pub(crate) use spawn::{
-    DAEMON_STAGE1_ARGV, DAEMON_STAGE2_ARGV, daemon_exe_path, spawn_daemon_process,
-    validate_inherited_fds,
+    StageDispatch, channel_has_stage2_token, daemon_exe_path, dispatch_from_channel,
+    spawn_daemon_process, verify_channel_peer_uid,
 };
 // `send_handshake` / `rpc_server_from_inherited_fds` are also used internally by
 // the daemon-child arm (`app::daemon_child`), so they stay crate-visible here

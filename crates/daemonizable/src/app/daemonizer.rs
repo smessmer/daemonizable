@@ -47,9 +47,9 @@ impl<A: Daemonizable> Daemonizer<A> {
     ///
     /// Blocks until the daemon has passed the build-id handshake. Any
     /// configuration the daemon needs travels afterwards as an ordinary
-    /// request on the returned client (it gets no app arguments — its argv
-    /// carries only an internal framework sentinel — so it can't parse flags
-    /// itself).
+    /// request on the returned client (it gets no app arguments — its argv is
+    /// empty, since stage identity rides an in-band channel token, not argv —
+    /// so it can't parse flags itself).
     ///
     /// The daemon is a **grandchild**: the re-exec'd child forks again after
     /// `setsid` so it is never a session leader (and can never acquire a

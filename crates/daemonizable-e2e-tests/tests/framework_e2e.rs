@@ -44,17 +44,17 @@ fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
     // RPC round-tripped through `run_daemon`. "cwd:/" proves the framework
     // chdir'd the daemon to `/` instead of pinning the parent's cwd.
     // "marker:removed" proves no framework env var exists in the daemon's
-    // environment (stage identity rides argv now — nothing is ever set, so
-    // nothing can leak to the daemon's own children; this pins that absence
-    // against any future design change). "argv1:sentinel" pins the documented
-    // argv contract: the stage-2 sentinel stays visible in the daemon's
-    // std::env::args() for its whole lifetime.
+    // environment (stage identity rides an in-band channel token now — nothing
+    // is ever set, so nothing can leak to the daemon's own children; this pins
+    // that absence against any future design change). "argv1:empty" pins the
+    // argv contract: the daemon receives NO arguments (only argv[0]), since the
+    // token is carried in-band on the channel fd, not in argv.
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
     let fields = parse_outfile(&result);
     assert_eq!(fields["parent-got"], "43", "outfile: {result}");
     assert_eq!(fields["cwd"], "/", "outfile: {result}");
     assert_eq!(fields["marker"], "removed", "outfile: {result}");
-    assert_eq!(fields["argv1"], "sentinel", "outfile: {result}");
+    assert_eq!(fields["argv1"], "empty", "outfile: {result}");
 
     // Session assertions — the payoff of the framework's `setsid` + second fork.
     let daemon_sid: i32 = fields["sid"].parse().expect("sid not an int");
@@ -115,67 +115,45 @@ fn foreground_dispatch_runs_run_foreground_without_spawning() {
     assert_eq!("foreground-ran", result);
 }
 
-/// Spawn the test app with `arg` as its first argument and the channel fd (3)
-/// known CLOSED in the child, then assert the daemon-stage arm rejects it: exit
-/// code 2 and the fstat-guard message. Shared by both sentinel-rejection
-/// tests. The explicit close matters: the harness environment can leave a
-/// non-CLOEXEC socket/FIFO on a low fd number (the classic case is an old-style
-/// GNU make jobserver wrapping `cargo test`), which could pass the socket probe
-/// and turn this test into a hang that eats jobserver tokens. (fd 4 is closed
-/// too for good measure, though the framework no longer uses it.)
-fn assert_sentinel_rejected(arg: &str) {
-    use std::os::unix::process::CommandExt;
+/// Spawn the test app with `arg` as its first argument (the way a shell
+/// hand-run would) and assert it is treated as an ORDINARY foreground argument,
+/// not a daemon-stage trigger. Dispatch reads only the in-band channel token on
+/// fd 3 now, so the former argv sentinels are inert as dispatch signals: the app
+/// runs `run_foreground`, whose hand-rolled parser rejects the unknown argument
+/// with its own "unknown argument" message — proving the process was NOT
+/// hijacked into a daemon stage (which would print "internal to this binary").
+fn assert_former_sentinel_is_foreground(arg: &str) {
+    let output = Command::new(test_app_exe())
+        .arg(arg)
+        .output()
+        .expect("failed to spawn daemonizable-test-app");
 
-    let mut cmd = Command::new(test_app_exe());
-    cmd.arg(arg);
-    // SAFETY: the pre_exec closure runs in the forked child before exec and
-    // may only run async-signal-safe code: `close` on two bare fd ints
-    // qualifies (a not-open fd yields EBADF, which is fine — the goal is
-    // "known closed"). It touches no memory beyond its own constants.
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::close(3);
-            libc::close(4);
-            Ok(())
-        });
-    }
-    let output = cmd.output().expect("failed to spawn daemonizable-test-app");
-
-    assert!(
-        !output.status.success(),
-        "the {arg} sentinel without inherited fds must fail, but it succeeded"
-    );
-    assert_eq!(
-        Some(2),
-        output.status.code(),
-        "the daemon-stage arm must exit with code 2 when the fd probe fails"
-    );
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // Reached the app's own foreground argument parser...
     assert!(
-        stderr.contains("internal to this binary; do not invoke it directly"),
-        "expected the fstat-guard message on stderr, got: {stderr}"
+        stderr.contains(&format!("unknown argument: {arg}")),
+        "expected the foreground arg parser to reject {arg:?}, got stderr: {stderr}"
+    );
+    // ...and did NOT go down any daemon-stage arm.
+    assert!(
+        !stderr.contains("internal to this binary"),
+        "the {arg} argument was routed to a daemon stage; it must be inert as a \
+         dispatch signal now. stderr: {stderr}"
     );
 }
 
 #[test]
-fn stage1_sentinel_from_shell_is_rejected() {
-    // The stage-1 argv sentinel is internal plumbing: an invocation passing
-    // it by hand has nothing plumbed on fd 3, so stage 1's pre-fork probe must
-    // refuse with a clear message — before setsid, before any process is
-    // forked. (Literal deliberately hard-coded, kept in sync with
-    // DAEMON_STAGE1_ARGV in ipc/spawn/mod.rs: if they drift, dispatch falls
-    // through to the foreground arm and this test fails on the exit code.)
-    assert_sentinel_rejected("__daemonizable-stage1");
+fn former_stage1_sentinel_is_an_ordinary_argument() {
+    // The old stage-1 argv sentinel is no longer a dispatch signal — dispatch
+    // reads the channel token on fd 3, never argv. Passing it by hand must reach
+    // the app's foreground code as a plain (here, unrecognized) argument.
+    assert_former_sentinel_is_foreground("__daemonizable-stage1");
 }
 
 #[test]
-fn stage2_sentinel_from_shell_is_rejected() {
-    // Same for the stage-2 sentinel: without the framework's plumbed fds the
-    // claim must refuse. (Command-spawned children are not session/group
-    // leaders, so this exercises the fd probe, not the leader guard — the
-    // guard is exercised implicitly by every shell hand-run.) Literal kept
-    // in sync with DAEMON_STAGE2_ARGV in ipc/spawn/mod.rs, as above.
-    assert_sentinel_rejected("__daemonizable-daemon");
+fn former_stage2_sentinel_is_an_ordinary_argument() {
+    // Same for the old stage-2 sentinel.
+    assert_former_sentinel_is_foreground("__daemonizable-daemon");
 }
 
 #[test]

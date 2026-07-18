@@ -15,7 +15,7 @@ use command_fds::{CommandFdExt, FdMapping};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::handshake::validate_handshake_and_build_client;
-use super::{DAEMON_CHANNEL_FD, DAEMON_STAGE1_ARGV};
+use super::{DAEMON_CHANNEL_FD, TOKEN_LEN, TOKEN_STAGE1, TOKEN_STAGE2, stage_token};
 use crate::ipc::RpcClient;
 use crate::ipc::RpcConnection;
 use crate::ipc::error::SpawnDaemonError;
@@ -170,14 +170,14 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
 }
 
 /// Spawn the current binary as a background daemon via fork+exec — the
-/// engine behind `Daemonizer::spawn_daemon`. Re-execs the current binary
-/// with the [`DAEMON_STAGE1_ARGV`] sentinel as its only argument (stage
-/// identity rides argv, see the sentinel docs in `spawn::mod`; the child
-/// receives its full-duplex channel as fd `DAEMON_CHANNEL_FD` (3); every
-/// other fd the framework or Rust's std opened carries `FD_CLOEXEC`, so the
-/// kernel closes those during `execve` — fds the application deliberately
-/// created *non*-CLOEXEC still survive into the daemon) and validates the
-/// build-id handshake.
+/// engine behind `Daemonizer::spawn_daemon`. Re-execs the current binary with
+/// an EMPTY argv (stage identity rides an in-band channel token, not argv — see
+/// `TOKEN_MAGIC`'s doc in `spawn::mod`; the parent pre-queues both stage tokens
+/// into the channel before the spawn). The child receives its full-duplex
+/// channel as fd `DAEMON_CHANNEL_FD` (3); every other fd the framework or Rust's
+/// std opened carries `FD_CLOEXEC`, so the kernel closes those during `execve` —
+/// fds the application deliberately created *non*-CLOEXEC still survive into the
+/// daemon. Validates the build-id handshake.
 ///
 /// The handshake is a raw (not postcard-encoded) frame *from* the daemon
 /// child, bounded by `HANDSHAKE_TIMEOUT`, and the spawn is rejected if the
@@ -217,11 +217,23 @@ where
     // fallback, `current_exe()` also fails, so argv[0] becomes `exe`, which is
     // then already the real AT_EXECFN / argv[0] path — still recognizable.)
     let argv0 = std::env::current_exe().unwrap_or_else(|_| exe.clone());
+    // Pre-queue both stage-identity tokens into the parent→daemon direction:
+    // `TOKEN_MAGIC ‖ TOKEN_STAGE1` then `TOKEN_MAGIC ‖ TOKEN_STAGE2`, as one
+    // contiguous write before the spawn. Stage 1's dispatch consumes token 1,
+    // stage 2's (in the re-exec'd image) consumes token 2, then the framed RPC
+    // begins. The daemon's argv stays EMPTY — stage identity no longer rides
+    // argv (see `TOKEN_MAGIC`'s doc). The tokens are written by
+    // `start_background_process_inner` after the client is built; the test-only
+    // `*_with_exe` spawns pass `None` and never pollute their stream.
+    let mut tokens = [0u8; TOKEN_LEN * 2];
+    tokens[..TOKEN_LEN].copy_from_slice(&stage_token(TOKEN_STAGE1));
+    tokens[TOKEN_LEN..].copy_from_slice(&stage_token(TOKEN_STAGE2));
     let (client, child) = start_background_process_inner::<Request, Response>(
         &exe,
         Some(argv0.as_path()),
-        &[DAEMON_STAGE1_ARGV],
         &[],
+        &[],
+        Some(&tokens),
     )?;
 
     complete_spawn(client, child, expected_build_id)
@@ -249,7 +261,13 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    let (client, child) = start_background_process_inner(exe, None, &[], extra_env)?;
+    // `None` prequeue: this helper's daemon (`daemonizable-test-background`)
+    // builds its `RpcServer` directly and never runs `run()`/dispatch, so it
+    // would not consume tokens — writing them would corrupt its first
+    // `next_request`. The tradeoff is that this path doesn't exercise
+    // tokens+cleanup together; the real framework path (`spawn_daemon_process`)
+    // is covered by the framework e2e tests.
+    let (client, child) = start_background_process_inner(exe, None, &[], extra_env, None)?;
     complete_spawn(client, child, expected_build_id)
 }
 
@@ -351,25 +369,46 @@ where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
-    let (client, _child) = start_background_process_inner(exe, None, &[], extra_env)?;
+    // `None` prequeue — see `spawn_daemon_process_with_exe`.
+    let (client, _child) = start_background_process_inner(exe, None, &[], extra_env, None)?;
     Ok(client)
 }
 
 /// Common fork+exec machinery shared by [`spawn_daemon_process`] and the
 /// `testutils` spawn helpers (`start_background_process_with_exe` and
 /// `spawn_daemon_process_with_exe`).
+///
+/// `prequeue`, when `Some`, is written raw to the parent→daemon direction after
+/// the client is built but BEFORE `Command::spawn` — the stage-identity tokens,
+/// queued in the socket buffer before the child exists so no ordering race is
+/// possible. Only the real [`spawn_daemon_process`] passes it; the `*_with_exe`
+/// helpers pass `None`.
 fn start_background_process_inner<Request, Response>(
     exe: &Path,
     argv0: Option<&Path>,
     args: &[&str],
     extra_env: &[(&OsStr, &OsStr)],
+    prequeue: Option<&[u8]>,
 ) -> Result<(RpcClient<Request, Response>, std::process::Child), SpawnDaemonError>
 where
     Request: Serialize + DeserializeOwned,
     Response: Serialize + DeserializeOwned + Send,
 {
     let rpc_channel = RpcConnection::<Request, Response>::new_pipe()?;
-    let (client, child_fd) = rpc_channel.into_client_and_child_fd();
+    let (mut client, child_fd) = rpc_channel.into_client_and_child_fd();
+
+    // Pre-queue the stage-identity tokens (if any) BEFORE the spawn, so they sit
+    // in the socket buffer before the child exists — the daemon's dispatch reads
+    // them ahead of any framed request. A single small write into an empty
+    // AF_UNIX stream buffer can't block or short-write.
+    if let Some(prequeue) = prequeue {
+        client
+            .write_channel_prelude(prequeue)
+            .map_err(|source| SpawnDaemonError::Spawn {
+                path: exe.to_owned(),
+                source,
+            })?;
+    }
 
     let mut cmd = Command::new(exe);
     if let Some(argv0) = argv0 {

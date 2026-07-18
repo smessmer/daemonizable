@@ -50,6 +50,15 @@ where
         self.write_length_prefixed(bytes)
     }
 
+    /// Write raw, UNFRAMED bytes at the head of the stream — used only by the
+    /// parent to pre-queue the stage-identity tokens before the framed RPC
+    /// begins. The daemon's dispatch consumes these raw (they are not
+    /// length-prefixed), then reads framed messages after. Must be called
+    /// before any `send`/`send_raw` so the tokens lead the stream.
+    pub(crate) fn write_prelude(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.sender.write_all(bytes)
+    }
+
     fn write_length_prefixed(&mut self, bytes: &[u8]) -> Result<(), PipeSendError> {
         if bytes.len() > MAX_MESSAGE_SIZE {
             return Err(PipeSendError::MessageTooLarge {

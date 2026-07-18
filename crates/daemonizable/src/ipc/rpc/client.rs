@@ -27,6 +27,14 @@ where
         Self { sender, receiver }
     }
 
+    /// Pre-queue raw, unframed bytes (the stage-identity tokens) at the head of
+    /// the parent→daemon stream, before any framed request. The daemon's
+    /// dispatch consumes them raw; the framed RPC follows. Crate-internal, used
+    /// only by the spawn machinery.
+    pub(crate) fn write_channel_prelude(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.sender.write_prelude(bytes)
+    }
+
     pub fn send_request(&mut self, request: &Request) -> Result<(), PipeSendError> {
         self.sender.send(request)
     }

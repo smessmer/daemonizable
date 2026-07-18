@@ -44,9 +44,10 @@ libc.workspace = true
 # `socket` powers the AF_UNIX transport: the non-consuming dispatch probe
 # (`recv(MSG_PEEK|MSG_DONTWAIT)`), the receiver's poll-then-`recv(MSG_DONTWAIT)`
 # timeout reads, and the stage-2 peer-credential check (`SO_PEERCRED` /
+# `getpeereid`). `user` powers that check's uid comparison (`getuid` /
 # `getpeereid`). The transport itself is `std::os::unix::net::UnixStream`
 # (socketpair with atomic `SOCK_CLOEXEC`), so `interprocess` is no longer needed.
-nix = { workspace = true, features = ["poll", "fs", "process", "signal", "socket"] }
+nix = { workspace = true, features = ["poll", "fs", "process", "signal", "socket", "user"] }
 postcard = { workspace = true, features = ["use-std"] }
 serde.workspace = true
 thiserror.workspace = true

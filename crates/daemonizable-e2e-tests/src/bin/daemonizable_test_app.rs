@@ -52,10 +52,11 @@ struct TestResponse {
     /// test asserts "removed". Kept as a regression pin against any future
     /// design reintroducing environment leakage.
     marker: String,
-    /// Whether `argv[1]` inside `run_daemon` is the documented stage-2
-    /// sentinel — pins the documented argv contract (`run`'s docs: the
-    /// sentinel stays visible in `std::env::args()` for the daemon's whole
-    /// lifetime). The test asserts "sentinel".
+    /// Whether the daemon's `argv` is empty (only `argv[0]`). Stage identity
+    /// rides an in-band channel token now, not argv, so the daemon receives NO
+    /// arguments — `std::env::args().nth(1)` is `None`. The test asserts
+    /// "empty". Kept as a regression pin against any future design reintroducing
+    /// argv injection.
     argv1: String,
     /// The daemon's own pid (`std::process::id()`). With `sid` below it proves
     /// the daemon is a grandchild, not a session leader.
@@ -180,15 +181,12 @@ impl Daemonizable for TestApp {
         } else {
             "removed"
         };
-        // Literal kept in sync with DAEMON_STAGE2_ARGV in ipc/spawn/mod.rs
-        // (deliberately hard-coded: drift makes the framework_e2e assertion
-        // fail, which is the point).
-        let argv1 = if std::env::args_os().nth(1).as_deref()
-            == Some(std::ffi::OsStr::new("__daemonizable-daemon"))
-        {
-            "sentinel"
+        // The daemon's argv must be empty (stage identity rides an in-band
+        // channel token now, not argv). Pin that nth(1) is None.
+        let argv1 = if std::env::args_os().nth(1).is_none() {
+            "empty"
         } else {
-            "other"
+            "present"
         };
         // `run_daemon` runs in the surviving grandchild (post second fork), so
         // these report the FINAL daemon identity: pid is the grandchild's, sid
