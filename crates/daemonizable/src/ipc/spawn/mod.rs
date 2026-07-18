@@ -87,8 +87,12 @@ pub(crate) const TOKEN_STAGE2: u8 = 2;
 ///   load-bearing case — a lower-privileged principal trying to drive a daemon
 ///   image that gained privilege by CHANGING uid/gid (a setuid- or
 ///   setgid-to-a-different-id binary) into `run_daemon` over an
-///   attacker-controlled channel. It does NOT cover a file-capabilities binary,
-///   which keeps the invoker's ids (see `verify_channel_peer_creds`'s scope note);
+///   attacker-controlled channel. It also rejects an `inetd`-style socket-
+///   activation peer (systemd `Accept=yes`) that sends the public magic on a
+///   handed-in *connected* socket: a remote network client has no local
+///   credentials, so `SO_PEERCRED` reports `(uid_t)-1`, which never matches ours
+///   (see `verify_channel_peer_creds`). It does NOT cover a file-capabilities
+///   binary, which keeps the invoker's ids (see that fn's scope note);
 /// - the **session/group-leader guard**: a genuine daemon is a non-leader
 ///   grandchild (`sid == pgid == stage 1's pid ≠ own pid`), so a hand-run from
 ///   a shell or a setsid-wrapped launcher is refused.
@@ -96,7 +100,8 @@ pub(crate) const TOKEN_STAGE2: u8 = 2;
 /// A same-uid local process that plants a crafted channel can still reach
 /// `run_daemon` (it could equally `ptrace` us), so — exactly as with the old
 /// argv sentinel — applications must not treat `run_daemon`'s RPC input as
-/// authenticated-by-provenance. See `run`'s docs for the `AT_SECURE` note.
+/// authenticated-by-provenance. See `run`'s docs for the same-principal and
+/// file-capabilities caveats.
 pub(crate) const TOKEN_MAGIC: [u8; 32] = [
     0x54, 0x97, 0x91, 0xf3, 0xcc, 0x75, 0xa4, 0x5c, 0x7c, 0x42, 0x9c, 0xbd, 0x37, 0x14, 0x89, 0xb1,
     0x67, 0x7b, 0x6b, 0xf3, 0xf3, 0x38, 0x49, 0x44, 0x05, 0x0a, 0x7f, 0x6d, 0xfa, 0x9c, 0xbe, 0x94,

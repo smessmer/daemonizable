@@ -1,8 +1,9 @@
 //! Adversarial coverage for the in-band channel dispatch (Phase 3): what a
 //! process does when fd 3 carries something OTHER than a genuine framework
 //! channel — a foreign non-socket (a make jobserver FIFO), a socket with the
-//! wrong bytes, a crafted socket carrying only the first token, and a crafted
-//! socket carrying a valid stage-2 token from a hand-run.
+//! wrong bytes, a socket carrying a truncated (short-read) token, a crafted
+//! socket carrying only the first token, and a crafted socket carrying a valid
+//! stage-2 token from a hand-run.
 //!
 //! Each test spawns the real framework app (`daemonizable-test-app`, which goes
 //! through `daemonizable::run`) with fd 3 set up in a `pre_exec` closure, and
@@ -141,6 +142,44 @@ fn wrong_magic_socket_on_fd3_dispatches_foreground() {
     assert_eq!(
         "foreground-ran", result,
         "a wrong-magic socket on fd 3 must not hijack dispatch"
+    );
+}
+
+#[test]
+fn partial_token_socket_on_fd3_dispatches_foreground() {
+    // A socket on fd 3 carrying a real stage-1 token with its final byte missing
+    // (one byte short of a full token), then left open with no further writes:
+    // the non-blocking `MSG_PEEK` sees a short read, the classifier returns
+    // Foreground, and — crucially — dispatch does NOT block waiting for the rest
+    // of the token. The socket is never closed (`ours` is held open for the whole
+    // spawn), so a *blocking* read here would hang the child forever; the fact
+    // that `cmd.output()` returns at all is the non-hang assertion.
+    let (ours, childs) = UnixStream::pair().expect("socketpair");
+    let full = daemonizable::stage_token_bytes(1);
+    (&ours)
+        .write_all(&full[..full.len() - 1])
+        .expect("queue a truncated token");
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    let outfile = tmpdir.path().join("result.txt");
+    let outfile_str = outfile.to_str().unwrap();
+
+    let output = run_with_fd3(
+        &["--outfile", outfile_str],
+        &childs,
+        Topology::Inherit,
+        &ours,
+    );
+
+    assert!(
+        output.status.success(),
+        "app failed or hung on a truncated token: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = std::fs::read_to_string(&outfile).expect("outfile");
+    assert_eq!(
+        "foreground-ran", result,
+        "a truncated token on fd 3 must not hijack dispatch"
     );
 }
 
