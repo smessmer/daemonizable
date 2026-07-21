@@ -3,32 +3,33 @@
 //! the stage's in-band token off the channel fd before calling into these.
 //!
 //! **Stage 1** (its token is `TOKEN_MAGIC ‖ TOKEN_STAGE1`; a fresh image the
-//! parent spawned): verify stage 2's token is queued, `setsid`, fork — and the
-//! forked child immediately re-execs this binary into stage 2, so the only
-//! post-fork instructions this crate runs are `execv` and, on its failure,
-//! `write`/`_exit`. **Stage 2** (its token is `TOKEN_MAGIC ‖ TOKEN_STAGE2`;
+//! parent spawned): verify stage 2's token is queued, `setsid`, then re-exec
+//! this binary into stage 2 via [`std::process::Command`] — the intermediate
+//! session leader `_exit(0)`s once the spawn returns, so the surviving child is
+//! never a session leader. **Stage 2** (its token is `TOKEN_MAGIC ‖ TOKEN_STAGE2`;
 //! another fresh image): guard provenance (topology + peer credentials), claim
 //! the channel fd, detach the working directory, complete the build-id
 //! handshake, then hand off to the application's daemon entry point.
 //!
-//! The exec between the forks is what makes the second fork sound without
-//! any single-threadedness argument: even if pre-main constructors spawned
-//! threads in stage 1's image, everything **this crate** runs in the forked
-//! child is async-signal-safe, and stage 2 never forks at all. (The one
-//! residue outside the crate's control is `pthread_atfork` child handlers,
+//! Routing the second spawn through `std::process::Command` is what makes it
+//! sound without any single-threadedness argument: even if pre-main
+//! constructors spawned threads in stage 1's image, std performs the fork+exec
+//! (or `posix_spawn`) with its own async-signal-safe child setup, so this crate
+//! runs no hand-written post-fork code at all, and stage 2 never forks. (The
+//! one residue outside anyone's control is `pthread_atfork` child handlers,
 //! which libc runs inside `fork()` itself — a handler that is not fork-safe
-//! under threads is broken for any fork+exec spawn, including
-//! `std::process::Command`, and is its registrant's responsibility.) Stage
-//! identity rides an in-band channel token in both stages (see `TOKEN_MAGIC`'s
-//! doc), so the daemon's argv stays empty and neither image ever reads or
-//! mutates the environment for dispatch: the environment passes through both
-//! execs untouched (no `environ` walk to race a constructor thread's `setenv`,
-//! and no marker to scrub — the tokens live only in the socket buffer and are
-//! consumed before any framed byte).
+//! under threads is broken for any fork+exec spawn, `std::process::Command`
+//! included, and is its registrant's responsibility.) The surviving
+//! intermediate still `_exit(0)`s directly (the one remaining raw call) rather
+//! than returning, so it skips atexit handlers, C stdio flushing, and Rust
+//! drops. Stage identity rides an in-band channel token in both stages (see
+//! `TOKEN_MAGIC`'s doc), so the daemon's argv stays empty and neither image
+//! ever reads or mutates the environment for dispatch: the environment passes
+//! through both execs untouched (no `environ` walk to race a constructor
+//! thread's `setenv`, and no marker to scrub — the tokens live only in the
+//! socket buffer and are consumed before any framed byte).
 
-use std::ffi::CString;
-use std::os::unix::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
 
 use super::Daemonizable;
 use crate::ipc::{
@@ -39,12 +40,11 @@ use crate::ipc::{
 /// Stage 1: the parent's direct child lands here, straight from
 /// [`run`](super::run) — before any app code. `run`'s dispatch already peeked
 /// and consumed stage 1's token off fd 3. Order matters: verify token 2 is
-/// queued (exit 2) → `setsid` (exit 1) → resolve the re-exec path and build the
-/// `execv` argv (exit 1) → fork (failure exit 1) → the forked child execs
-/// stage 2 (exec failure `_exit(126)`), while this process — the short-lived
-/// session-leader intermediate — `_exit(0)`s. Every failure before the fork
-/// reports on the still-attached stderr; the parent additionally observes any
-/// stage-1 death as EOF on the channel.
+/// queued (exit 2) → `setsid` (exit 1) → resolve the re-exec path (exit 1) →
+/// spawn stage 2 via [`std::process::Command`] (spawn failure exit 1), then this
+/// process — the short-lived session-leader intermediate — `_exit(0)`s. Every
+/// failure reports on the still-attached stderr; the parent additionally
+/// observes any stage-1 death as EOF on the channel.
 pub(super) fn run_as_daemon_stage1() -> ! {
     // Verify — MANDATORY, before setsid — that the parent also queued stage 2's
     // token behind stage 1's (a non-consuming, non-blocking peek). The genuine
@@ -91,143 +91,61 @@ pub(super) fn run_as_daemon_stage1() -> ! {
             std::process::exit(1);
         }
     };
-    // One semantic gap between the two consumers of `daemon_exe_path`: its
-    // bare-command fallback (no `/proc`, no usable AT_EXECFN, argv[0] is a
-    // bare name like "myapp") documents that `std::process::Command` resolves
-    // the name via $PATH — but the raw `execv` below performs NO $PATH
-    // search. Resolve that case here, pre-fork, so the degraded-environment
-    // spawn that worked for the parent's exec doesn't die with ENOENT on the
-    // second one.
-    let exe = match resolve_bare_name_via_path(exe) {
-        Ok(exe) => exe,
-        Err(name) => {
-            eprintln!(
-                "daemon stage 1: cannot find {name:?} on $PATH to re-exec for stage 2 \
-                 (/proc is unavailable and AT_EXECFN was unusable)"
-            );
-            std::process::exit(1);
-        }
-    };
-
-    // Build execv's argument array BEFORE forking. The forked child must not
-    // allocate (fork SAFETY below), so everything it will dereference is
-    // materialized here, in ordinary pre-fork code where allocation is
-    // unrestricted — threads or not. The environment needs no marshaling at
-    // all: `execv` passes the inherited `environ` through unchanged (see the
-    // module doc), which is also why `nix::unistd::execv` was considered and
-    // rejected — nix's wrapper builds its pointer array at call time, i.e.
-    // post-fork, allocating exactly where allocation is forbidden.
+    // Second spawn (daemon(7) step 7): re-exec stage 2 as a child of this
+    // session-leader intermediate, which exits immediately below — so the
+    // surviving daemon is never a session leader and can never acquire a
+    // controlling terminal (per POSIX XBD 11.1.3 a ctty-less session leader
+    // that open()s a tty without O_NOCTTY may acquire it as its controlling
+    // terminal, and TIOCSCTTY likewise requires a session leader; a non-leader
+    // is structurally immune to both).
     //
-    // argv: [inherited argv0 (cosmetic — keeps `ps` output stable across the
-    // stages)] and NOTHING ELSE. Stage identity rides an in-band channel token,
-    // not argv, so the daemon's argv is empty (`run_daemon` sees no injected
-    // argument). The `expect`s guard conditions that cannot occur (a Unix path
-    // and an exec'd argv[0] are NUL-free C strings by construction): a panic
-    // here would be a framework bug, runs pre-fork, and surfaces on the attached
-    // stderr.
-    let exe_c = CString::new(exe.into_os_string().into_vec())
-        .expect("unix executable paths contain no NUL byte");
-    let argv0 = std::env::args_os()
-        .next()
-        .filter(|a| !a.is_empty())
-        .map(|a| CString::new(a.into_vec()).expect("argv[0] is a NUL-free C string"))
-        .unwrap_or_else(|| exe_c.clone());
-    let argv_storage = [argv0];
-    // The NULL-terminated pointer array in the shape execv consumes, pointing
-    // into the storage above. Also built pre-fork: the child only
-    // dereferences. The trailing NULL is load-bearing — execv walks the array
-    // until it finds one.
-    let argv_ptrs: Vec<*const libc::c_char> = argv_storage
-        .iter()
-        .map(|c| c.as_ptr())
-        .chain(std::iter::once(std::ptr::null()))
-        .collect();
-
-    // Second fork (daemon(7) step 7): the session-leader intermediate exits
-    // immediately, so the surviving child is never a session leader and can
-    // never acquire a controlling terminal — per POSIX XBD 11.1.3 a ctty-less
-    // session leader that open()s a tty without O_NOCTTY may acquire it as
-    // its controlling terminal, and TIOCSCTTY likewise requires a session
-    // leader; a non-leader is structurally immune to both.
+    // Routing through `std::process::Command` rather than a hand-rolled
+    // fork+execv means std performs the fork+exec (or `posix_spawn`) with its
+    // own async-signal-safe child-side setup — so this crate runs no
+    // post-fork code and needs no single-threadedness argument, even if a
+    // pre-main constructor spawned threads. The inherited `environ` passes
+    // through as the child's environment (`Command` inherits it by default),
+    // and argv is `[inherited argv0]` and NOTHING ELSE: stage identity rides
+    // an in-band channel token, not argv, so `run_daemon` sees no injected
+    // argument. `arg0` keeps `ps`/`top` output stable across the stages (the
+    // exe path is often the `/proc/self/exe` magic link). `Command` resolves a
+    // bare argv[0]/AT_EXECFN name via $PATH natively — matching what the
+    // parent's own first spawn (`spawn_daemon_process`, same `Command`+`arg0`
+    // shape) did — so no manual $PATH search is needed here.
     //
-    // SAFETY: after `fork()` in a multithreaded process, the child may only
-    // run async-signal-safe code until it execs. Every instruction THIS CRATE
-    // runs in the child branch meets that by construction, with no assumption
-    // about how many threads exist: `execv` (async-signal-safe; on success it
-    // never returns) and, on exec failure, `write` and `_exit` (both
-    // async-signal-safe). Every pointer the child dereferences was
-    // materialized before the fork. The one thing outside this crate's
-    // control: libc's `fork()` itself runs registered `pthread_atfork` child
-    // handlers before returning — a handler that is not fork-safe under
-    // threads is equally broken for `std::process::Command`'s own fork+exec
-    // and is its registrant's responsibility, not a soundness obligation this
-    // call site can discharge.
+    // Fd inheritance: the inherited channel on fd 3 is non-CLOEXEC at this
+    // point (the parent's `dup2` cleared the flag), and `Command` neither
+    // closes nor remaps it, so it survives into stage 2 exactly as the old
+    // `execv` passed it through; stage 2's claim restores CLOEXEC. Only stdio
+    // (0/1/2) is touched by `Command`, and it inherits by default.
     //
     // Ordering — all load-bearing:
-    //   * AFTER setsid(): the forked child must be a non-leader member of the
-    //     new session, and setsid() made this pid the process-group id that
-    //     the parent's failed-spawn cleanup signals via kill(-child_pid); the
-    //     child stays in that group across its exec.
+    //   * AFTER setsid(): the spawned child must be a non-leader member of the
+    //     new session, and setsid() made this pid the process-group id that the
+    //     parent's failed-spawn cleanup signals via kill(-child_pid); `Command`
+    //     does not change the child's process group, so it stays in that group
+    //     across its exec.
     //   * BEFORE the handshake (sent by stage 2): the parent must validate —
     //     and channel-EOF liveness must track — the process that actually serves.
-    //   * The intermediate must do NO work between fork and _exit — no
-    //     subprocess, no fd dup that escapes — so it cannot linger as a channel
-    //     write-end holder.
     //
     // Alternative considered and rejected: clone3(CLONE_PARENT) would keep the
     // daemon a direct child of the spawner (no group-kill, trivial PPID), but
     // it is Linux-only, bypasses std::process::Command, and resurrects the
-    // zombie caveat this second fork removes.
-    match unsafe { libc::fork() } {
-        -1 => {
-            // Fatal, like a failed setsid: without the second fork the daemon
-            // would remain a session leader that can acquire a controlling
-            // terminal. Degrading to single-fork operation would silently
-            // break the documented "never a session leader" guarantee, so
-            // fail the spawn instead — the parent sees EOF on the handshake
-            // and the caller can retry.
-            eprintln!(
-                "daemon stage 1: fork() after setsid failed: {}",
-                std::io::Error::last_os_error()
-            );
-            std::process::exit(1);
-        }
-        0 => {
-            // The future daemon: exec stage 2. The ONLY post-fork code.
-            //
-            // SAFETY: `execv` is async-signal-safe and dereferences exactly
-            // its two arguments: `exe_c` is a live NUL-terminated `CString`
-            // and `argv_ptrs` is a live NULL-terminated array of pointers
-            // into live `CString`s — all materialized before the fork and
-            // kept alive in this frame (every arm of this match diverges, so
-            // no drop runs before the exec; the fork's copy-on-write image
-            // preserves the storage at the same addresses). The inherited
-            // `environ` passes through as the new image's environment. On
-            // success it does not return; on failure it only sets errno.
-            let _ = unsafe { libc::execv(exe_c.as_ptr(), argv_ptrs.as_ptr()) };
-            // exec failed. Only async-signal-safe calls are permitted here —
-            // no eprintln! (allocates, locks) — so report with a raw write of
-            // a static message and _exit. The parent independently observes
-            // the failure as EOF on the handshake channel.
-            const MSG: &[u8] = b"daemon stage 1: execv for stage-2 re-exec failed\n";
-            // SAFETY: `write` is async-signal-safe; it reads `MSG.len()` bytes
-            // from `MSG`, a static buffer valid for exactly that length, and
-            // fd 2 is a bare int (a closed stderr yields EBADF, never UB).
-            // Best-effort: the result is deliberately ignored.
-            let _ = unsafe { libc::write(libc::STDERR_FILENO, MSG.as_ptr().cast(), MSG.len()) };
-            // SAFETY: `_exit` takes a plain int, passes no pointers, is
-            // async-signal-safe and unconditionally callable; it diverges,
-            // matching the `-> !` context. 126 distinguishes "exec failed"
-            // from stage 2's exit codes in post-mortems.
-            unsafe { libc::_exit(126) };
-        }
-        _stage2_pid => {
-            // Intermediate session leader: its only job was the fork above.
+    // zombie caveat this second spawn removes.
+    let mut cmd = std::process::Command::new(&exe);
+    if let Some(argv0) = std::env::args_os().next().filter(|a| !a.is_empty()) {
+        cmd.arg0(argv0);
+    }
+    match cmd.spawn() {
+        Ok(_child) => {
+            // Intermediate session leader: its only job was the spawn above.
             // `_exit`, not `std::process::exit`/return — `_exit` skips atexit
             // handlers and C stdio flushing (a buffered write from a
             // hand-written main preamble must flush at most once, in the
-            // daemon) and skips Rust drops. Its inherited copy of fd 3
-            // closes with it; the stage-2 child's copy keeps the channel open.
+            // daemon) and skips Rust drops (so `_child` is never waited on —
+            // the daemon must outlive this intermediate). Its inherited copy of
+            // fd 3 closes with it; the stage-2 child's copy keeps the channel
+            // open.
             //
             // SAFETY: `libc::_exit(0)` takes a plain int, passes no pointers,
             // owns/aliases nothing, is async-signal-safe and unconditionally
@@ -235,38 +153,19 @@ pub(super) fn run_as_daemon_stage1() -> ! {
             // context.
             unsafe { libc::_exit(0) };
         }
-    }
-}
-
-/// `daemon_exe_path`'s bare-command fallback delegates $PATH resolution to
-/// `std::process::Command`; stage 1 execs raw and must therefore resolve a
-/// bare name itself. Paths containing a `/` (absolute or relative) pass
-/// through untouched — `execv` resolves relative paths against the cwd, which
-/// stage 1 has not changed, matching what `Command` saw at the first spawn.
-/// Errors with the unresolvable name only in the bare-name case.
-fn resolve_bare_name_via_path(exe: PathBuf) -> Result<PathBuf, PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if exe.components().count() > 1 || exe.has_root() {
-        return Ok(exe);
-    }
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return Err(exe);
-    };
-    for dir in std::env::split_paths(&path_var) {
-        // Mirror Command's search loosely: first regular file with any
-        // execute bit. (Command/execvp additionally skip non-executable
-        // matches; for this last-resort fallback the first plausible match
-        // is enough — a wrong pick is caught by the build-id handshake.)
-        let candidate = dir.join(&exe);
-        let is_executable = std::fs::metadata(&candidate)
-            .map(|m| m.is_file() && (m.permissions().mode() & 0o111) != 0)
-            .unwrap_or(false);
-        if is_executable {
-            return Ok(candidate);
+        Err(err) => {
+            // Fatal, like a failed setsid: without the second spawn the daemon
+            // would remain a session leader that can acquire a controlling
+            // terminal. Degrading to single-fork operation would silently
+            // break the documented "never a session leader" guarantee, so
+            // fail the spawn instead — the parent sees EOF on the handshake
+            // and the caller can retry. (`Command::spawn` collapses fork and
+            // exec failures into one error; the parent's handshake EOF is the
+            // same signal either way.)
+            eprintln!("daemon stage 1: failed to re-exec stage 2 ({exe:?}): {err}");
+            std::process::exit(1);
         }
     }
-    Err(exe)
 }
 
 /// Stage 2: the final daemon image, re-exec'd by stage 1, lands here straight
