@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::ipc::channel::{Receiver, Sender, endpoint_from_stream};
-use crate::ipc::error::{ChannelRecvError, ChannelSendError, InheritedFdsError};
+use crate::ipc::error::{ChannelRecvError, ChannelSendError, InheritedFdError};
 
 // Direction-correct bounds, mirroring `RpcClient`: the server only
 // DESERIALIZES requests and SERIALIZES responses.
@@ -47,23 +47,23 @@ where
     /// Reconstruct an `RpcServer` from the daemon's single inherited channel
     /// fd, already adopted into an owning [`OwnedFd`]. The fork+exec daemon child
     /// receives its full-duplex channel as fd 3 (`DAEMON_CHANNEL_FD`);
-    /// `rpc_server_from_inherited_fds` validates and takes ownership of it (the
+    /// `rpc_server_from_inherited_fd` validates and takes ownership of it (the
     /// one raw-fd `unsafe`), then hands the `OwnedFd` here.
     ///
     /// Splits the one socket into the server's send/recv halves via
     /// [`endpoint_from_stream`] (an internal `dup`), so the daemon can serve a
     /// response while awaiting the next request. The `dup` can fail
-    /// (EMFILE/ENFILE) → [`InheritedFdsError::CloneFd`]; on that error the
+    /// (EMFILE/ENFILE) → [`InheritedFdError::CloneFd`]; on that error the
     /// adopted fd is closed as the `OwnedFd` drops.
     ///
     /// Crate-internal: the daemon child never constructs its own `RpcServer`
     /// (it receives one, already built, in `Daemonizable::run_daemon`). This
     /// constructor exists only for the one internal caller
-    /// `rpc_server_from_inherited_fds`, so it stays off the public API rather
+    /// `rpc_server_from_inherited_fd`, so it stays off the public API rather
     /// than exposing an fd-adopting constructor on a type every daemon app holds.
-    pub(crate) fn from_owned_fd(fd: OwnedFd) -> Result<Self, InheritedFdsError> {
+    pub(crate) fn from_owned_fd(fd: OwnedFd) -> Result<Self, InheritedFdError> {
         Self::from_stream(UnixStream::from(fd))
-            .map_err(|source| InheritedFdsError::CloneFd { source })
+            .map_err(|source| InheritedFdError::CloneFd { source })
     }
 
     /// Build a server from one full-duplex socket endpoint, cloning it into the

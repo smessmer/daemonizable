@@ -33,7 +33,7 @@ use std::os::unix::process::CommandExt;
 
 use super::Daemonizable;
 use crate::ipc::{
-    RpcServer, channel_has_stage2_token, daemon_exe_path, rpc_server_from_inherited_fds,
+    RpcServer, channel_has_stage2_token, daemon_exe_path, rpc_server_from_inherited_fd,
     send_handshake, verify_channel_peer_creds,
 };
 
@@ -236,7 +236,7 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
         std::process::exit(1);
     }
 
-    // SAFETY: `rpc_server_from_inherited_fds` requires fd 3 to be this
+    // SAFETY: `rpc_server_from_inherited_fd` requires fd 3 to be this
     // process's exclusively-owned inherited channel socket (see its `# Safety`).
     // The load-bearing argument is positional, not trust in the channel token
     // (a public constant any user can write): this call runs in a fresh post-exec
@@ -261,7 +261,7 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     // in this image, so a constructor's own `open`s cannot land on that
     // number accidentally.
     let mut server: RpcServer<A::Request, A::Response> =
-        match unsafe { rpc_server_from_inherited_fds() } {
+        match unsafe { rpc_server_from_inherited_fd() } {
             Ok(s) => s,
             Err(err) => {
                 eprintln!("daemon stage 2: {err}");

@@ -9,22 +9,25 @@
 //! - [`mod@handshake`] — the build-id handshake both sides exchange
 //!   ([`send_handshake`] on the daemon side, validation on the parent side).
 //! - [`mod@inherited`] — the daemon child's one-time claim of the channel fd it
-//!   inherited across `execve` ([`rpc_server_from_inherited_fds`]).
+//!   inherited across `execve` ([`rpc_server_from_inherited_fd`]).
+//! - [`mod@token`] — the in-band stage-identity tokens and the dispatch probe.
+//! - [`mod@peercred`] — the stage-2 peer-credential check that authenticates a
+//!   genuine channel.
 //!
-//! The channel fd number and the in-band stage-identity tokens shared across
+//! The channel fd number and the stage-identity token constants shared across
 //! those modules live here.
 
 mod handshake;
 mod inherited;
+mod peercred;
 mod process;
 mod token;
 
 pub use handshake::send_handshake;
-pub use inherited::rpc_server_from_inherited_fds;
+pub use inherited::rpc_server_from_inherited_fd;
+pub(crate) use peercred::verify_channel_peer_creds;
 pub(crate) use process::{daemon_exe_path, spawn_daemon_process};
-pub(crate) use token::{
-    StageDispatch, channel_has_stage2_token, dispatch_from_channel, verify_channel_peer_creds,
-};
+pub(crate) use token::{StageDispatch, channel_has_stage2_token, dispatch_from_channel};
 // Test-only spawn helpers: gated so they don't ship in the default published
 // surface (their crate-root re-exports in `lib.rs` are `testutils`-gated too).
 #[cfg(any(test, feature = "testutils"))]

@@ -6,7 +6,7 @@
 //! instead of forking an in-process fn pointer, so they no longer suffer the
 //! parallel-test fd-inheritance flake.
 
-use daemonizable::{ChannelRecvError, ChannelSendError, RpcServer, rpc_server_from_inherited_fds};
+use daemonizable::{ChannelRecvError, ChannelSendError, RpcServer, rpc_server_from_inherited_fd};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -23,7 +23,7 @@ fn main() {
     let behavior =
         std::env::var("DAEMONIZABLE_TEST_BEHAVIOR").unwrap_or_else(|_| "echo".to_string());
 
-    // SAFETY: `rpc_server_from_inherited_fds` requires fd 3 to be this
+    // SAFETY: `rpc_server_from_inherited_fd` requires fd 3 to be this
     // process's exclusively-owned inherited channel socket (see its `# Safety`).
     // The discharge is positional and holds for ANY invocation, not just the
     // intended one: this call is the first fd-related action in a fresh
@@ -38,7 +38,7 @@ fn main() {
     // (`start_background_process_with_exe` / `spawn_daemon_process_with_exe`),
     // which `dup2`s the parent's socketpair end onto fd 3 across `execve`; this
     // is the only claim in the process.
-    let mut rpc: RpcServer<Request, Response> = unsafe { rpc_server_from_inherited_fds() }
+    let mut rpc: RpcServer<Request, Response> = unsafe { rpc_server_from_inherited_fd() }
         .expect("daemon: failed to rebuild RpcServer from inherited fds");
 
     match behavior.as_str() {
@@ -261,7 +261,7 @@ fn main() {
             // (std::fs::write, send_handshake, sleep), so this is sound only
             // because the process is single-threaded here: this is a synchronous
             // `fn main` with no async runtime, and nothing on the path from
-            // program start to this point (env reads, rpc_server_from_inherited_fds,
+            // program start to this point (env reads, rpc_server_from_inherited_fd,
             // setsid) spawns a thread. With one thread at the fork, the child
             // inherits a consistent address space and may run arbitrary code;
             // the intermediate branch's _exit(0) is async-signal-safe regardless.

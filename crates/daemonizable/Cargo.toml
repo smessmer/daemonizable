@@ -19,8 +19,8 @@ default = ["macros"]
 # Re-exports the #[daemonizable::main] attribute from the companion
 # proc-macro crate.
 macros = ["dep:daemonizable-macros"]
-# Re-exports test-only helpers (`RpcConnection`, `InheritedFdsError`,
-# `send_handshake`, `rpc_server_from_inherited_fds`, and the `*_with_exe` spawn
+# Re-exports test-only helpers (`RpcConnection`, `InheritedFdError`,
+# `send_handshake`, `rpc_server_from_inherited_fd`, and the `*_with_exe` spawn
 # helpers) so downstream crates can drive the IPC primitives in their own unit
 # tests without re-implementing pipe wiring. NOT part of the stable surface:
 # every one of these re-exports is also `#[doc(hidden)]`, and the feature is off

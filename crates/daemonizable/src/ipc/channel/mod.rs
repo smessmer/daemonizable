@@ -116,6 +116,16 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
+    /// A raw socketpair for driving unframed bytes at a `Receiver`: `.0` is
+    /// the write end (a plain `UnixStream`), `.1` is wrapped in the typed
+    /// `Receiver` under test. Shared by the `recv_timeout` and `poison`
+    /// submodules (which both `use super::*`), so the framing/poison tests all
+    /// drive the same fixture over the real socket transport.
+    fn raw_channel<T: DeserializeOwned>() -> (UnixStream, Receiver<T>) {
+        let (writer, reader) = UnixStream::pair().unwrap();
+        (writer, Receiver::new(reader))
+    }
+
     #[test]
     fn dropped_recver() {
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
@@ -285,16 +295,6 @@ mod tests {
         // in here sleeps to sequence events.
 
         use super::*;
-
-        /// A raw socketpair for driving unframed bytes at a `Receiver`: `.0` is
-        /// the write end (a plain `UnixStream`), `.1` is wrapped in the typed
-        /// `Receiver` under test. Replaces the old raw-`interprocess`-pipe
-        /// fixtures so the framing/poison tests run over the real socket
-        /// transport.
-        fn raw_channel<T: Serialize + DeserializeOwned>() -> (UnixStream, Receiver<T>) {
-            let (writer, reader) = UnixStream::pair().unwrap();
-            (writer, Receiver::new(reader))
-        }
 
         #[test]
         fn primitive_u32() {
@@ -661,12 +661,6 @@ mod tests {
     /// timeout stays retryable.
     mod poison {
         use super::*;
-
-        /// Same raw-socketpair fixture as `recv_timeout::raw_channel`.
-        fn raw_channel<T: Serialize + DeserializeOwned>() -> (UnixStream, Receiver<T>) {
-            let (writer, reader) = UnixStream::pair().unwrap();
-            (writer, Receiver::new(reader))
-        }
 
         #[test]
         fn mid_frame_recv_timeout_poisons_receiver() {
