@@ -1,0 +1,10 @@
+# Keep the CI workflow's action references current. All third-party actions
+# are referenced by mutable tags today; if/when they are pinned to commit
+# SHAs (the stronger supply-chain posture), this same config is what keeps
+# the pins fresh — Dependabot updates SHA pins just like tag pins.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
