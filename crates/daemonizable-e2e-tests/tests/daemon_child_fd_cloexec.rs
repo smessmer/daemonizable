@@ -41,12 +41,12 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        if let Ok(contents) = std::fs::read_to_string(&self.sleeper_pid_file) {
-            if let Ok(pid) = contents.trim().parse::<i32>() {
-                // A stale or reused pid at cleanup time is a benign correctness
-                // issue (defined ESRCH/EPERM behavior); the result is discarded.
-                let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
-            }
+        if let Ok(contents) = std::fs::read_to_string(&self.sleeper_pid_file)
+            && let Ok(pid) = contents.trim().parse::<i32>()
+        {
+            // A stale or reused pid at cleanup time is a benign correctness
+            // issue (defined ESRCH/EPERM behavior); the result is discarded.
+            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
         }
         // Reap the daemon (our direct child; the raw helper-spawn path does not
         // go through the framework's second fork, so it stays our child). It has
