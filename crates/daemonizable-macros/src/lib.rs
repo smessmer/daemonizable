@@ -53,9 +53,11 @@ use syn::spanned::Spanned;
 ///
 /// (The fence is `ignore`, not a compiled doctest: this crate cannot depend on
 /// `daemonizable` — that would be a dependency cycle — so the types above are
-/// not in scope here. The same example *is* compiled as a doctest in the
-/// `daemonizable` crate root, and the macro's real expansion is covered by the
-/// trybuild snapshots in `daemonizable-e2e-tests/tests/macro_ui/`.)
+/// not in scope here. The macro's real expansion is covered by the trybuild
+/// cases in `daemonizable-e2e-tests/tests/macro_ui/` — which compile and run
+/// `#[daemonizable::main]` programs through the real macro — and a compiled
+/// equivalent of the hand-written-`main` shape is the doctest on
+/// `daemonizable::run`.)
 ///
 /// # Requirements
 ///
@@ -73,17 +75,15 @@ use syn::spanned::Spanned;
 ///   `run::<X>()` call).
 /// - Generic impls are not supported: `run` needs one concrete application
 ///   type to dispatch on.
-// TODO The Requirements list above presents itself as complete but omits one
-//   limitation: the generated main hard-codes `::daemonizable::run`, so the
-//   dependency must be named exactly `daemonizable` in Cargo.toml. A user
-//   who renames it (`dz = { package = "daemonizable", ... }`) can invoke the
-//   attribute as `#[dz::main]`, but the generated body fails with E0433
-//   "unresolved crate or module `daemonizable`" anchored at the attribute
-//   invocation, with nothing in the docs explaining why. Fix: add a
-//   Requirements bullet documenting the naming requirement; optionally
-//   support renames the way tokio/serde do, via an attribute argument
-//   (`#[daemonizable::main(crate = "dz")]`) that substitutes the crate path
-//   in the emitted main.
+/// - The generated `main` calls `::daemonizable::run` by default, so the
+///   dependency must be named exactly `daemonizable` in Cargo.toml. If you
+///   rename it (`dz = { package = "daemonizable", ... }`), tell the macro
+///   with the attribute's one supported argument —
+///   `#[dz::main(crate = "dz")]` — which substitutes that path in the
+///   emitted `main` (the same escape hatch as `#[tokio::main(crate = ...)]`
+///   / `#[serde(crate = ...)]`). Without it the generated body fails with
+///   E0433 "unresolved crate or module `daemonizable`" anchored at the
+///   attribute invocation.
 #[proc_macro_attribute]
 pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = proc_macro2::TokenStream::from(item);
@@ -100,16 +100,43 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Parse the attribute arguments: either nothing (→ the default
+/// `::daemonizable` path) or exactly `crate = "some::path"` naming the crate
+/// the generated `main` should call `run` on — the escape hatch for a renamed
+/// dependency. Anything else is rejected with a single crisp error.
+fn parse_crate_path(attr: proc_macro2::TokenStream) -> syn::Result<syn::Path> {
+    const USAGE: &str = "#[daemonizable::main] supports only the `crate = \"...\"` argument, e.g. \
+         #[dz::main(crate = \"dz\")] for a dependency renamed to `dz`";
+    if attr.is_empty() {
+        // Leading `::` so the expansion always names the external crate, never
+        // a same-named module in the user's crate root.
+        return Ok(syn::parse_quote!(::daemonizable));
+    }
+    let span = attr.span();
+    let nv: syn::MetaNameValue = syn::parse2(attr).map_err(|_| syn::Error::new(span, USAGE))?;
+    if !nv.path.is_ident("crate") {
+        return Err(syn::Error::new_spanned(&nv.path, USAGE));
+    }
+    match nv.value {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) => s.parse::<syn::Path>().map_err(|_| {
+            syn::Error::new_spanned(
+                &s,
+                "crate = \"...\" must contain a path to the daemonizable crate, e.g. \
+                 crate = \"dz\" or crate = \"my_facade::daemonizable\"",
+            )
+        }),
+        other => Err(syn::Error::new_spanned(&other, USAGE)),
+    }
+}
+
 fn expand(
     attr: proc_macro2::TokenStream,
     item: proc_macro2::TokenStream,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if !attr.is_empty() {
-        return Err(syn::Error::new(
-            attr.span(),
-            "#[daemonizable::main] takes no arguments",
-        ));
-    }
+    let crate_path = parse_crate_path(attr)?;
 
     let item_impl: syn::ItemImpl = syn::parse2(item.clone()).map_err(|_| {
         syn::Error::new(
@@ -144,7 +171,42 @@ fn expand(
         #item_impl
 
         fn main() -> ::std::process::ExitCode {
-            ::daemonizable::run::<#self_ty>()
+            #crate_path::run::<#self_ty>()
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote as q;
+
+    // The argument parser's decision table, tested directly on token streams
+    // (no trybuild snapshot needed, so no diagnostic-rendering drift risk;
+    // the happy paths are additionally compiled for real by the trybuild
+    // pass cases in daemonizable-e2e-tests/tests/macro_ui/).
+    #[test]
+    fn parse_crate_path_accepts_default_and_rename_and_rejects_junk() {
+        // Empty → the absolute default path.
+        let default = parse_crate_path(q!()).unwrap();
+        assert_eq!(q!(#default).to_string(), q!(::daemonizable).to_string());
+
+        // crate = "dz" → that path.
+        let renamed = parse_crate_path(q!(crate = "dz")).unwrap();
+        assert_eq!(q!(#renamed).to_string(), q!(dz).to_string());
+
+        // A multi-segment path works too (a facade re-export).
+        let nested = parse_crate_path(q!(crate = "facade::daemonizable")).unwrap();
+        assert_eq!(
+            q!(#nested).to_string(),
+            q!(facade::daemonizable).to_string()
+        );
+
+        // Everything else is rejected: wrong key, non-string value, bare
+        // tokens, and a non-path string.
+        assert!(parse_crate_path(q!(krate = "dz")).is_err());
+        assert!(parse_crate_path(q!(crate = 42)).is_err());
+        assert!(parse_crate_path(q!(some junk)).is_err());
+        assert!(parse_crate_path(q!(crate = "not a path")).is_err());
+    }
 }
