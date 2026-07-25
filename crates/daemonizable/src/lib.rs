@@ -516,6 +516,7 @@
 
 mod app;
 mod ipc;
+mod stdio;
 
 pub use app::{Daemonizable, Daemonizer, run};
 
@@ -536,16 +537,16 @@ pub use ipc::{RpcClient, RpcServer};
 // Typed errors returned by the IPC layer (thiserror, not anyhow) so callers
 // can match on failure modes, e.g. distinguish a peer that closed the channel
 // (`ChannelRecvError::SenderClosed`) from a timeout. Only errors reachable from
-// the stable public API are here; `InheritedFdsError` is produced solely by the
+// the stable public API are here; `InheritedFdError` is produced solely by the
 // `testutils` fd-claim helper and is re-exported alongside it below.
 pub use ipc::{
-    ChannelCreateError, ChannelRecvError, ChannelSendError, DetachStdioError, HandshakeError,
-    SpawnDaemonError,
+    ChannelCreateError, ChannelRecvError, ChannelSendError, HandshakeError, SpawnDaemonError,
 };
 
 // Process-global helper: the daemon calls this at its post-startup boundary
-// to detach the inherited stdio from the parent's terminal.
-pub use ipc::detach_stdio;
+// to detach the inherited stdio from the parent's terminal. Lives in its own
+// `stdio` module — it is an app-facing lifecycle utility, not IPC.
+pub use stdio::{DetachStdioError, detach_stdio};
 
 // Lower-level handles that substitute an external helper binary for the
 // re-execed self and drive the spawn/handshake machinery directly. These exist
@@ -556,13 +557,13 @@ pub use ipc::detach_stdio;
 //
 // Production app code should not reach for these — implement [`Daemonizable`]
 // and let [`run`] orchestrate the daemon side. (The daemon-child arm uses
-// `send_handshake` / `rpc_server_from_inherited_fds` internally too, but via
+// `send_handshake` / `rpc_server_from_inherited_fd` internally too, but via
 // the crate-private `ipc` module, so those call sites don't depend on these
 // re-exports.)
 //
-//   * `RpcConnection` / `InheritedFdsError` — build an in-process connection
+//   * `RpcConnection` / `InheritedFdError` — build an in-process connection
 //     and the error its fd-claim can return.
-//   * `send_handshake` / `rpc_server_from_inherited_fds` — the daemon-side
+//   * `send_handshake` / `rpc_server_from_inherited_fd` — the daemon-side
 //     primitives a helper binary needs to stand in for a (correct or
 //     deliberately wrong) daemon.
 //   * `start_background_process_with_exe` — spawn an arbitrary helper binary,
@@ -574,7 +575,7 @@ pub use ipc::detach_stdio;
 #[cfg(any(test, feature = "testutils"))]
 #[doc(hidden)]
 pub use ipc::{
-    InheritedFdsError, RpcConnection, rpc_server_from_inherited_fds, send_handshake,
+    InheritedFdError, RpcConnection, rpc_server_from_inherited_fd, send_handshake,
     spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,
     start_background_process_with_exe,
 };

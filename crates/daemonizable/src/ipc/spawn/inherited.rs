@@ -9,32 +9,34 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::DAEMON_CHANNEL_FD;
 use crate::ipc::RpcServer;
 use crate::ipc::cloexec::set_cloexec;
-use crate::ipc::error::InheritedFdsError;
+use crate::ipc::error::InheritedFdError;
 
 /// Guards the process-wide claim on the inherited daemon channel fd (3).
 ///
-/// [`rpc_server_from_inherited_fds`] adopts that fixed fd number into an owning
+/// [`rpc_server_from_inherited_fd`] adopts that fixed fd number into an owning
 /// `OwnedFd` (the one raw-fd `unsafe`). A second call would hand out a *second*
 /// owner of the same fd; once the first `RpcServer` drops and closes it, the
 /// kernel can reassign fd 3 to an unrelated file, and the second server would
 /// then read/write/close the wrong resource. The fd is a process singleton
 /// (like stdio), so it can be claimed at most once — this flag turns a double
 /// claim into a clean error instead of undefined behavior.
-static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
+static DAEMON_FD_CLAIMED: AtomicBool = AtomicBool::new(false);
 
-/// Helper for the daemon side of [`start_background_process_with_exe`]: parse
-/// the conventional fd 3 (`DAEMON_CHANNEL_FD`) into an [`RpcServer`]. Aborts with
-/// a human-readable message if the fd is not a socket — almost always the result
-/// of a curious user invoking the daemon entry point manually from a shell.
+/// The daemon side's one-time claim: parse the conventional fd 3
+/// (`DAEMON_CHANNEL_FD`) into an [`RpcServer`]. Returns a typed,
+/// human-readable error ([`InheritedFdError::NotASocket`]) if the fd is not a
+/// socket — almost always the result of a curious user invoking the daemon
+/// entry point manually from a shell (the framework's dispatch prints the
+/// error and exits).
 ///
 /// Must be called at most once per process (it takes ownership of fd 3); a
-/// second call returns an [`InheritedFdsError::AlreadyClaimed`] error rather
+/// second call returns an [`InheritedFdError::AlreadyClaimed`] error rather
 /// than aliasing the descriptor.
 ///
 /// The claim guard is deliberately one-way: it is set before validation and
 /// never rolls back, so a first call that fails validation
-/// ([`InheritedFdsError::NotOpen`] / [`InheritedFdsError::NotASocket`] /
-/// [`InheritedFdsError::SetCloexec`] / [`InheritedFdsError::CloneFd`])
+/// ([`InheritedFdError::NotOpen`] / [`InheritedFdError::NotASocket`] /
+/// [`InheritedFdError::SetCloexec`] / [`InheritedFdError::CloneFd`])
 /// permanently poisons the process — every later call reports `AlreadyClaimed`
 /// even though no fd was adopted. That is intentional, not an oversight: a
 /// process whose fd 3 failed validation once has no legitimate second chance at
@@ -49,9 +51,11 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// `NotASocket` validation failures happen before adoption and leave the fd
 /// untouched).
 ///
-/// Used by the test helper binary. Production applications go through the
-/// framework's daemon dispatch in [`crate::run`], which additionally sends
-/// the build-id handshake before handing the server to the app.
+/// Called by the framework's own stage-2 daemon dispatch (`app::daemon_child`,
+/// which additionally sends the build-id handshake before handing the server
+/// to the app) — this is the production path's one raw-fd claim, not a
+/// test-only helper — and, via the `testutils` re-export, by helper binaries
+/// standing in for a daemon.
 ///
 /// # Safety
 /// Fd `DAEMON_CHANNEL_FD` (3) must be the daemon's *exclusively owned* inherited
@@ -63,8 +67,8 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// the calling process already owns fd 3 (e.g. an unrelated program that
 /// happened to open a socket there and called this directly), the second owner
 /// minted here causes a double-close / use-after-free once both drop. The
-/// `fstat` open+socket probe (`validate_inherited_fds` — crate-private, so not
-/// linkable from these public docs) and the process-wide `DAEMON_FDS_CLAIMED`
+/// `fstat` open+socket probe (`validate_inherited_fd` — crate-private, so not
+/// linkable from these public docs) and the process-wide `DAEMON_FD_CLAIMED`
 /// guard are best-effort validation — they reject the common "invoked by hand"
 /// mistake and any second claim — but they cannot prove exclusive ownership,
 /// which is why that obligation falls on the caller.
@@ -73,32 +77,32 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// nothing else in the process may close or reuse fd 3 while it runs (starting
 /// from a raw fd number leaves an unavoidable validate→adopt window). Second,
 /// if the process-wide claim guard is already set, the call returns
-/// [`InheritedFdsError::AlreadyClaimed`] *before* touching any file descriptor —
+/// [`InheritedFdError::AlreadyClaimed`] *before* touching any file descriptor —
 /// such a call has no safety preconditions at all (the in-module unit test
 /// relies on exactly this guarantee).
 ///
 /// [`start_background_process_with_exe`]: super::start_background_process_with_exe
-pub unsafe fn rpc_server_from_inherited_fds<Request, Response>()
--> Result<RpcServer<Request, Response>, InheritedFdsError>
+pub unsafe fn rpc_server_from_inherited_fd<Request, Response>()
+-> Result<RpcServer<Request, Response>, InheritedFdError>
 where
     Request: DeserializeOwned,
     Response: Serialize,
 {
-    if DAEMON_FDS_CLAIMED
+    if DAEMON_FD_CLAIMED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return Err(InheritedFdsError::AlreadyClaimed {
+        return Err(InheritedFdError::AlreadyClaimed {
             channel_fd: DAEMON_CHANNEL_FD,
         });
     }
-    validate_inherited_fds()?;
+    validate_inherited_fd()?;
     // The fd validated as an open socket above; adopt ownership now. This is the
     // one irreducible `unsafe` in the claim — turning the inherited raw fd number
     // into an owning `OwnedFd` — and the reason this function is `unsafe`.
     //
     // SAFETY: by this function's `# Safety` contract the caller guarantees fd 3
-    // is the daemon's exclusively-owned inherited channel end; `DAEMON_FDS_CLAIMED`
+    // is the daemon's exclusively-owned inherited channel end; `DAEMON_FD_CLAIMED`
     // made this the sole claim in the process, and it was just `fstat`ed as an
     // open socket, so the `OwnedFd` (which closes on drop) is the one and only
     // owner. The same exclusive-ownership contract rules out a concurrent
@@ -123,7 +127,7 @@ where
     // fd 3 itself; the internal `dup` the server does next is independently
     // CLOEXEC (std's `try_clone` uses `F_DUPFD_CLOEXEC` regardless of the source
     // flag), so both halves of the channel end up close-on-exec either way.
-    set_cloexec(channel.as_fd()).map_err(|(operation, source)| InheritedFdsError::SetCloexec {
+    set_cloexec(channel.as_fd()).map_err(|(operation, source)| InheritedFdError::SetCloexec {
         fd: DAEMON_CHANNEL_FD,
         operation,
         source,
@@ -135,12 +139,14 @@ where
 
 /// Probe fd `DAEMON_CHANNEL_FD` (3) as an open socket **without taking any
 /// ownership**: bare `fstat` on the raw number — no fd wrapper, no claim, no flag
-/// changes. Because it owns nothing and changes nothing, it is safe to call any
-/// number of times, before or instead of the owning claim — which is what lets
-/// the daemon stages validate independently on both sides of their exec boundary
-/// (a pre-fork rejection with a clean error in stage 1, and the mandatory
-/// validation step inside [`rpc_server_from_inherited_fds`]'s claim).
-pub(crate) fn validate_inherited_fds() -> Result<(), InheritedFdsError> {
+/// changes. It owns nothing and changes nothing; its one caller is the
+/// mandatory validation step inside [`rpc_server_from_inherited_fd`]'s claim.
+/// (Stage 1's equivalent usable-socket check is the in-band token peek —
+/// `channel_has_stage2_token`, see `app::daemon_child` — which subsumed the
+/// separate pre-fork `fstat` probe stage 1 once ran.) Kept as its own function
+/// rather than inlined: it isolates the raw-fd `fstat` unsafe and is named in
+/// the claim's `# Safety` docs.
+pub(crate) fn validate_inherited_fd() -> Result<(), InheritedFdError> {
     let fd = DAEMON_CHANNEL_FD;
     // Probe the raw fd number with a bare `fstat` BEFORE building any fd
     // wrapper. A hand-invoked daemon may have closed fd 3, and a `BorrowedFd` /
@@ -157,13 +163,13 @@ pub(crate) fn validate_inherited_fds() -> Result<(), InheritedFdsError> {
     // yields EBADF (handled below as `NotOpen`), never UB — and `fstat` neither
     // takes ownership of nor closes it.
     if unsafe { libc::fstat(fd, &mut statbuf) } < 0 {
-        return Err(InheritedFdsError::NotOpen {
+        return Err(InheritedFdError::NotOpen {
             fd,
             source: std::io::Error::last_os_error(),
         });
     }
     if statbuf.st_mode & libc::S_IFMT != libc::S_IFSOCK {
-        return Err(InheritedFdsError::NotASocket {
+        return Err(InheritedFdError::NotASocket {
             fd,
             // Widened to u32 so the (platform-varying) libc::mode_t alias
             // stays out of the public error type.
@@ -178,7 +184,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rpc_server_from_inherited_fds_rejects_a_second_claim() {
+    fn rpc_server_from_inherited_fd_rejects_a_second_claim() {
         // The daemon channel fd (3) is a process singleton; claiming it twice
         // would alias owning `OwnedFd`s and risk a use-after-free. Simulate a
         // prior claim by setting the flag directly — this deterministically
@@ -193,28 +199,28 @@ mod tests {
         // enforces that invariant: if it ever fires, some other test in this
         // binary now touches the claim guard, and this test needs a different
         // design (e.g. a spawned-process test).
-        let previously = DAEMON_FDS_CLAIMED.swap(true, Ordering::SeqCst);
+        let previously = DAEMON_FD_CLAIMED.swap(true, Ordering::SeqCst);
         assert!(
             !previously,
-            "DAEMON_FDS_CLAIMED was already set: another test in this binary \
+            "DAEMON_FD_CLAIMED was already set: another test in this binary \
              claims the daemon channel fd, which this test's flag swap/restore \
              cannot coexist with"
         );
-        // SAFETY: `rpc_server_from_inherited_fds` is `unsafe` because it would
-        // take ownership of fd 3. Here `DAEMON_FDS_CLAIMED` is pre-set to `true`,
+        // SAFETY: `rpc_server_from_inherited_fd` is `unsafe` because it would
+        // take ownership of fd 3. Here `DAEMON_FD_CLAIMED` is pre-set to `true`,
         // so the call short-circuits with `AlreadyClaimed` *before* reaching the
         // fd-claiming code — it never wraps a descriptor, so the
         // exclusive-ownership precondition is vacuously satisfied.
-        let result = unsafe { rpc_server_from_inherited_fds::<(), ()>() };
+        let result = unsafe { rpc_server_from_inherited_fd::<(), ()>() };
         // Restore the flag (asserted `false` above) so a later claim in this
         // process — none exists today — isn't spuriously rejected.
-        DAEMON_FDS_CLAIMED.store(false, Ordering::SeqCst);
+        DAEMON_FD_CLAIMED.store(false, Ordering::SeqCst);
 
         let err = result
             .err()
             .expect("a second claim of the daemon channel fd must be rejected");
         assert!(
-            matches!(err, InheritedFdsError::AlreadyClaimed { .. }),
+            matches!(err, InheritedFdError::AlreadyClaimed { .. }),
             "expected AlreadyClaimed, got: {err:?}"
         );
     }

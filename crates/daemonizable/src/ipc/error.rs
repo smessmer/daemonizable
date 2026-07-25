@@ -166,7 +166,7 @@ pub enum SpawnDaemonError {
 /// The daemon child couldn't claim the IPC channel fd inherited from its parent.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum InheritedFdsError {
+pub enum InheritedFdError {
     /// The channel fd was already claimed by an earlier call. It is a process
     /// singleton (like stdio): a second claim would alias owning `OwnedFd`s
     /// and risk a use-after-close.
@@ -174,9 +174,9 @@ pub enum InheritedFdsError {
     /// Also returned when an earlier claim *attempt* failed validation: the
     /// claim guard never rolls back, so a failed first call permanently
     /// poisons the process even though no fd was adopted (see
-    /// [`rpc_server_from_inherited_fds`](crate::rpc_server_from_inherited_fds)).
+    /// [`rpc_server_from_inherited_fd`](crate::rpc_server_from_inherited_fd)).
     #[error(
-        "the inherited daemon channel fd ({channel_fd}) has already been claimed; rpc_server_from_inherited_fds must be called at most once per process"
+        "the inherited daemon channel fd ({channel_fd}) has already been claimed; rpc_server_from_inherited_fd must be called at most once per process"
     )]
     AlreadyClaimed { channel_fd: i32 },
 
@@ -221,37 +221,6 @@ pub enum InheritedFdsError {
     /// (`dup` → EMFILE/ENFILE). The adopted fd is closed on this error.
     #[error("failed to clone the daemon channel fd into its send/recv halves: {source}")]
     CloneFd {
-        #[source]
-        source: std::io::Error,
-    },
-}
-
-/// Detaching the daemon's inherited stdio to `/dev/null` failed.
-#[derive(Debug, Error)]
-#[non_exhaustive]
-pub enum DetachStdioError {
-    /// Opening `/dev/null` failed, so there was nothing to redirect stdio to.
-    /// The inherited stdio is left untouched.
-    #[error("Failed to open /dev/null while detaching daemon stdio: {0}")]
-    OpenDevNull(#[source] std::io::Error),
-
-    /// Relocating the `/dev/null` descriptor off the std-fd range (0/1/2)
-    /// failed. This only arises when `/dev/null` opened *onto* one of those
-    /// numbers — i.e. that std fd was already closed when `detach_stdio` was
-    /// called — and the `fcntl(F_DUPFD_CLOEXEC)` used to move it above the
-    /// range failed. The inherited stdio is left untouched.
-    #[error(
-        "fcntl(F_DUPFD_CLOEXEC) failed relocating /dev/null off the std-fd range while detaching daemon stdio: {0}"
-    )]
-    Relocate(#[source] std::io::Error),
-
-    /// `dup2(/dev/null, target)` failed for one of stdin/stdout/stderr. Any
-    /// earlier targets in the stdin→stdout→stderr order were already
-    /// redirected before this one failed.
-    #[error("dup2(/dev/null, {target}) failed while detaching daemon stdio: {source}")]
-    Dup2 {
-        /// The standard fd (0/1/2) the redirect targeted.
-        target: i32,
         #[source]
         source: std::io::Error,
     },

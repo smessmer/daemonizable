@@ -2,7 +2,7 @@
 //!
 //! When the parent spawns the daemon, the channel socket end is `dup2`'d onto
 //! fixed fd 3, which clears its FD_CLOEXEC (that's how it survives the `execve`
-//! into the daemon). `rpc_server_from_inherited_fds` re-sets the flag so the
+//! into the daemon). `rpc_server_from_inherited_fd` re-sets the flag so the
 //! daemon's *own* subprocesses don't inherit it. Without that, a daemon-spawned
 //! child inherits the channel end (fd 3) across its own fork+exec; because EOF
 //! only fires once every copy of an end is closed, such a child outliving the
