@@ -57,7 +57,7 @@ jobs:
         features: ["", "--no-default-features", "--all-features"]
         profile: ["", "--release"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (${{ matrix.toolchain }})
         uses: dtolnay/rust-toolchain@master
         with:
@@ -103,7 +103,7 @@ jobs:
           - crate: "daemonizable"
             features: "--no-default-features --features testutils"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -137,7 +137,7 @@ jobs:
         features: ["", "--no-default-features", "--all-features"]
         profile: ["", "--release"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (nightly)
         uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
@@ -165,7 +165,7 @@ jobs:
       matrix:
         features: ["", "--no-default-features", "--all-features"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -190,7 +190,7 @@ jobs:
       matrix:
         features: ["", "--no-default-features", "--all-features"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -207,7 +207,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -238,7 +238,7 @@ jobs:
     env:
       RUSTDOCFLAGS: '-D warnings'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -266,7 +266,7 @@ jobs:
     name: semver-checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -282,7 +282,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans licenses sources
@@ -297,7 +297,7 @@ jobs:
     name: coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
