@@ -7,7 +7,14 @@ authors = ["Sebastian Messmer <messmer@cryfs.org>"]
 edition = "2024"
 repository = "https://github.com/smessmer/daemonizable"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
+# 1.90, not edition 2024's 1.85 floor: since Rust 1.90, std documents that
+# `UnixStream` writes carry `MSG_NOSIGNAL`, which makes the channel's
+# dead-peer-send guarantee (`ChannelSendError::Io(BrokenPipe)`, never a fatal
+# SIGPIPE) unconditional on Linux — independent of the process's SIGPIPE
+# disposition. On 1.85–1.89 that guarantee held only under Rust's default
+# process-wide SIGPIPE ignore, which daemons commonly reset. Keep in sync
+# with the CI MSRV leg and the macro-UI snapshot gate.
+rust-version = "1.90"
 version = "0.0.3"
 
 # Every member crate opts in with `[lints] workspace = true`. Note that the

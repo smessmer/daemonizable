@@ -206,6 +206,23 @@ fn main() {
             // assertion fails before we exit on our own.
             std::fs::write(&pid_file, std::process::id().to_string())
                 .expect("daemon: write pid file");
+            // Optionally reset SIGPIPE to its default disposition — the common
+            // real-daemon configuration (done before spawning pipeline
+            // children) that forfeits Rust's process-wide SIG_IGN. The
+            // dead-peer send below must STILL surface as a clean BrokenPipe:
+            // std's UnixStream writes carry MSG_NOSIGNAL (documented since
+            // Rust 1.90 — the crate's MSRV exists for exactly this). If that
+            // guarantee ever broke, this process would die on SIGPIPE here and
+            // never publish an outcome, failing the test loudly.
+            if std::env::var_os("DAEMONIZABLE_TEST_SIGPIPE_DFL").is_some() {
+                // SAFETY: `libc::signal` with SIG_DFL installs the default
+                // disposition for SIGPIPE — no handler function pointer is
+                // involved (SIG_DFL is a sentinel, not code), and this helper
+                // is single-threaded here, so no concurrent signal machinery
+                // is in flight. The return value is checked against SIG_ERR.
+                let prev = unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+                assert!(prev != libc::SIG_ERR, "daemon: signal(SIGPIPE, SIG_DFL)");
+            }
             while nix::unistd::getppid().as_raw() == spawner_pid {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
