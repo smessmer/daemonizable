@@ -58,9 +58,30 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// is — but the simplest way to guarantee that is to spawn the daemon at
 /// startup, before the process begins spawning other subprocesses. This is a
 /// documented caller contract, not something the library can enforce at runtime
-/// on those platforms. (std also sets `SO_NOSIGPIPE` on the socket on Apple
-/// platforms, and passes `MSG_NOSIGNAL` on Linux writes, so a write to a closed
-/// peer surfaces as an `EPIPE` error rather than a `SIGPIPE`.)
+/// on those platforms.
+///
+/// # Why a dead-peer write is an `EPIPE` error, not a fatal `SIGPIPE`
+///
+/// Layered, toolchain-dependent suppression — be precise here, because the
+/// layers differ in strength:
+///
+/// 1. **Rust's runtime startup sets `SIGPIPE` to `SIG_IGN` process-wide.**
+///    This is the protection that holds on every supported toolchain,
+///    including the MSRV — but an application that resets `SIGPIPE` to
+///    `SIG_DFL` (a common step before spawning pipeline children) forfeits it.
+/// 2. **Apple targets: std sets `SO_NOSIGPIPE` on the socket at creation**,
+///    which suppresses `SIGPIPE` regardless of the process's disposition.
+/// 3. **Linux: std's `UnixStream` write passes `MSG_NOSIGNAL` only since
+///    Rust 1.90.** On this crate's MSRV (1.85) through 1.89 the write is a
+///    plain `write(2)`, so on those toolchains a process that reset `SIGPIPE`
+///    to `SIG_DFL` **will die on a dead-peer send** instead of getting the
+///    `EPIPE` error. On 1.90+ the flag makes the guarantee
+///    disposition-independent on Linux too.
+///
+/// In short: `ChannelSendError::Io(BrokenPipe)` on a dead peer is guaranteed
+/// under the default Rust runtime everywhere; with `SIGPIPE` reset to
+/// `SIG_DFL` it additionally requires Apple (any toolchain) or Linux with
+/// Rust ≥ 1.90.
 ///
 /// T: The type of the data that will be sent through the channel.
 ///
@@ -131,9 +152,11 @@ mod tests {
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
         // Writing to a socket whose peer has closed returns EPIPE (an error),
-        // NOT a `SIGPIPE` that would kill the test process — std sets
-        // `MSG_NOSIGNAL`/`SO_NOSIGPIPE` on the write path. That this test
-        // returns rather than dying is itself the SIGPIPE-suppression check.
+        // NOT a `SIGPIPE` that kills the test process. Which layer suppresses
+        // the signal is toolchain-dependent (see `channel_pair`'s doc): in
+        // this test process it is Rust's default process-wide SIG_IGN — on
+        // MSRV toolchains before 1.90, Linux std does NOT pass MSG_NOSIGNAL,
+        // so this test would die if the runtime default were reset.
         assert!(sender.send(&42).is_err());
     }
 

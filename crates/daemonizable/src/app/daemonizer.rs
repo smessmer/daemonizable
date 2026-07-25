@@ -60,8 +60,10 @@ impl<A: Daemonizable> Daemonizer<A> {
     /// [Process contract](crate#process-contract) for the full detail, including
     /// two caveats: this call can block indefinitely if the intermediate is
     /// externally SIGSTOPped/ptraced in the instant before it exits, and the
-    /// caller must not concurrently `waitpid(-1)`/reap arbitrary children during
-    /// the spawn.
+    /// caller must not reap the intermediate out from under the spawn — no
+    /// concurrent `waitpid(-1)`/arbitrary-child reaping, and no `SIGCHLD`
+    /// auto-reap disposition (`SIG_IGN` / `SA_NOCLDWAIT`) across this call, on
+    /// which the failed-spawn cleanup's pid-safety argument depends.
     ///
     /// Because the daemon is created with fork+exec (not a bare `fork()`), it
     /// is safe to call this with a thread pool or async runtime already

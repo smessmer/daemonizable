@@ -99,9 +99,11 @@ readiness reporting all filled in — see the worked example on
   `fork()` cannot do safely.
 - **Clean daemon by default.** The daemon runs in its own session, detached
   from any controlling terminal, with its working directory at `/` and no
-  accidentally-inherited file descriptors; call [`detach_stdio`](https://docs.rs/daemonizable/latest/daemonizable/ipc/fn.detach_stdio.html) to let go
-  of the terminal's stdio once you are ready. Nothing else is installed that
-  you did not ask for.
+  file descriptors leaked by the framework or Rust's std (both open
+  everything close-on-exec; non-CLOEXEC fds the CLI itself inherited from
+  *its* launcher currently pass through — see the fd-hygiene battery in the
+  costs list); call [`detach_stdio`](https://docs.rs/daemonizable/latest/daemonizable/stdio/fn.detach_stdio.html) to let go of the terminal's stdio once
+  you are ready. Nothing else is installed that you did not ask for.
 - **A one-line `main`.** `#[daemonizable::main]` writes the whole `main` for
   you; there is no boilerplate to get subtly wrong.
 
@@ -145,12 +147,14 @@ library:
    framework channel carries the token.
 2. **Double fork + exec.** The relaunched process is *stage 1*: it consumes
    its token, calls `setsid()` to start a new terminal-less session, and
-   forks. The child `exec`s the binary once more into *stage 2* — the final
-   daemon — while the stage-1 intermediate exits. Because that intermediate
-   was the session leader and is now gone, the surviving daemon is a
-   non-leader grandchild that can never reacquire a controlling terminal. The
-   lone instruction between fork and exec is the `exec` itself, so this is
-   sound even from a threaded or async parent.
+   spawns the binary once more — via `std::process::Command` — into *stage
+   2*, the final daemon, while the stage-1 intermediate exits. Because that
+   intermediate was the session leader and is now gone, the surviving daemon
+   is a non-leader grandchild that can never reacquire a controlling
+   terminal. This crate runs no hand-written code between fork and exec at
+   all — std performs the fork+exec (or `posix_spawn`) with its own
+   async-signal-safe child setup — so this is sound even from a threaded or
+   async parent.
 3. **Authenticate, then confirm the build.** Stage 2 consumes its own token,
    verifies it really was framework-spawned (its session/group shape and the
    channel peer's kernel-reported credentials), adopts the descriptor as its
@@ -181,12 +185,14 @@ deliberately rejects:
 
 Both are real, documented problems, not stylistic gripes. (What this library
 keeps from the classic ritual is the *second* fork — it performs
-`daemon(7)`'s second fork itself, but *after* `exec`, and the forked child
-immediately *execs once more* into the final daemon image: the only
-post-fork instruction is `execve` itself, which is async-signal-safe, so
-the second fork is sound by construction — no assumption about threads at
-all, not even about pre-main constructors. What it rejects is
-fork-without-exec and cord-cutting, not the second fork.)
+`daemon(7)`'s second fork itself, but *after* `exec`, and that second spawn
+immediately re-execs into the final daemon image. The spawn is routed
+through `std::process::Command`, so no crate-written code runs between fork
+and exec — only std's own async-signal-safe child setup (or `posix_spawn`,
+with no user-visible fork window at all) — making the second fork sound by
+construction: no assumption about threads, not even about pre-main
+constructors. What it rejects is fork-without-exec and cord-cutting, not
+the second fork.)
 
 ### fork without exec: the daemon inherits a broken process image
 
@@ -465,27 +471,35 @@ faith into an operation that can fail loudly.
   manager) at spawn time. A **successful** spawn leaves the caller no child
   and no zombie, regardless of the caller's own lifetime.
 - A **failed** spawn (handshake mismatch or spawn failure) is killed via its
-  process group (`kill(-child_pid, SIGKILL)`, which reaches the grandchild;
-  ESRCH falls back to a direct kill for a child that died before `setsid`)
+  process group (`kill(-child_pid, SIGKILL)`, repeated after a direct kill
+  so it reaches the grandchild even when `setsid` lands between the two
+  signals; a child that died before `setsid` is caught by the direct kill)
   and the intermediate reaped before the error is returned. A grandchild the
-  group signal misses (it left the group via its own `setsid`/`setpgid`)
-  still self-terminates via channel EOF within ~10 s once the client is dropped
-  — so failed-spawn teardown of the daemon is asynchronous, not synchronous
-  with the returned error.
+  group signals miss (it left the group via its own `setsid`/`setpgid`) is
+  delivered channel EOF as soon as the client is dropped on the error
+  return; a daemon honoring the documented `run_daemon` contract (exit on
+  `SenderClosed`) then shuts down promptly — but that shutdown is the app's
+  own code, asynchronous with the returned error, and the framework cannot
+  force an escapee that ignores its channel to exit.
 - Two caveats on [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) itself: it can block
   indefinitely if the intermediate is externally SIGSTOPped/ptraced in the
   instant before it exits, since it is reaped with a blocking `wait()` (the
   build-id handshake recv is timeout-bounded, so a wedged child during the
-  handshake is not); and the caller must not concurrently reap arbitrary
-  children (e.g. a `SIGCHLD` handler that calls `waitpid(-1)`) during the
-  spawn, which could reap the intermediate first and defeat the cleanup's
-  pid bookkeeping.
+  handshake is not); and the caller must not reap the intermediate out from
+  under the spawn — neither by concurrently reaping arbitrary children
+  (e.g. a `SIGCHLD` handler that calls `waitpid(-1)`), nor via
+  disposition-based auto-reaping (`SIGCHLD` set to `SIG_IGN`, or
+  `SA_NOCLDWAIT`), which makes the kernel reap children the instant they
+  exit. The failed-spawn cleanup's `kill(-child_pid)` safety argument rests
+  on zombie retention of the direct child; auto-reaping voids it and could
+  let the group signal hit a recycled pid.
 - [`Daemonizer::spawn_daemon`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizer/struct.Daemonizer.html#method.spawn_daemon) is safe to call with a tokio runtime already running —
   fork+exec hands the daemon a fresh process image, so the fork-vs-threads
   hazard ([tokio#4301](https://github.com/tokio-rs/tokio/issues/4301))
-  doesn't apply (nor to the second fork: its child immediately execs the
-  final daemon image, so nothing but async-signal-safe code runs post-fork
-  — safe regardless of threads, including pre-main-constructor ones). On targets with `SOCK_CLOEXEC`
+  doesn't apply (nor to the second fork: it is performed by
+  `std::process::Command`, so only std's async-signal-safe child setup runs
+  post-fork before the exec into the final daemon image — safe regardless
+  of threads, including pre-main-constructor ones). On targets with `SOCK_CLOEXEC`
   (Linux/Android, the *BSDs, …) the channel fds are `FD_CLOEXEC` from creation,
   so there is no fd-inheritance race; only on macOS/iOS, which lack `SOCK_CLOEXEC`,
   does a narrow race remain if another thread forks while the spawn sets
