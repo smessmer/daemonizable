@@ -15,7 +15,7 @@
 //! guarantee while keeping the test free of the fork-in-a-multithreaded-process
 //! hazard — libtest runs each test on a worker thread, so a `fork()` here would
 //! run in a multithreaded process and the (non-async-signal-safe) child could
-//! deadlock. The spawner is also a more faithful stand-in for the real cryfs
+//! deadlock. The spawner is also a more faithful stand-in for a real embedding
 //! parent CLI: a genuine separate process image, not a snapshot of the harness.
 //!
 //! Note: the `setsid` this test observes via `getsid()` is one the HELPER
@@ -34,7 +34,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use daemonizable_e2e_tests::DaemonGuard;
+use daemonizable_e2e_tests::{DaemonGuard, read_pid_file};
 use nix::unistd::{Pid, getsid};
 
 /// The `daemonizable-test-background` helper, run as the daemon (in
@@ -52,7 +52,7 @@ fn spawner_exe() -> PathBuf {
 #[test]
 fn daemon_survives_parent_exit() {
     let tmp = tempfile::Builder::new()
-        .prefix("cryfs-daemon-survive-test")
+        .prefix("daemonizable-daemon-survive-test")
         .tempdir()
         .unwrap();
     let sentinel_path = tmp.path().join("sentinel");
@@ -65,7 +65,8 @@ fn daemon_survives_parent_exit() {
     // `Command` here, then inherited by the daemon across the spawn — so we
     // never mutate this test process's own environment (no `set_var`, hence no
     // cross-thread env race). `exit(0)` in the spawner skips destructors, just
-    // like the real cryfs parent CLI after a successful mount.
+    // like a real embedding application's parent CLI after successful startup
+    // (e.g. a mount helper once its filesystem is mounted).
     let status = Command::new(spawner_exe())
         .env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
         .env("DAEMONIZABLE_TEST_SENTINEL", &sentinel_path)
@@ -84,19 +85,7 @@ fn daemon_survives_parent_exit() {
     // (used by the daemon) creates the file before it writes, so a naive
     // `pid_path.exists()` check can win the race and read an empty file. macOS
     // exposes this race more often than Linux.
-    let pid_deadline = Instant::now() + Duration::from_secs(5);
-    let daemon_pid = loop {
-        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = contents.trim().parse::<i32>() {
-                break Pid::from_raw(pid);
-            }
-        }
-        assert!(
-            Instant::now() < pid_deadline,
-            "daemon did not publish a parseable PID within 5s",
-        );
-        thread::sleep(Duration::from_millis(20));
-    };
+    let daemon_pid = read_pid_file(&pid_path, Duration::from_secs(5));
     // Installed *before* any assertion below, so the daemon gets killed even if
     // a check panics.
     let _guard = DaemonGuard(daemon_pid);

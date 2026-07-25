@@ -29,7 +29,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use daemonizable_e2e_tests::DaemonGuard;
+use daemonizable_e2e_tests::{DaemonGuard, read_pid_file};
 use nix::unistd::Pid;
 
 /// The `daemonizable-test-background` helper, run as the daemon (in
@@ -74,19 +74,7 @@ fn daemon_send_response_after_foreground_exited() {
     // Poll on parseable content, not existence (`std::fs::write` creates the
     // file before writing, so an existence check can win the race and read
     // an empty file).
-    let pid_deadline = Instant::now() + Duration::from_secs(5);
-    let daemon_pid = loop {
-        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = contents.trim().parse::<i32>() {
-                break Pid::from_raw(pid);
-            }
-        }
-        assert!(
-            Instant::now() < pid_deadline,
-            "daemon did not publish a parseable PID within 5s",
-        );
-        thread::sleep(Duration::from_millis(20));
-    };
+    let daemon_pid = read_pid_file(&pid_path, Duration::from_secs(5));
     let _guard = DaemonGuard(daemon_pid);
 
     // Wait for the daemon to publish its verdict. The rename-based publish

@@ -1,10 +1,10 @@
 //! Regression test for inherited-fd isolation across `start_background_process`.
 //!
 //! Before the fork+exec switch, `start_background_process` did a bare `fork()`
-//! via the `daemonize` crate. Pipes created by `interprocess` weren't
-//! CLOEXEC, so the daemon child inherited every fd open in the parent at
-//! fork time — including pipes belonging to sibling tests running in
-//! parallel. The original ~5% flake rate on `cargo test` came from that.
+//! via the `daemonize` crate. Pipes created without CLOEXEC meant the daemon
+//! child inherited every fd open in the parent at fork time — including pipes
+//! belonging to sibling tests running in parallel. The original ~5% flake
+//! rate on `cargo test` came from that.
 //!
 //! This test opens a "sentinel" pipe in the parent, then spawns the
 //! `daemonizable-test-background` helper binary as a daemon, asking it to
@@ -18,81 +18,26 @@
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd};
-use std::path::PathBuf;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::os::fd::AsRawFd;
+use std::time::Duration;
 
 use daemonizable::start_background_process_with_exe;
-use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-use nix::sys::signal::{Signal, kill};
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::Pid;
-
-fn helper_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-background"))
-}
-
-/// RAII handle that kills and reaps the daemon on drop, so an assertion
-/// failure in the test doesn't leak the daemon. SIGTERM first; SIGKILL after
-/// a 2 s grace period. Never panics from Drop.
-///
-/// Unlike `daemon_survives_parent_exit`, here the daemon is our *direct
-/// child*: this raw helper-spawn path does not go through the framework's
-/// daemon-stage arms (`run_as_daemon_stage1/2`), and hence not through the
-/// framework's second fork —
-/// so we must `waitpid` to reap it. `kill(pid, 0)` would report a zombie child
-/// as "still alive", so polling with that would always hit the SIGTERM
-/// timeout.
-struct DaemonGuard(i32);
-
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        // A stale or invalid pid yields ESRCH/EPERM (discarded). Runs in the
-        // parent during Drop, so async-signal-safety does not apply.
-        let _ = kill(Pid::from_raw(self.0), Signal::SIGTERM);
-        let term_deadline = Instant::now() + Duration::from_secs(2);
-        // Poll until the child is reaped — any non-`StillAlive` result (reaped,
-        // or gone / not ours) ends the loop. If it outlasts the SIGTERM grace
-        // period, escalate to SIGKILL and a blocking reap.
-        while let Ok(WaitStatus::StillAlive) =
-            waitpid(Pid::from_raw(self.0), Some(WaitPidFlag::WNOHANG))
-        {
-            if Instant::now() >= term_deadline {
-                eprintln!(
-                    "daemon {} did not exit on SIGTERM within 2s; sending SIGKILL",
-                    self.0,
-                );
-                let _ = kill(Pid::from_raw(self.0), Signal::SIGKILL);
-                // Block-wait to reap; SIGKILL is unblockable.
-                let _ = waitpid(Pid::from_raw(self.0), None);
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
+use daemonizable_e2e_tests::{ChildDaemonGuard, read_pid_file};
+use nix::fcntl::OFlag;
+use nix::unistd::pipe2;
 
 #[test]
 fn pipes_do_not_leak_into_daemon() {
-    // Sentinel pipe — its fds should not be inherited by the daemon.
-    let (sentinel_sender, sentinel_recver) =
-        interprocess::unnamed_pipe::pipe().expect("create sentinel pipe");
-    // We want the sentinel pipe to be CLOEXEC the same way cryfs's own
-    // pipes are, so the test isolates the *daemon spawn* layer rather than
-    // a coincidental CLOEXEC default.
-    for fd in [sentinel_recver.as_fd(), sentinel_sender.as_fd()] {
-        // Set FD_CLOEXEC on each sentinel pipe end via nix (safe: `fd` is
-        // borrowed from the still-live pipe halves), preserving other flags.
-        let flags = fcntl(fd, FcntlArg::F_GETFD).expect("fcntl F_GETFD");
-        let flags = FdFlag::from_bits_retain(flags) | FdFlag::FD_CLOEXEC;
-        fcntl(fd, FcntlArg::F_SETFD(flags)).expect("fcntl F_SETFD");
-    }
+    // Sentinel pipe — its fds should not be inherited by the daemon. Created
+    // CLOEXEC (atomically, via pipe2(O_CLOEXEC)) the way a real application's
+    // own pipes typically are, so the test isolates the *daemon spawn* layer
+    // rather than relying on a coincidental inheritance default.
+    let (sentinel_recver, sentinel_sender) = pipe2(OFlag::O_CLOEXEC).expect("create sentinel pipe");
     let sentinel_write_fd = sentinel_sender.as_raw_fd();
 
     // Tell the helper daemon (via env) which fd to attempt a write on.
     let tmp = tempfile::Builder::new()
-        .prefix("cryfs-spawn-fd-isolation")
+        .prefix("daemonizable-spawn-fd-isolation")
         .tempdir()
         .unwrap();
     let pid_file = tmp.path().join("daemon.pid");
@@ -114,8 +59,11 @@ fn pipes_do_not_leak_into_daemon() {
         ),
         (OsStr::new("DAEMONIZABLE_TEST_PID"), pid_file.as_os_str()),
     ];
-    let _client =
-        start_background_process_with_exe::<(), ()>(&helper_exe(), &env).expect("spawn daemon");
+    let _client = start_background_process_with_exe::<(), ()>(
+        &daemonizable_e2e_tests::background_helper_exe!(),
+        &env,
+    )
+    .expect("spawn daemon");
 
     // Drop our own copy of the sentinel sender so the only writer left
     // *would* be the daemon's inherited copy — if it had one. The recver
@@ -123,33 +71,29 @@ fn pipes_do_not_leak_into_daemon() {
     drop(sentinel_sender);
 
     // Wait for the daemon to publish its PID, so we know it's reached its
-    // main and (if the fd leaked) has had a chance to write.
-    let pid_deadline = Instant::now() + Duration::from_secs(5);
-    while !pid_file.exists() {
-        assert!(Instant::now() < pid_deadline, "daemon never wrote pid file",);
-        thread::sleep(Duration::from_millis(10));
-    }
-    let daemon_pid: i32 = std::fs::read_to_string(&pid_file)
-        .expect("read pid file")
-        .trim()
-        .parse()
-        .expect("parse pid");
+    // main and (if the fd leaked) has had a chance to write. Content-polled,
+    // not existence-polled — see `read_pid_file`.
+    let daemon_pid = read_pid_file(&pid_file, Duration::from_secs(5));
     // Installed *before* the EOF assertion below, so the daemon gets killed
-    // even if it panics.
-    let _guard = DaemonGuard(daemon_pid);
+    // even if it panics. The reaping guard: this raw helper-spawn daemon is
+    // our DIRECT child (no framework second fork), so it must be waitpid'd.
+    let _guard = ChildDaemonGuard(daemon_pid);
 
     // No wait is needed before the check below: the helper attempts its leak
     // write BEFORE publishing the pid file (see `write_to_fd_then_idle`), so
     // having observed the pid file above already proves the write attempt
     // happened — ordering by observed events, not by timing.
 
-    // Read from the sentinel pipe with a short deadline. Expect EOF (no
+    // Read from the sentinel pipe with a non-blocking read. Expect EOF (no
     // data) because the daemon's inherited copy of the fd was closed by
     // execve. If the fd had leaked, the daemon's write would have succeeded
     // and we'd see the bytes here.
-    let mut recver = sentinel_recver;
-    interprocess::os::unix::unnamed_pipe::UnnamedPipeExt::set_nonblocking(&recver, true)
-        .expect("set_nonblocking");
+    nix::fcntl::fcntl(
+        &sentinel_recver,
+        nix::fcntl::FcntlArg::F_SETFL(OFlag::O_NONBLOCK),
+    )
+    .expect("set sentinel read end non-blocking");
+    let mut recver = std::fs::File::from(sentinel_recver);
     let mut buf = [0u8; 16];
     match recver.read(&mut buf) {
         Ok(0) => { /* EOF — no writers left. Correct. */ }
@@ -166,5 +110,5 @@ fn pipes_do_not_leak_into_daemon() {
         Err(e) => panic!("unexpected read error: {e}"),
     }
 
-    // Cleanup happens via DaemonGuard's Drop.
+    // Cleanup happens via ChildDaemonGuard's Drop.
 }

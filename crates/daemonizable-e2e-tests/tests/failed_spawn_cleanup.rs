@@ -24,26 +24,18 @@ use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::Pid;
 
 fn helper_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-background"))
+    // Single source of truth for the CARGO_BIN_EXE key: the shared macro in
+    // the e2e support lib (it must be a macro — see its doc).
+    daemonizable_e2e_tests::background_helper_exe!()
 }
 
 /// Poll the pid file the helper writes until it has parseable content. The
 /// helper writes it before it does anything the parent can observe, so it is
-/// always present by the time the spawn call returns — but poll defensively.
+/// always present by the time the spawn call returns — but poll defensively
+/// (via the shared content-polling helper, which documents the create-then-
+/// write race a bare existence check would hit).
 fn read_helper_pid(pid_path: &PathBuf) -> Pid {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Ok(contents) = std::fs::read_to_string(pid_path) {
-            if let Ok(pid) = contents.trim().parse::<i32>() {
-                return Pid::from_raw(pid);
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "helper never wrote a parseable pid file",
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
+    daemonizable_e2e_tests::read_pid_file(pid_path, Duration::from_secs(5))
 }
 
 /// Assert the library already reaped the helper (so it is not a zombie child of

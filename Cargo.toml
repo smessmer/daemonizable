@@ -39,7 +39,6 @@ command-fds = "^0.3.0"
 # workspace `version` above on release — keep the two in sync (or bump both via
 # a release tool such as `cargo-release` / `release-plz`).
 daemonizable-macros = { path = "crates/daemonizable-macros", version = "0.0.3" }
-interprocess = "^2.3.0"
 libc = "^0.2.182"
 nix = "^0.31.2"
 postcard = { version = "^1.0.0", default-features = false }
