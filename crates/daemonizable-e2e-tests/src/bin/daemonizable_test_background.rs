@@ -223,6 +223,22 @@ fn main() {
             std::fs::rename(&tmp, &outfile).expect("daemon: publish outcome file");
             std::process::exit(0);
         }
+        "idle_without_handshake" => {
+            // Used by failed_spawn_cleanup. Claims the channel, writes its pid,
+            // then idles WITHOUT ever sending a handshake — the wedged-child
+            // case the parent's handshake TIMEOUT exists for. The test drives
+            // it through the timeout-injectable spawn variant so it doesn't
+            // wait out the production 10 s bound, then asserts the cleanup
+            // killed and reaped us exactly as on a mismatch.
+            let pid_file = std::path::PathBuf::from(
+                std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
+            );
+            std::fs::write(&pid_file, std::process::id().to_string())
+                .expect("daemon: write pid file");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
         "wrong_handshake_then_idle" => {
             // Used by failed_spawn_cleanup. Drives the parent's handshake
             // validation to a Mismatch, then idles (blocks forever) so the
