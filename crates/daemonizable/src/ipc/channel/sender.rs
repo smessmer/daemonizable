@@ -112,8 +112,9 @@ where
         // return `WouldBlock` mid-frame under backpressure — a full send blocks
         // until the peer drains, and a broken pipe surfaces as a terminal Io
         // error. (For why a write to a closed peer surfaces as `EPIPE` rather
-        // than a process-killing `SIGPIPE`, see the layered-suppression note on
-        // `channel_pair` in `channel/mod.rs`.)
+        // than a process-killing `SIGPIPE` — unconditionally, whatever the
+        // process's SIGPIPE disposition — see the note on `channel_pair` in
+        // `channel/mod.rs`; it is why the MSRV is 1.90.)
         //
         // Any error from either write poisons the sender: `write_all` gives no
         // way to observe how many bytes landed before the failure, so the wire

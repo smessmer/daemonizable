@@ -45,6 +45,22 @@ fn spawner_exe() -> PathBuf {
 
 #[test]
 fn daemon_send_response_after_foreground_exited() {
+    dead_peer_send_reports_broken_pipe(/* reset_sigpipe_to_default */ false);
+}
+
+/// The same scenario with SIGPIPE reset to SIG_DFL in the daemon — the common
+/// real-daemon configuration (set before spawning pipeline children), which
+/// forfeits Rust's process-wide SIG_IGN. The clean-BrokenPipe outcome must be
+/// disposition-independent: std's UnixStream writes carry MSG_NOSIGNAL
+/// (documented std behavior since Rust 1.90, and the reason for the crate's
+/// MSRV). A regression would kill the daemon with SIGPIPE before it publishes
+/// any outcome, failing this test's 10 s ceiling loudly.
+#[test]
+fn daemon_send_response_after_foreground_exited_with_sigpipe_default() {
+    dead_peer_send_reports_broken_pipe(/* reset_sigpipe_to_default */ true);
+}
+
+fn dead_peer_send_reports_broken_pipe(reset_sigpipe_to_default: bool) {
     let tmp = tempfile::Builder::new()
         .prefix("daemonizable-daemon-send-after-exit")
         .tempdir()
@@ -55,14 +71,17 @@ fn daemon_send_response_after_foreground_exited() {
     // Run the spawner (the stand-in foreground CLI): it launches the daemon
     // and exits. `status()` reaps it, so once this returns the foreground
     // process is gone — though the daemon does not rely on that ordering; it
-    // detects the death itself via its reparenting.
-    let status = Command::new(spawner_exe())
-        .env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
+    // detects the death itself via its reparenting. The daemon inherits the
+    // DAEMONIZABLE_TEST_* variables through the spawner's environment.
+    let mut cmd = Command::new(spawner_exe());
+    cmd.env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
         .env("DAEMONIZABLE_TEST_BEHAVIOR", "send_after_parent_exit")
         .env("DAEMONIZABLE_TEST_OUTFILE", &outcome_path)
-        .env("DAEMONIZABLE_TEST_PID", &pid_path)
-        .status()
-        .expect("failed to run spawner process");
+        .env("DAEMONIZABLE_TEST_PID", &pid_path);
+    if reset_sigpipe_to_default {
+        cmd.env("DAEMONIZABLE_TEST_SIGPIPE_DFL", "1");
+    }
+    let status = cmd.status().expect("failed to run spawner process");
     assert!(
         status.success(),
         "spawner process did not exit cleanly: {status:?}",

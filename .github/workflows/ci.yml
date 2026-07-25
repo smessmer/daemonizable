@@ -41,9 +41,11 @@ jobs:
   # the fork+exec daemon e2e tests + the trybuild macro-UI snapshots) run.
   #
   # Toolchains are exactly stable / nightly / MSRV: the macro-UI compile-fail
-  # snapshots are `rustversion`-gated to the stable channel, so this trio is
-  # what tests/macro_ui.rs is written against. `1.85` is the workspace
-  # `rust-version` (edition 2024); keep the two in sync.
+  # snapshots are `rustversion`-gated to current stable only, so this trio is
+  # what tests/macro_ui.rs is written against. `1.90` is the workspace
+  # `rust-version` (chosen for std's documented MSG_NOSIGNAL on UnixStream
+  # writes — see the rust-version comment in Cargo.toml); keep the two in
+  # sync, along with the snapshot gate in tests/macro_ui.rs.
   # ---------------------------------------------------------------------------
   test:
     name: test / ${{ matrix.toolchain }} / ${{ matrix.features || 'default' }} / ${{ matrix.profile || 'debug' }}
@@ -51,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: ["stable", "nightly", "1.85"]
+        toolchain: ["stable", "nightly", "1.90"]
         features: ["", "--no-default-features", "--all-features"]
         profile: ["", "--release"]
     steps:

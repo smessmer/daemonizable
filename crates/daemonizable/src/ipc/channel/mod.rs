@@ -62,26 +62,24 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 ///
 /// # Why a dead-peer write is an `EPIPE` error, not a fatal `SIGPIPE`
 ///
-/// Layered, toolchain-dependent suppression — be precise here, because the
-/// layers differ in strength:
+/// Unconditional on every supported toolchain, **independent of the process's
+/// `SIGPIPE` disposition** — which matters for a daemonization library
+/// specifically, because daemons commonly reset `SIGPIPE` to `SIG_DFL` before
+/// spawning pipeline children, and a dead foreground peer is this crate's
+/// canonical send-failure scenario:
 ///
-/// 1. **Rust's runtime startup sets `SIGPIPE` to `SIG_IGN` process-wide.**
-///    This is the protection that holds on every supported toolchain,
-///    including the MSRV — but an application that resets `SIGPIPE` to
-///    `SIG_DFL` (a common step before spawning pipeline children) forfeits it.
-/// 2. **Apple targets: std sets `SO_NOSIGPIPE` on the socket at creation**,
-///    which suppresses `SIGPIPE` regardless of the process's disposition.
-/// 3. **Linux: std's `UnixStream` write passes `MSG_NOSIGNAL` only since
-///    Rust 1.90.** On this crate's MSRV (1.85) through 1.89 the write is a
-///    plain `write(2)`, so on those toolchains a process that reset `SIGPIPE`
-///    to `SIG_DFL` **will die on a dead-peer send** instead of getting the
-///    `EPIPE` error. On 1.90+ the flag makes the guarantee
-///    disposition-independent on Linux too.
+/// - **Linux:** since Rust 1.90, std *documents* that `UnixStream` `SOCK_STREAM`
+///   writes are made with `MSG_NOSIGNAL` — this is the reason the workspace
+///   `rust-version` is 1.90 (on 1.85–1.89 the write was a plain `write(2)` and
+///   a `SIG_DFL` process died on a dead-peer send; do not lower the MSRV
+///   without re-introducing that caveat).
+/// - **Apple targets:** std sets `SO_NOSIGPIPE` on the socket at creation,
+///   suppressing `SIGPIPE` at the socket level on every toolchain.
 ///
-/// In short: `ChannelSendError::Io(BrokenPipe)` on a dead peer is guaranteed
-/// under the default Rust runtime everywhere; with `SIGPIPE` reset to
-/// `SIG_DFL` it additionally requires Apple (any toolchain) or Linux with
-/// Rust ≥ 1.90.
+/// (Rust's default process-wide `SIGPIPE` ignore also applies, but the
+/// guarantee no longer depends on it.) The disposition-independence is pinned
+/// end-to-end by the `SIG_DFL` dead-peer e2e test in
+/// `daemon_send_after_foreground_exit`.
 ///
 /// T: The type of the data that will be sent through the channel.
 ///
@@ -152,11 +150,11 @@ mod tests {
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
         // Writing to a socket whose peer has closed returns EPIPE (an error),
-        // NOT a `SIGPIPE` that kills the test process. Which layer suppresses
-        // the signal is toolchain-dependent (see `channel_pair`'s doc): in
-        // this test process it is Rust's default process-wide SIG_IGN — on
-        // MSRV toolchains before 1.90, Linux std does NOT pass MSG_NOSIGNAL,
-        // so this test would die if the runtime default were reset.
+        // NOT a `SIGPIPE` that kills the test process — std's MSG_NOSIGNAL
+        // (Linux, documented since Rust 1.90 — hence the MSRV) /
+        // SO_NOSIGPIPE (Apple) make that disposition-independent; see
+        // `channel_pair`'s doc. The SIG_DFL variant is pinned by the e2e test
+        // in `daemon_send_after_foreground_exit`.
         assert!(sender.send(&42).is_err());
     }
 
@@ -165,7 +163,7 @@ mod tests {
         // Stronger form of `dropped_recver`: repeated sends after the peer
         // closed must each surface as an ordinary error and never raise
         // `SIGPIPE` (which would abort the process, failing the test loudly —
-        // see `channel_pair`'s doc for the layered suppression mechanism).
+        // see `channel_pair`'s doc for the suppression mechanism).
         // The first failed send reports the Io(BrokenPipe) and poisons the
         // sender; every retry then fails fast with `Desynchronized` (the wire
         // may be mid-frame after any write failure), still without SIGPIPE.
