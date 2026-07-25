@@ -575,7 +575,8 @@ pub use ipc::detach_stdio;
 #[doc(hidden)]
 pub use ipc::{
     InheritedFdsError, RpcConnection, rpc_server_from_inherited_fds, send_handshake,
-    spawn_daemon_process_with_exe, start_background_process_with_exe,
+    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,
+    start_background_process_with_exe,
 };
 
 /// Test-only: the raw stage-identity token bytes (`TOKEN_MAGIC ‖ stage`) a

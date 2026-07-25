@@ -13,26 +13,48 @@ use std::time::{Duration, Instant};
 use nix::errno::Errno;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::socket::{MsgFlags, recv};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 
 use super::MAX_MESSAGE_SIZE;
 use crate::ipc::error::ChannelRecvError;
 
 pub struct Receiver<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: DeserializeOwned,
 {
     recver: UnixStream,
     /// Set once a receive consumes part of a message frame and then fails,
     /// leaving the stream desynchronized (see [`ChannelRecvError::Desynchronized`]).
     /// Once set, every receive fails fast without touching the socket.
+    ///
+    /// The invariant is one sentence: **any receive that fails after consuming
+    /// part of a frame poisons** — mid-frame `Timeout`, mid-frame `Io`, and
+    /// `MessageTooLarge` (prefix consumed, oversized payload left unread)
+    /// alike. The exceptions are exactly the failures that leave the stream in
+    /// a coherent state: a clean idle `Timeout` (nothing consumed), a `Decode`
+    /// failure of a fully-read frame, and EOF (`SenderClosed`), which is
+    /// terminal on its own — every later receive reports it consistently.
     poisoned: bool,
     _p: PhantomData<T>,
 }
 
+impl<T> std::fmt::Debug for Receiver<T>
+where
+    T: DeserializeOwned,
+{
+    // Manual impl (like `Daemonizer`'s) so no `T: Debug` bound leaks into the
+    // API via the `PhantomData`. `poisoned` is the key diagnostic state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Receiver")
+            .field("recver", &self.recver)
+            .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> Receiver<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: DeserializeOwned,
 {
     pub(super) fn new(recver: UnixStream) -> Self {
         Self {
@@ -62,12 +84,14 @@ where
     /// exec'ing a binary that opens the channel fd but never writes (or hangs)
     /// would hang the CLI forever.
     ///
-    /// If a `Timeout` fires after part of a frame was already consumed, or the
-    /// length prefix declares an oversized payload that is then left unread, the
-    /// stream is desynchronized: the `Receiver` is poisoned and all subsequent
-    /// receives fail with [`ChannelRecvError::Desynchronized`]. A clean idle
-    /// timeout (nothing consumed) does not poison, so polling an idle channel
-    /// with short timeouts keeps working.
+    /// If any failure — a `Timeout` or an `Io` error — strikes after part of a
+    /// frame was already consumed, or the length prefix declares an oversized
+    /// payload that is then left unread, the stream is desynchronized: the
+    /// `Receiver` is poisoned and all subsequent receives fail with
+    /// [`ChannelRecvError::Desynchronized`]. A clean idle timeout (nothing
+    /// consumed) does not poison, so polling an idle channel with short
+    /// timeouts keeps working, and EOF (`SenderClosed`) does not need to — it
+    /// is already terminal (see the `poisoned` field doc for the full rule).
     pub(crate) fn recv_raw_timeout(
         &mut self,
         timeout: Duration,
@@ -77,9 +101,10 @@ where
         }
         let timeout_at = deadline_from(timeout);
 
-        // Length prefix. A timeout that consumed 0 bytes is a clean idle poll
-        // and must not poison; a partial prefix (1–3 bytes) leaves the wire
-        // mid-frame and must.
+        // Length prefix. A failure that consumed 0 bytes (an idle timeout, or
+        // an errno before anything was read) leaves the wire coherent and must
+        // not poison; any failure after a partial prefix (1–3 bytes) leaves it
+        // mid-frame and must — Timeout and Io alike (see `poison_after`).
         let mut len_bytes = [0u8; 4];
         let mut prefix_read = 0;
         if let Err(err) = read_exact_with_timeout(
@@ -88,7 +113,7 @@ where
             timeout_at,
             &mut prefix_read,
         ) {
-            if matches!(err, ChannelRecvError::Timeout) && prefix_read > 0 {
+            if poison_after(&err, prefix_read) {
                 self.poisoned = true;
             }
             return Err(err);
@@ -105,14 +130,16 @@ where
             });
         }
 
-        // Payload. The prefix was fully consumed, so any timeout here is
-        // mid-frame and poisons.
+        // Payload. The prefix was fully consumed, so ANY failure here is
+        // mid-frame; `poison_after` is passed the 4 prefix bytes so even a
+        // zero-progress payload error poisons (only EOF is exempt — terminal
+        // on its own).
         let mut buf = vec![0u8; len];
         let mut payload_read = 0;
         if let Err(err) =
             read_exact_with_timeout(self.recver.as_fd(), &mut buf, timeout_at, &mut payload_read)
         {
-            if matches!(err, ChannelRecvError::Timeout) {
+            if poison_after(&err, 4 + payload_read) {
                 self.poisoned = true;
             }
             return Err(err);
@@ -128,10 +155,13 @@ where
     /// An extremely large `timeout` (e.g. `Duration::MAX`) is clamped rather
     /// than panicking on deadline overflow; for a genuinely unbounded wait, use
     /// the blocking [`recv`](Self::recv) instead.
-    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, ChannelRecvError>
-    where
-        T: Send,
-    {
+    //
+    // No `T: Send` here: the timeout machinery is a same-thread poll +
+    // `recv(MSG_DONTWAIT)` loop (`read_exact_with_timeout`); nothing crosses a
+    // thread boundary, so the bound would be pure API noise. (It once existed
+    // and cascaded all the way into `Daemonizable::Response` — don't cargo-cult
+    // it back without something that actually moves `T` between threads.)
+    pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, ChannelRecvError> {
         let buf = self.recv_raw_timeout(timeout)?;
         Ok(postcard::from_bytes(&buf)?)
     }
@@ -143,16 +173,25 @@ where
         // The socket is blocking (never toggled — see `Receiver`'s timeout
         // path), so `read_exact` blocks until the frame arrives or the peer
         // closes.
+        //
+        // Poisoning on the blocking path: `std::io::Read::read_exact` documents
+        // that on error the number of bytes it consumed is unspecified, so a
+        // non-EOF error from EITHER read must conservatively poison — the wire
+        // may be mid-frame even on the prefix read. EOF (`SenderClosed`) stays
+        // unpoisoned: it is terminal on its own and every later read reports it
+        // consistently. (A blocking read can't time out mid-frame.)
         let mut len_bytes = [0u8; 4];
-        self.recver
-            .read_exact(&mut len_bytes)
-            .map_err(normalize_blocking_read_err)?;
+        if let Err(e) = self.recver.read_exact(&mut len_bytes) {
+            let err = normalize_blocking_read_err(e);
+            if !matches!(err, ChannelRecvError::SenderClosed) {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len > MAX_MESSAGE_SIZE {
             // Prefix consumed, oversized payload left unread → desynced, same as
-            // the timeout path. (A blocking read can't time out mid-frame; a
-            // truncated frame surfaces as SenderClosed, which is terminal EOF
-            // and needs no poisoning.)
+            // the timeout path.
             self.poisoned = true;
             return Err(ChannelRecvError::MessageTooLarge {
                 size: len,
@@ -160,11 +199,26 @@ where
             });
         }
         let mut buf = vec![0u8; len];
-        self.recver
-            .read_exact(&mut buf)
-            .map_err(normalize_blocking_read_err)?;
+        if let Err(e) = self.recver.read_exact(&mut buf) {
+            let err = normalize_blocking_read_err(e);
+            if !matches!(err, ChannelRecvError::SenderClosed) {
+                self.poisoned = true;
+            }
+            return Err(err);
+        }
         Ok(buf)
     }
+}
+
+/// The receiver-side poison decision, split out as a pure function so the rule
+/// is unit-testable without fault injection: given a failed receive's error and
+/// how many bytes of the current frame were consumed before it (prefix bytes
+/// count), decide whether the stream is desynchronized. The rule (also on the
+/// `poisoned` field doc): any failure after partial consumption poisons, except
+/// EOF — `SenderClosed` is terminal on its own, so every later receive already
+/// fails consistently without the flag.
+fn poison_after(err: &ChannelRecvError, consumed: usize) -> bool {
+    consumed > 0 && !matches!(err, ChannelRecvError::SenderClosed)
 }
 
 /// Upper bound on the deadline a caller-supplied timeout can produce, used only
@@ -298,6 +352,26 @@ fn read_exact_with_timeout_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The poison rule as a decision table: any failure after partial
+    // consumption poisons, except EOF (terminal on its own); zero-consumption
+    // failures never poison (clean idle timeout, pre-read errno). This pins
+    // the rule for the error variants fault injection can't easily produce on
+    // a real socketpair (mid-frame `Io`).
+    #[test]
+    fn poison_after_decision_table() {
+        let io = || ChannelRecvError::Io(std::io::Error::other("injected"));
+        // Nothing consumed → never poison, whatever the error.
+        assert!(!poison_after(&ChannelRecvError::Timeout, 0));
+        assert!(!poison_after(&io(), 0));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, 0));
+        // Partial consumption → poison for Timeout and Io alike...
+        assert!(poison_after(&ChannelRecvError::Timeout, 1));
+        assert!(poison_after(&io(), 3));
+        assert!(poison_after(&ChannelRecvError::Timeout, 4));
+        // ...but not for EOF, which is terminal without the flag.
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, 3));
+    }
 
     // Regression test for the deadline-overflow guard: `Instant::now() + timeout`
     // panics when `timeout` is large enough to overflow `Instant` (e.g.

@@ -10,19 +10,35 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::ipc::channel::{Receiver, Sender, endpoint_from_stream};
 use crate::ipc::error::{ChannelRecvError, ChannelSendError, InheritedFdsError};
 
+// Direction-correct bounds, mirroring `RpcClient`: the server only
+// DESERIALIZES requests and SERIALIZES responses.
 pub struct RpcServer<Request, Response>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned,
+    Request: DeserializeOwned,
+    Response: Serialize,
 {
     sender: Sender<Response>,
     receiver: Receiver<Request>,
 }
 
+impl<Request, Response> std::fmt::Debug for RpcServer<Request, Response>
+where
+    Request: DeserializeOwned,
+    Response: Serialize,
+{
+    // Manual impl (like `Daemonizer`'s) so no `Debug` bounds leak into the API.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcServer")
+            .field("sender", &self.sender)
+            .field("receiver", &self.receiver)
+            .finish()
+    }
+}
+
 impl<Request, Response> RpcServer<Request, Response>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned,
+    Request: DeserializeOwned,
+    Response: Serialize,
 {
     pub(super) fn new(sender: Sender<Response>, receiver: Receiver<Request>) -> Self {
         Self { sender, receiver }

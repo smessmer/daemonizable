@@ -132,10 +132,17 @@ use crate::ipc::RpcServer;
 /// snapshots in `daemonizable-e2e-tests/tests/macro_ui/`.)
 pub trait Daemonizable: Sized {
     /// Typed request the parent sends to the daemon over the RPC channel.
+    ///
+    /// Both serde directions are genuinely required here (unlike on the
+    /// individual endpoint types, whose bounds are direction-correct): the
+    /// same binary is both endpoints, so the foreground serializes what the
+    /// daemon deserializes.
     type Request: Serialize + DeserializeOwned;
 
-    /// Typed response the daemon sends back.
-    type Response: Serialize + DeserializeOwned + Send;
+    /// Typed response the daemon sends back. Both serde directions required,
+    /// as for [`Request`](Self::Request). (No `Send` bound: nothing in the
+    /// channel machinery crosses threads with these values.)
+    type Response: Serialize + DeserializeOwned;
 
     /// The identity string exchanged in the parent↔daemon handshake.
     ///

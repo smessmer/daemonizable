@@ -81,8 +81,8 @@ static DAEMON_FDS_CLAIMED: AtomicBool = AtomicBool::new(false);
 pub unsafe fn rpc_server_from_inherited_fds<Request, Response>()
 -> Result<RpcServer<Request, Response>, InheritedFdsError>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned + Send,
+    Request: DeserializeOwned,
+    Response: Serialize,
 {
     if DAEMON_FDS_CLAIMED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -165,7 +165,9 @@ pub(crate) fn validate_inherited_fds() -> Result<(), InheritedFdsError> {
     if statbuf.st_mode & libc::S_IFMT != libc::S_IFSOCK {
         return Err(InheritedFdsError::NotASocket {
             fd,
-            st_mode: statbuf.st_mode,
+            // Widened to u32 so the (platform-varying) libc::mode_t alias
+            // stays out of the public error type.
+            st_mode: statbuf.st_mode as u32,
         });
     }
     Ok(())

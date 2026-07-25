@@ -98,8 +98,8 @@ pub(crate) fn endpoint_from_stream<S, R>(
     stream: UnixStream,
 ) -> std::io::Result<(Sender<S>, Receiver<R>)>
 where
-    S: Serialize + DeserializeOwned,
-    R: Serialize + DeserializeOwned,
+    S: Serialize,
+    R: DeserializeOwned,
 {
     let clone = stream.try_clone()?;
     Ok((Sender::new(clone), Receiver::new(stream)))
@@ -129,18 +129,25 @@ mod tests {
 
     #[test]
     fn writing_after_peer_close_errors_without_sigpipe() {
-        // Stronger form of `dropped_recver`: multiple sends after the peer
+        // Stronger form of `dropped_recver`: repeated sends after the peer
         // closed must each surface as an ordinary error and never raise
-        // `SIGPIPE` (which would abort the process, failing the test loudly).
-        // std uses `MSG_NOSIGNAL` (Linux) / `SO_NOSIGPIPE` (Apple), so this
-        // holds even for a process that reset SIGPIPE to its default.
+        // `SIGPIPE` (which would abort the process, failing the test loudly —
+        // see `channel_pair`'s doc for the layered suppression mechanism).
+        // The first failed send reports the Io(BrokenPipe) and poisons the
+        // sender; every retry then fails fast with `Desynchronized` (the wire
+        // may be mid-frame after any write failure), still without SIGPIPE.
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
-        for _ in 0..4 {
+        let err = sender.send(&1).unwrap_err();
+        assert!(
+            matches!(err, ChannelSendError::Io(_)),
+            "expected an Io(BrokenPipe) error, got {err:?}"
+        );
+        for _ in 0..3 {
             let err = sender.send(&1).unwrap_err();
             assert!(
-                matches!(err, ChannelSendError::Io(_)),
-                "expected an Io(BrokenPipe) error, got {err:?}"
+                matches!(err, ChannelSendError::Desynchronized),
+                "a retried send on a poisoned sender must fail fast, got {err:?}"
             );
         }
     }
