@@ -24,15 +24,17 @@ use std::time::Duration;
 use daemonizable::start_background_process_with_exe;
 use daemonizable_e2e_tests::{ChildDaemonGuard, read_pid_file};
 use nix::fcntl::OFlag;
-use nix::unistd::pipe2;
 
 #[test]
 fn pipes_do_not_leak_into_daemon() {
     // Sentinel pipe — its fds should not be inherited by the daemon. Created
-    // CLOEXEC (atomically, via pipe2(O_CLOEXEC)) the way a real application's
-    // own pipes typically are, so the test isolates the *daemon spawn* layer
-    // rather than relying on a coincidental inheritance default.
-    let (sentinel_recver, sentinel_sender) = pipe2(OFlag::O_CLOEXEC).expect("create sentinel pipe");
+    // via std's anonymous-pipe API (stable since 1.87, inside the MSRV), which
+    // sets CLOEXEC on the fds it creates like every other std fd — the way a
+    // real application's own pipes typically are — so the test isolates the
+    // *daemon spawn* layer rather than relying on a coincidental inheritance
+    // default. (Not nix::unistd::pipe2: macOS has no pipe2 syscall, and this
+    // test compiles on the macOS CI leg.)
+    let (mut sentinel_recver, sentinel_sender) = std::io::pipe().expect("create sentinel pipe");
     let sentinel_write_fd = sentinel_sender.as_raw_fd();
 
     // Tell the helper daemon (via env) which fd to attempt a write on.
@@ -93,9 +95,8 @@ fn pipes_do_not_leak_into_daemon() {
         nix::fcntl::FcntlArg::F_SETFL(OFlag::O_NONBLOCK),
     )
     .expect("set sentinel read end non-blocking");
-    let mut recver = std::fs::File::from(sentinel_recver);
     let mut buf = [0u8; 16];
-    match recver.read(&mut buf) {
+    match sentinel_recver.read(&mut buf) {
         Ok(0) => { /* EOF — no writers left. Correct. */ }
         Ok(n) => panic!(
             "fd leaked into daemon: read {n} bytes from sentinel pipe: {:?}",

@@ -116,8 +116,11 @@ jobs:
       # so `macros` is on even in that job's --no-default-features leg). This is
       # therefore the only place the crate's doctests — e.g. the `no_run`
       # doctest on `run` — are compiled in each feature configuration,
-      # including with `macros` genuinely off.
+      # including with `macros` genuinely off. Skipped for the bin-only
+      # rename-test crate: `cargo test --doc` hard-errors ("no library
+      # targets") on a package without a lib target.
       - run: cargo test -p ${{ matrix.crate }} --doc ${{ matrix.features }}
+        if: matrix.crate != 'daemonizable-rename-test'
 
   # ---------------------------------------------------------------------------
   # Minimal-versions: resolve every dependency to the lowest version its
