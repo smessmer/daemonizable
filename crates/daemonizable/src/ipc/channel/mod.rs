@@ -73,13 +73,18 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 ///   `rust-version` is 1.90 (on 1.85–1.89 the write was a plain `write(2)` and
 ///   a `SIG_DFL` process died on a dead-peer send; do not lower the MSRV
 ///   without re-introducing that caveat).
-/// - **Apple targets:** std sets `SO_NOSIGPIPE` on the socket at creation,
-///   suppressing `SIGPIPE` at the socket level on every toolchain.
+/// - **Apple targets:** THIS CRATE sets `SO_NOSIGPIPE` on both channel ends
+///   when it creates them (`RpcConnection::new_channel`), suppressing
+///   `SIGPIPE` at the socket level. Deliberately not left to std: std sets
+///   the option only on sockets from `Socket::new` (connect/accept paths),
+///   **not** in `new_pair`/`UnixStream::pair` — verified against std's
+///   source, and caught live by the macOS leg of the `SIG_DFL` e2e test —
+///   and Apple has no `MSG_NOSIGNAL` to use instead.
 ///
 /// (Rust's default process-wide `SIGPIPE` ignore also applies, but the
 /// guarantee no longer depends on it.) The disposition-independence is pinned
-/// end-to-end by the `SIG_DFL` dead-peer e2e test in
-/// `daemon_send_after_foreground_exit`.
+/// end-to-end, on both Linux and macOS CI, by the `SIG_DFL` dead-peer e2e
+/// test in `daemon_send_after_foreground_exit`.
 ///
 /// T: The type of the data that will be sent through the channel.
 ///
@@ -151,10 +156,13 @@ mod tests {
         drop(recver);
         // Writing to a socket whose peer has closed returns EPIPE (an error),
         // NOT a `SIGPIPE` that kills the test process — std's MSG_NOSIGNAL
-        // (Linux, documented since Rust 1.90 — hence the MSRV) /
-        // SO_NOSIGPIPE (Apple) make that disposition-independent; see
-        // `channel_pair`'s doc. The SIG_DFL variant is pinned by the e2e test
-        // in `daemon_send_after_foreground_exit`.
+        // (Linux, documented since Rust 1.90 — hence the MSRV) / the
+        // SO_NOSIGPIPE this crate's channel constructor sets (Apple) make
+        // that disposition-independent; see `channel_pair`'s doc. The SIG_DFL
+        // variant is pinned by the e2e test in
+        // `daemon_send_after_foreground_exit`. (This fixture builds its pair
+        // directly, without the constructor's Apple option — fine here: the
+        // test process keeps Rust's default SIGPIPE ignore.)
         assert!(sender.send(&42).is_err());
     }
 
