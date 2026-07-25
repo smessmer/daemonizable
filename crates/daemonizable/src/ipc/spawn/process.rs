@@ -135,10 +135,10 @@ fn resolve_linux_exe_path(
     // Last resort: `argv[0]`. It may be a bare command name (then `Command`
     // resolves it via `$PATH`) or a path relative to a since-changed cwd —
     // best-effort, and again backstopped by the build-id handshake.
-    if let Some(argv0) = argv0 {
-        if !argv0.is_empty() {
-            return Ok(PathBuf::from(argv0));
-        }
+    if let Some(argv0) = argv0
+        && !argv0.is_empty()
+    {
+        return Ok(PathBuf::from(argv0));
     }
 
     // The NotFound kind is likewise part of the ExePath variant's documented

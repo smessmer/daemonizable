@@ -37,10 +37,10 @@ macro_rules! background_helper_exe {
 pub fn read_pid_file(path: &Path, timeout: Duration) -> Pid {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            if let Ok(pid) = contents.trim().parse::<i32>() {
-                return Pid::from_raw(pid);
-            }
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && let Ok(pid) = contents.trim().parse::<i32>()
+        {
+            return Pid::from_raw(pid);
         }
         assert!(
             Instant::now() < deadline,
