@@ -50,6 +50,34 @@ where
     }
 }
 
+/// Set `SO_NOSIGPIPE` on `socket` (Apple targets only — the option does not
+/// exist on Linux, where `MSG_NOSIGNAL` on the writes covers the same need).
+/// nix has no wrapper for this option, hence raw libc.
+#[cfg(target_vendor = "apple")]
+fn set_nosigpipe(socket: &UnixStream) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let one: libc::c_int = 1;
+    // SAFETY: `setsockopt` reads exactly `optlen` bytes from `optval`; here
+    // that is size_of::<c_int>() bytes of `one`, a live, correctly aligned
+    // c_int on this frame. The fd is borrowed from a live `UnixStream` (not
+    // closed or retained by the call), SOL_SOCKET/SO_NOSIGPIPE is a plain
+    // int-valued option, and no pointer outlives the call.
+    let rc = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_NOSIGPIPE,
+            (&raw const one).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 impl<Request, Response> RpcConnection<Request, Response>
 where
     Request: Serialize,
@@ -60,6 +88,19 @@ where
         // client's send/recv halves), the child gets the other.
         let (parent_end, child_end) =
             UnixStream::pair().map_err(ChannelCreateError::CreateSocket)?;
+        // Apple targets: set SO_NOSIGPIPE on both ends OURSELVES. std sets it
+        // only on sockets from `Socket::new` (connect/accept paths), NOT in
+        // `new_pair`/`UnixStream::pair` — verified against std's source, and
+        // caught live by the macOS SIG_DFL dead-peer e2e test — and Apple has
+        // no MSG_NOSIGNAL to put on the writes instead. The option lives on
+        // the socket, so the daemon's inherited fd-3 end and every `try_clone`
+        // dup share it; this is what makes the dead-peer-send guarantee
+        // (`Io(BrokenPipe)`, never a fatal SIGPIPE) disposition-independent on
+        // Apple. See the SIGPIPE note on `channel_pair` in `channel/mod.rs`.
+        #[cfg(target_vendor = "apple")]
+        for end in [&parent_end, &child_end] {
+            set_nosigpipe(end).map_err(ChannelCreateError::CreateSocket)?;
+        }
         let (client_sender, client_receiver) =
             endpoint_from_stream(parent_end).map_err(ChannelCreateError::CreateSocket)?;
         Ok(Self {

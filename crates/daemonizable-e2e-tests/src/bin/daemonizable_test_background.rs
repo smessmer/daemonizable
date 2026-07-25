@@ -210,10 +210,13 @@ fn main() {
             // real-daemon configuration (done before spawning pipeline
             // children) that forfeits Rust's process-wide SIG_IGN. The
             // dead-peer send below must STILL surface as a clean BrokenPipe:
-            // std's UnixStream writes carry MSG_NOSIGNAL (documented since
-            // Rust 1.90 — the crate's MSRV exists for exactly this). If that
-            // guarantee ever broke, this process would die on SIGPIPE here and
-            // never publish an outcome, failing the test loudly.
+            // on Linux std's UnixStream writes carry MSG_NOSIGNAL (documented
+            // since Rust 1.90 — the crate's MSRV exists for exactly this); on
+            // Apple the channel constructor sets SO_NOSIGPIPE on the socket
+            // (std does NOT for socketpairs — this very test caught that on
+            // the macOS CI leg). If the guarantee ever broke, this process
+            // would die on SIGPIPE here and never publish an outcome, failing
+            // the test loudly.
             if std::env::var_os("DAEMONIZABLE_TEST_SIGPIPE_DFL").is_some() {
                 // SAFETY: `libc::signal` with SIG_DFL installs the default
                 // disposition for SIGPIPE — no handler function pointer is
