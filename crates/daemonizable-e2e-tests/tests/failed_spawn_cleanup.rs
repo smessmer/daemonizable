@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use daemonizable::{
     ChannelRecvError, HandshakeError, SpawnDaemonError, spawn_daemon_process_with_exe,
+    spawn_daemon_process_with_exe_and_timeout,
 };
 use nix::errno::Errno;
 use nix::sys::signal::kill;
@@ -163,6 +164,59 @@ fn failed_spawn_reaps_a_child_that_died_before_the_handshake() {
 
     // The child exited before the handshake; the cleanup's wait() must have
     // reaped the resulting zombie.
+    let pid = read_helper_pid(&pid_file);
+    assert_reaped_and_gone(pid);
+}
+
+/// The third documented cleanup trigger, previously untested: a child that
+/// holds the channel open but NEVER handshakes, so the parent's bounded
+/// handshake recv expires. Driven through the timeout-injectable spawn
+/// variant so the test waits ~2 s, not the production 10 s. The kill-and-reap
+/// contract must hold on this arm exactly as on Mismatch/EOF — a regression
+/// that special-cased Timeout ("the child may still come up") would leave a
+/// live orphan after every wedged spawn.
+///
+/// The 2 s timeout is not a synchronization point: the helper writes its pid
+/// file immediately after claiming the channel (milliseconds), and only then
+/// idles; the margin is for loaded CI. If the timeout somehow fired before
+/// the pid write, `read_helper_pid`'s own 5 s poll would fail the test
+/// loudly, not silently pass it.
+#[test]
+fn failed_spawn_kills_and_reaps_a_child_that_never_handshakes() {
+    let tmp = tempfile::Builder::new()
+        .prefix("daemonizable-failed-spawn")
+        .tempdir()
+        .unwrap();
+    let pid_file = tmp.path().join("daemon.pid");
+    let pid_param: OsString = pid_file.clone().into_os_string();
+    let env: [(&OsStr, &OsStr); 2] = [
+        (
+            OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
+            OsStr::new("idle_without_handshake"),
+        ),
+        (OsStr::new("DAEMONIZABLE_TEST_PID"), pid_param.as_os_str()),
+    ];
+
+    let result = spawn_daemon_process_with_exe_and_timeout::<(), ()>(
+        &helper_exe(),
+        "the-build-id-the-parent-expects",
+        &env,
+        Duration::from_secs(2),
+    );
+
+    let err = result
+        .err()
+        .expect("spawn must fail when the child never handshakes");
+    assert!(
+        matches!(
+            err,
+            SpawnDaemonError::Handshake(HandshakeError::Recv(ChannelRecvError::Timeout))
+        ),
+        "expected Handshake(Recv(Timeout)), got: {err:?}"
+    );
+
+    // The helper was alive and idling when the timeout fired — the cleanup
+    // must have SIGKILLed and reaped it.
     let pid = read_helper_pid(&pid_file);
     assert_reaped_and_gone(pid);
 }

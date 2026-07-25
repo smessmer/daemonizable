@@ -21,8 +21,27 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+use nix::sys::socket::MsgFlags;
+
 fn test_app_exe() -> &'static str {
     env!("CARGO_BIN_EXE_daemonizable-test-app")
+}
+
+/// Assert the child consumed NOTHING from the crafted socket: everything the
+/// test queued into `childs`'s receive direction must still be readable from
+/// our retained copy after the child exited. This pins the documented
+/// "falls to the foreground arm having consumed nothing" guarantee — the
+/// existing foreground assertions alone would keep passing if dispatch
+/// started eating queued bytes on the no-match path.
+fn assert_socket_unconsumed(childs: &UnixStream, expected: &[u8]) {
+    let mut buf = vec![0u8; expected.len() + 16];
+    let n = nix::sys::socket::recv(childs.as_raw_fd(), &mut buf, MsgFlags::MSG_DONTWAIT)
+        .expect("recv on the retained crafted-socket end");
+    assert_eq!(
+        &buf[..n],
+        expected,
+        "dispatch consumed bytes from a non-framework socket on fd 3"
+    );
 }
 
 /// Session/group topology to force on the spawned child before exec, so the
@@ -83,8 +102,11 @@ fn run_with_fd3(
 fn foreign_fifo_on_fd3_dispatches_foreground() {
     // A make-jobserver-style FIFO (a pipe) on fd 3 is not a socket, so the
     // dispatch probe's `recv` returns ENOTSOCK and the app runs foreground —
-    // never touching (consuming from) the jobserver.
+    // never touching (consuming from) the jobserver. A byte is queued into the
+    // pipe before the spawn, standing in for a jobserver token: it must still
+    // be there afterwards (eating it would wedge a real parallel build).
     let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
+    nix::unistd::write(&write_fd, b"J").expect("queue the jobserver-token stand-in");
 
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
@@ -109,6 +131,20 @@ fn foreign_fifo_on_fd3_dispatches_foreground() {
         "foreground-ran", result,
         "a FIFO on fd 3 must not hijack dispatch"
     );
+
+    // The "jobserver token" byte must still be in the pipe. Non-blocking read
+    // (the write end is still open, so a consumed byte would mean a HANG here
+    // if the read were blocking).
+    nix::fcntl::fcntl(
+        &read_fd,
+        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
+    )
+    .expect("set read end non-blocking");
+    let mut buf = [0u8; 4];
+    let n = nix::unistd::read(&read_fd, &mut buf).expect(
+        "the jobserver-token byte was consumed by dispatch (read would block on an empty pipe)",
+    );
+    assert_eq!(&buf[..n], b"J", "dispatch consumed or corrupted the FIFO");
 }
 
 #[test]
@@ -143,6 +179,9 @@ fn wrong_magic_socket_on_fd3_dispatches_foreground() {
         "foreground-ran", result,
         "a wrong-magic socket on fd 3 must not hijack dispatch"
     );
+    // The queued bytes must all still be there — the no-match path consumes
+    // nothing.
+    assert_socket_unconsumed(&childs, &[0xABu8; 33]);
 }
 
 #[test]
@@ -181,6 +220,9 @@ fn partial_token_socket_on_fd3_dispatches_foreground() {
         "foreground-ran", result,
         "a truncated token on fd 3 must not hijack dispatch"
     );
+    // The truncated token must still be queued in full — a short peek consumes
+    // nothing.
+    assert_socket_unconsumed(&childs, &full[..full.len() - 1]);
 }
 
 #[test]
@@ -207,6 +249,36 @@ fn single_token_socket_is_rejected_by_stage1() {
     assert!(
         stderr.contains("missing stage 2's token"),
         "expected the missing-token-2 message, got: {stderr}"
+    );
+}
+
+#[test]
+fn both_tokens_hand_run_as_group_leader_fails_stage1_setsid() {
+    // BOTH tokens queued (a faithful forgery of the parent's prequeue), but the
+    // process is hand-run as a process-group LEADER: dispatch routes to stage 1
+    // (token 1 matched), the mandatory token-2 peek passes — and then `setsid`
+    // fails with EPERM, because POSIX forbids a group leader from creating a
+    // session. Exit 1, before any fork or exec. This pins the setsid-failure
+    // arm of stage 1 (the hand-launched-shell-job misuse its comment names),
+    // which no other test reaches: the single-token test exits earlier, and
+    // genuine spawns are never group leaders.
+    let (ours, childs) = UnixStream::pair().expect("socketpair");
+    let mut both = daemonizable::stage_token_bytes(1);
+    both.extend_from_slice(&daemonizable::stage_token_bytes(2));
+    (&ours).write_all(&both).expect("queue both tokens");
+
+    let output = run_with_fd3(&[], &childs, Topology::NewGroup, &ours);
+
+    assert_eq!(
+        Some(1),
+        output.status.code(),
+        "a group-leader hand-run with both tokens must die on setsid; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("setsid() failed"),
+        "expected the setsid-failure message, got: {stderr}"
     );
 }
 
