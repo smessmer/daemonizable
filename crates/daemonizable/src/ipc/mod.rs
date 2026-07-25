@@ -30,7 +30,10 @@ pub use spawn::{rpc_server_from_inherited_fds, send_handshake};
 #[cfg(any(test, feature = "testutils"))]
 pub use error::InheritedFdsError;
 #[cfg(any(test, feature = "testutils"))]
-pub use spawn::{spawn_daemon_process_with_exe, start_background_process_with_exe};
+pub use spawn::{
+    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,
+    start_background_process_with_exe,
+};
 
 /// Replace the calling process's stdin/stdout/stderr with `/dev/null` via
 /// `dup2`. The daemon calls this at its post-startup boundary — typically

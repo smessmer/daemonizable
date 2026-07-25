@@ -3,11 +3,19 @@
 //! Library-crate policy: detailed `thiserror` enums instead of `anyhow`, so
 //! callers can match on failure modes (e.g. distinguish a peer that closed
 //! the channel from a timeout) and the public API stays dependency-light.
+//!
+//! Every public enum here is `#[non_exhaustive]`: the crate's roadmap (the
+//! batteries TODO in `app::daemon_child`) plans new failure modes — e.g.
+//! `SpawnDaemonError` growing `AlreadyRunning` / privilege-drop variants — and
+//! the match-on-failure-modes policy above is exactly the usage pattern that
+//! would otherwise turn each addition into a breaking change. Callers keep a
+//! wildcard arm; new variants land as minor releases.
 
 use thiserror::Error;
 
 /// Creating an IPC channel pair failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ChannelCreateError {
     /// The underlying `socketpair(2)` call failed. `UnixStream::pair` sets
     /// `FD_CLOEXEC` on the created fds itself (atomically via `SOCK_CLOEXEC`
@@ -19,23 +27,41 @@ pub enum ChannelCreateError {
 
 /// Sending a message over an IPC channel failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ChannelSendError {
-    /// The message exceeds the wire format's maximum size.
+    /// The message exceeds the wire format's maximum size. Nothing was
+    /// written, so the channel remains usable.
     #[error("Message size {size} exceeds maximum {max}")]
     MessageTooLarge { size: usize, max: usize },
 
-    /// Serializing the message failed.
+    /// Serializing the message failed. Nothing was written, so the channel
+    /// remains usable.
     #[error("Failed to encode message: {0}")]
     Encode(#[from] postcard::Error),
 
     /// Writing to the channel failed. A receiver that closed its end surfaces
     /// here as [`std::io::ErrorKind::BrokenPipe`].
+    ///
+    /// Treat as terminal: a frame may have been partially written, so the
+    /// sender is poisoned and every later send fails with
+    /// [`Desynchronized`](Self::Desynchronized) — retrying is never safe (a
+    /// fresh length prefix would be consumed as leftover payload bytes by the
+    /// peer).
     #[error("Failed to write to channel: {0}")]
     Io(#[from] std::io::Error),
+
+    /// The sender is poisoned: a previous send failed after (possibly
+    /// partially) writing a frame, so the wire is desynchronized on the send
+    /// side. Every send on a poisoned sender fails with this without touching
+    /// the channel. Abandon the connection. Mirrors
+    /// [`ChannelRecvError::Desynchronized`] on the receive side.
+    #[error("Sender desynchronized by a prior failed send; connection must be abandoned")]
+    Desynchronized,
 }
 
 /// Receiving a message from an IPC channel failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum ChannelRecvError {
     /// The timeout expired before a full message arrived.
     #[error("Timeout waiting for a message on the channel")]
@@ -53,13 +79,16 @@ pub enum ChannelRecvError {
     MessageTooLarge { size: usize, max: usize },
 
     /// The receiver is poisoned: a previous receive consumed part of a message
-    /// frame and then failed (a mid-frame [`Timeout`](Self::Timeout), or a
+    /// frame and then failed — a mid-frame [`Timeout`](Self::Timeout), a
+    /// mid-frame [`Io`](Self::Io) error, or a
     /// [`MessageTooLarge`](Self::MessageTooLarge) whose declared payload was
-    /// left unread), so the stream is desynchronized. Every receive on a
+    /// left unread — so the stream is desynchronized. Every receive on a
     /// poisoned `Receiver` fails with this without touching the channel; a further
     /// read would misinterpret leftover payload bytes as a new length prefix.
-    /// Abandon the connection. A clean idle timeout (nothing consumed) and a
-    /// [`Decode`](Self::Decode) failure of a fully-read frame do *not* poison.
+    /// Abandon the connection. A clean idle timeout (nothing consumed), a
+    /// [`Decode`](Self::Decode) failure of a fully-read frame, and EOF
+    /// ([`SenderClosed`](Self::SenderClosed), terminal on its own) do *not*
+    /// poison.
     #[error("Receiver desynchronized by a prior partial receive; connection must be abandoned")]
     Desynchronized,
 
@@ -67,13 +96,16 @@ pub enum ChannelRecvError {
     #[error("Failed to decode message: {0}")]
     Decode(#[from] postcard::Error),
 
-    /// Reading from the channel failed.
+    /// Reading from the channel failed. If the failure struck after part of a
+    /// frame was consumed, the receiver is also poisoned — every later receive
+    /// then reports [`Desynchronized`](Self::Desynchronized); do not retry.
     #[error("Failed to read from channel: {0}")]
     Io(#[from] std::io::Error),
 }
 
 /// The build-id handshake between parent and daemon failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum HandshakeError {
     /// Receiving the handshake bytes failed (EOF, timeout, or I/O error) —
     /// e.g. the spawned binary exited or hangs without writing a handshake.
@@ -94,16 +126,27 @@ pub enum HandshakeError {
 
 /// Spawning the daemon child process failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SpawnDaemonError {
     /// Creating the parent↔child IPC channel failed.
     #[error("Failed to create IPC channel: {0}")]
     CreateChannel(#[from] ChannelCreateError),
 
     /// The path to re-exec could not be determined. On non-Linux this is a
-    /// failed `std::env::current_exe`. On Linux it means `/proc` was not
-    /// mounted *and* every fallback (`AT_EXECFN`, then `argv[0]`) also failed
-    /// to yield an executable path — normally `/proc/self/exe` is used and this
-    /// never arises.
+    /// failed `std::env::current_exe`. On Linux (where `/proc/self/exe` is
+    /// normally used and this never arises) it carries one of two synthesized
+    /// errors, distinguishable by [`std::io::Error::kind`] as a documented
+    /// contract:
+    ///
+    /// * [`PermissionDenied`](std::io::ErrorKind::PermissionDenied) — `/proc`
+    ///   is not mounted and this is a secure-execution (setuid/setgid/
+    ///   file-caps, `AT_SECURE`) process, so the `AT_EXECFN` / `argv[0]`
+    ///   fallbacks were deliberately **refused unconsulted**: both are picked
+    ///   by the unprivileged invoker, and re-exec'ing them would let the
+    ///   invoker steer which binary runs with the elevated credentials.
+    /// * [`NotFound`](std::io::ErrorKind::NotFound) — `/proc` is not mounted
+    ///   and every fallback (`AT_EXECFN`, then `argv[0]`) was consulted but
+    ///   failed to yield an executable path.
     #[error("Failed to determine the executable path to re-exec: {0}")]
     ExePath(#[source] std::io::Error),
 
@@ -122,6 +165,7 @@ pub enum SpawnDaemonError {
 
 /// The daemon child couldn't claim the IPC channel fd inherited from its parent.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum InheritedFdsError {
     /// The channel fd was already claimed by an earlier call. It is a process
     /// singleton (like stdio): a second claim would alias owning `OwnedFd`s
@@ -152,7 +196,13 @@ pub enum InheritedFdsError {
     #[error(
         "fd {fd} (daemon channel) is not a socket (st_mode={st_mode:#o}). This entry point is internal to this binary; do not invoke it directly."
     )]
-    NotASocket { fd: i32, st_mode: libc::mode_t },
+    NotASocket {
+        fd: i32,
+        /// The fd's `st_mode` as reported by `fstat`, widened to `u32` so no
+        /// libc type (platform-varying `mode_t`: u32 on Linux, u16 on Apple)
+        /// leaks into the public API.
+        st_mode: u32,
+    },
 
     /// Restoring `FD_CLOEXEC` on the claimed fd failed. The spawn's `dup2`
     /// cleared the flag so the fd would survive `execve`; it must be re-set so
@@ -178,6 +228,7 @@ pub enum InheritedFdsError {
 
 /// Detaching the daemon's inherited stdio to `/dev/null` failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DetachStdioError {
     /// Opening `/dev/null` failed, so there was nothing to redirect stdio to.
     /// The inherited stdio is left untouched.

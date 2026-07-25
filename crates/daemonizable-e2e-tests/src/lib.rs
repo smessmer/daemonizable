@@ -19,6 +19,7 @@ use nix::unistd::Pid;
 /// `framework_daemon_survives_parent_exit`): their daemons outlive the
 /// process that spawned them by design, so there is no `Child` handle to kill
 /// through — cleanup has to go by pid.
+#[derive(Debug)]
 pub struct DaemonGuard(pub Pid);
 
 impl Drop for DaemonGuard {

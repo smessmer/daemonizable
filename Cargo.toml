@@ -20,6 +20,10 @@ version = "0.0.3"
 # workspace is already wrapped and individually justified; deny locks that in
 # so an unsafe fn body can't silently absorb new unsafe operations.
 unsafe_op_in_unsafe_fn = "deny"
+# Every public type carries a Debug impl (manual where a derive would leak
+# `T: Debug` bounds through PhantomData — see the RPC endpoint types). Warn so
+# a new public type can't silently ship without one.
+missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 # Every `unsafe {}` block in this workspace carries a `// SAFETY:` comment

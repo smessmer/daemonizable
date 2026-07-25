@@ -28,7 +28,10 @@ pub(crate) use token::{
 // Test-only spawn helpers: gated so they don't ship in the default published
 // surface (their crate-root re-exports in `lib.rs` are `testutils`-gated too).
 #[cfg(any(test, feature = "testutils"))]
-pub use process::{spawn_daemon_process_with_exe, start_background_process_with_exe};
+pub use process::{
+    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,
+    start_background_process_with_exe,
+};
 
 /// Fd number the fork+exec child receives its inherited full-duplex channel on.
 /// Matches `sd_listen_fds(3)`-style convention (parent-provided fds start at 3).

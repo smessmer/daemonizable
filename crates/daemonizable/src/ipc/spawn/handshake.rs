@@ -23,11 +23,16 @@ use crate::ipc::{RpcClient, RpcServer};
 /// also matters when the parent accidentally exec'd a wrong binary that
 /// opens the channel fd but never writes (or hangs); without a bound the spawn
 /// would hang forever in that case.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// `pub(super)`: the production spawn passes this constant into
+/// `complete_spawn`; the testutils timeout-injecting spawn variant passes a
+/// short one so the timeout leg of the cleanup contract is testable.
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Parent-side counterpart to [`send_handshake`]: read the build-id the
 /// daemon sent and reject the spawn if it doesn't match
-/// `expected_build_id`. Returns the client unchanged on match.
+/// `expected_build_id`. Returns the client unchanged on match. `timeout`
+/// bounds the wait — [`HANDSHAKE_TIMEOUT`] in production.
 ///
 /// Must run before any postcard-typed RPC: a mismatch would otherwise let
 /// the parent deserialize structured data from a daemon whose
@@ -35,13 +40,14 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) fn validate_handshake_and_build_client<Request, Response>(
     mut client: RpcClient<Request, Response>,
     expected_build_id: &str,
+    timeout: Duration,
 ) -> Result<RpcClient<Request, Response>, HandshakeError>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned + Send,
+    Request: Serialize,
+    Response: DeserializeOwned,
 {
     let received = client
-        .recv_raw_handshake_with_timeout(HANDSHAKE_TIMEOUT)
+        .recv_raw_handshake_with_timeout(timeout)
         .map_err(HandshakeError::Recv)?;
     let received_str = std::str::from_utf8(&received).map_err(HandshakeError::InvalidUtf8)?;
     if received_str != expected_build_id {
@@ -61,8 +67,8 @@ pub fn send_handshake<Request, Response>(
     build_id: &str,
 ) -> Result<(), ChannelSendError>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned,
+    Request: DeserializeOwned,
+    Response: Serialize,
 {
     server.send_raw_handshake(build_id.as_bytes())
 }
@@ -90,7 +96,8 @@ mod tests {
             .into_server_and_client()
             .unwrap();
         send_handshake(&mut server, TEST_BUILD_ID).unwrap();
-        validate_handshake_and_build_client(client, TEST_BUILD_ID).expect("matching build_id");
+        validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
+            .expect("matching build_id");
     }
 
     #[test]
@@ -100,7 +107,7 @@ mod tests {
             .into_server_and_client()
             .unwrap();
         send_handshake(&mut server, "some-other-version-1.2.3").unwrap();
-        let err = validate_handshake_and_build_client(client, TEST_BUILD_ID)
+        let err = validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
             .err()
             .expect("mismatched build_id should be rejected");
         match err {
@@ -120,7 +127,7 @@ mod tests {
             .unwrap();
         // 0xff is never valid as a leading UTF-8 byte.
         server.send_raw_handshake(&[0xff, 0xfe]).unwrap();
-        let err = validate_handshake_and_build_client(client, TEST_BUILD_ID)
+        let err = validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
             .err()
             .expect("non-UTF-8 should be rejected");
         assert!(
@@ -139,7 +146,7 @@ mod tests {
             .into_server_and_client()
             .unwrap();
         drop(server);
-        let err = validate_handshake_and_build_client(client, TEST_BUILD_ID)
+        let err = validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
             .err()
             .expect("missing handshake should be rejected");
         assert!(

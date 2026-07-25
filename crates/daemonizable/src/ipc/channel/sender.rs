@@ -6,26 +6,50 @@ use std::marker::PhantomData;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 
-use serde::{Serialize, de::DeserializeOwned};
+use serde::Serialize;
 
 use super::MAX_MESSAGE_SIZE;
 use crate::ipc::error::ChannelSendError;
 
 pub struct Sender<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: Serialize,
 {
     sender: UnixStream,
+    /// Set once a send fails after (possibly partially) writing a frame,
+    /// leaving the wire mid-frame on the send side (see
+    /// [`ChannelSendError::Desynchronized`]). Once set, every send fails fast
+    /// without touching the socket — a retried send would otherwise append a
+    /// fresh length prefix that the peer consumes as leftover payload bytes,
+    /// silently desynchronizing all subsequent traffic. Mirrors the receiver's
+    /// poison flag.
+    poisoned: bool,
     _p: PhantomData<T>,
+}
+
+impl<T> std::fmt::Debug for Sender<T>
+where
+    T: Serialize,
+{
+    // Manual impl (like `Daemonizer`'s) so no `T: Debug` bound leaks into the
+    // API via the `PhantomData`. The socket's own Debug shows the fd numbers,
+    // which is the useful part when debugging a daemon channel.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sender")
+            .field("sender", &self.sender)
+            .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<T> Sender<T>
 where
-    T: Serialize + DeserializeOwned,
+    T: Serialize,
 {
     pub(super) fn new(sender: UnixStream) -> Self {
         Self {
             sender,
+            poisoned: false,
             _p: PhantomData,
         }
     }
@@ -37,6 +61,11 @@ where
         OwnedFd::from(self.sender)
     }
 
+    /// Send one typed, postcard-encoded, length-prefixed message.
+    ///
+    /// If a previous send failed mid-frame, the sender is poisoned and this
+    /// returns [`ChannelSendError::Desynchronized`] without touching the
+    /// socket — abandon the endpoint (see the `poisoned` field doc).
     pub fn send(&mut self, data: &T) -> Result<(), ChannelSendError> {
         let bytes = postcard::to_stdvec(data)?;
         self.write_length_prefixed(&bytes)
@@ -59,8 +88,18 @@ where
         self.sender.write_all(bytes)
     }
 
+    /// The framing shared by [`send`](Self::send) and
+    /// [`send_raw`](Self::send_raw): `[4-byte LE length] [payload]`, with the
+    /// sender-side poison contract documented on the `poisoned` field.
     fn write_length_prefixed(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
+        // Poison check first: a desynchronized wire is terminal, and reporting
+        // it dominates every other outcome (even an oversized payload).
+        if self.poisoned {
+            return Err(ChannelSendError::Desynchronized);
+        }
         if bytes.len() > MAX_MESSAGE_SIZE {
+            // Nothing was written, so the wire is still synchronized — no
+            // poison, mirroring the receiver's clean-idle-timeout rule.
             return Err(ChannelSendError::MessageTooLarge {
                 size: bytes.len(),
                 max: MAX_MESSAGE_SIZE,
@@ -72,13 +111,23 @@ where
         // description's `O_NONBLOCK`; see `Receiver`). So `write_all` can't
         // return `WouldBlock` mid-frame under backpressure — a full send blocks
         // until the peer drains, and a broken pipe surfaces as a terminal Io
-        // error. std's socket writes carry `MSG_NOSIGNAL` (Linux) /
-        // `SO_NOSIGPIPE` (Apple), so a write to a closed peer returns `EPIPE`
-        // rather than raising `SIGPIPE`, even in a process that reset SIGPIPE
-        // to its default disposition.
+        // error. (For why a write to a closed peer surfaces as `EPIPE` rather
+        // than a process-killing `SIGPIPE`, see the layered-suppression note on
+        // `channel_pair` in `channel/mod.rs`.)
+        //
+        // Any error from either write poisons the sender: `write_all` gives no
+        // way to observe how many bytes landed before the failure, so the wire
+        // must be assumed mid-frame — a retried send would misframe (see the
+        // `poisoned` field doc). Poisoning after a terminal EPIPE is harmless.
         let len = bytes.len() as u32;
-        self.sender.write_all(&len.to_le_bytes())?;
-        self.sender.write_all(bytes)?;
+        if let Err(err) = self
+            .sender
+            .write_all(&len.to_le_bytes())
+            .and_then(|()| self.sender.write_all(bytes))
+        {
+            self.poisoned = true;
+            return Err(ChannelSendError::Io(err));
+        }
         Ok(())
     }
 }

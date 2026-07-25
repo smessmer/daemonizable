@@ -9,19 +9,40 @@ use serde::{Serialize, de::DeserializeOwned};
 use crate::ipc::channel::{Receiver, Sender};
 use crate::ipc::error::{ChannelRecvError, ChannelSendError};
 
+// Direction-correct bounds: the client only SERIALIZES requests and
+// DESERIALIZES responses, so those are the only trait obligations it imposes.
+// (The `Daemonizable` trait still requires both directions on both types —
+// the same binary is both endpoints — but a standalone `RpcClient` user isn't
+// forced to implement traits for data flows that never happen.)
 pub struct RpcClient<Request, Response>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned + Send,
+    Request: Serialize,
+    Response: DeserializeOwned,
 {
     sender: Sender<Request>,
     receiver: Receiver<Response>,
 }
 
+impl<Request, Response> std::fmt::Debug for RpcClient<Request, Response>
+where
+    Request: Serialize,
+    Response: DeserializeOwned,
+{
+    // Manual impl (like `Daemonizer`'s) so no `Request: Debug`/`Response:
+    // Debug` bounds leak into the API. The endpoint Debug impls show the
+    // underlying socket fds and poison state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RpcClient")
+            .field("sender", &self.sender)
+            .field("receiver", &self.receiver)
+            .finish()
+    }
+}
+
 impl<Request, Response> RpcClient<Request, Response>
 where
-    Request: Serialize + DeserializeOwned,
-    Response: Serialize + DeserializeOwned + Send,
+    Request: Serialize,
+    Response: DeserializeOwned,
 {
     pub(super) fn new(sender: Sender<Request>, receiver: Receiver<Response>) -> Self {
         Self { sender, receiver }
