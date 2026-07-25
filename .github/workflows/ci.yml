@@ -1,14 +1,27 @@
 name: CI
 
 # Run on pushes to the default branch, on every pull request, on merge-queue
-# entries, and on demand. Feature branches get their coverage through the PR
-# they open; `workflow_dispatch` lets you kick a run manually from any branch.
+# entries, on demand, and on a weekly schedule. Feature branches get their
+# coverage through the PR they open; `workflow_dispatch` lets you kick a run
+# manually from any branch. The schedule exists chiefly for the cargo-deny
+# advisories check: without it, a new RUSTSEC advisory against a pinned
+# dependency surfaces only when the next unrelated PR happens to run CI —
+# and then blocks that PR for a problem its author didn't cause.
 on:
   push:
     branches: [main]
   pull_request:
   merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1' # Mondays 06:00 UTC
+
+# The workflow only ever reads the repository: every job checks out, builds,
+# tests, or lints; nothing pushes, comments, or releases (Codecov uploads via
+# its own token, not GITHUB_TOKEN). Locking the token to read-only bounds the
+# blast radius of a compromised third-party action.
+permissions:
+  contents: read
 
 # Cancel superseded runs on the same ref (a new push to a PR obsoletes the
 # in-flight run for that PR). The default branch is exempted from the group so
@@ -69,8 +82,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: ["daemonizable", "daemonizable-macros", "daemonizable-e2e-tests"]
+        crate:
+          [
+            "daemonizable",
+            "daemonizable-macros",
+            "daemonizable-e2e-tests",
+            "daemonizable-rename-test",
+          ]
         features: ["", "--no-default-features", "--all-features"]
+        include:
+          # testutils WITHOUT macros: the exact configuration a downstream
+          # crate uses to unit-test its IPC wiring without the proc-macro
+          # stack (default-features = false, features = ["testutils"]). With
+          # only two features, --all-features == default+testutils, so this is
+          # the one reachable combination the base matrix misses — and only
+          # this leg would catch a testutils item accidentally referencing the
+          # macros re-export.
+          - crate: "daemonizable"
+            features: "--no-default-features --features testutils"
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (stable)
@@ -83,8 +112,9 @@ jobs:
       # can't cover them per-feature either (feature unification again:
       # `daemonizable-e2e-tests` depends on `daemonizable` with default features,
       # so `macros` is on even in that job's --no-default-features leg). This is
-      # therefore the only place the crate docs are compiled with `macros`
-      # genuinely off — which the crate-root example is cfg_attr-gated on.
+      # therefore the only place the crate's doctests — e.g. the `no_run`
+      # doctest on `run` — are compiled in each feature configuration,
+      # including with `macros` genuinely off.
       - run: cargo test -p ${{ matrix.crate }} --doc ${{ matrix.features }}
 
   # ---------------------------------------------------------------------------
@@ -128,7 +158,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features: ["", "--all-features"]
+        features: ["", "--no-default-features", "--all-features"]
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (stable)
@@ -220,11 +250,12 @@ jobs:
   # ---------------------------------------------------------------------------
   # Semver: compare the public API of the publishable crates against the last
   # release on crates.io and flag accidental breaking changes. Crates that are
-  # `publish = false` (the e2e-tests crate) are ignored.
+  # `publish = false` (the e2e-tests and rename-test crates) are ignored.
   #
-  # NOTE: cargo-semver-checks needs a published baseline to diff against, so
-  # this job fails until the crates have had their first crates.io release.
-  # That is expected for now and starts passing automatically once published.
+  # The crates have been published since 2026-07-11, so this job diffs against
+  # a real baseline (the latest release) and is a genuine gate: a red run here
+  # is an accidental breaking change that must be fixed or accompanied by the
+  # matching version bump — never shrugged off.
   # ---------------------------------------------------------------------------
   semver-checks:
     name: semver-checks
