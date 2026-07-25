@@ -1,0 +1,24 @@
+# Compile-only regression check for `#[dz::main(crate = "dz")]` — the
+# attribute's renamed-dependency escape hatch. This crate's ONLY daemonizable
+# dependency is the RENAMED one (Cargo forbids one crate depending on the same
+# package twice under different names, so this cannot live inside
+# `daemonizable-e2e-tests`, which depends on `daemonizable` by its real name).
+# Successfully compiling src/main.rs IS the test: without the `crate = "dz"`
+# argument the macro's generated `main` would fail with E0433 "unresolved
+# crate or module `daemonizable`". Unpublished; built by every workspace build.
+
+[package]
+name = "daemonizable-rename-test"
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+dz = { package = "daemonizable", path = "../daemonizable", version = "0.0.3" }

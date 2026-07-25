@@ -1,6 +1,7 @@
 //! The attribute on a minimal valid impl must expand to the impl plus a
 //! working `fn main` (trybuild also runs the produced binary; with no
-//! daemon-child marker set it dispatches to `run_foreground` and exits 0).
+//! framework channel token on fd 3 it dispatches to `run_foreground` and
+//! exits 0).
 
 use std::process::ExitCode;
 
