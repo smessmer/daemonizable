@@ -11,7 +11,7 @@
 //! `ESRCH`).
 
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -35,7 +35,7 @@ fn helper_exe() -> PathBuf {
 /// always present by the time the spawn call returns — but poll defensively
 /// (via the shared content-polling helper, which documents the create-then-
 /// write race a bare existence check would hit).
-fn read_helper_pid(pid_path: &PathBuf) -> Pid {
+fn read_helper_pid(pid_path: &Path) -> Pid {
     daemonizable_e2e_tests::read_pid_file(pid_path, Duration::from_secs(5))
 }
 
@@ -114,7 +114,7 @@ fn failed_spawn_kills_and_reaps_a_live_child_on_handshake_mismatch() {
         &env,
     );
 
-    let err = result.err().expect("spawn must fail on handshake mismatch");
+    let err = result.expect_err("spawn must fail on handshake mismatch");
     assert!(
         matches!(
             err,
@@ -151,9 +151,7 @@ fn failed_spawn_reaps_a_child_that_died_before_the_handshake() {
         &env,
     );
 
-    let err = result
-        .err()
-        .expect("spawn must fail when the child exits early");
+    let err = result.expect_err("spawn must fail when the child exits early");
     assert!(
         matches!(
             err,
@@ -204,9 +202,7 @@ fn failed_spawn_kills_and_reaps_a_child_that_never_handshakes() {
         Duration::from_secs(2),
     );
 
-    let err = result
-        .err()
-        .expect("spawn must fail when the child never handshakes");
+    let err = result.expect_err("spawn must fail when the child never handshakes");
     assert!(
         matches!(
             err,
@@ -251,7 +247,7 @@ fn failed_spawn_group_kill_reaches_the_grandchild() {
         &env,
     );
 
-    let err = result.err().expect("spawn must fail on handshake mismatch");
+    let err = result.expect_err("spawn must fail on handshake mismatch");
     assert!(
         matches!(
             err,

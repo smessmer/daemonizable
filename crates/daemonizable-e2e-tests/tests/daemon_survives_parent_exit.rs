@@ -35,7 +35,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use daemonizable_e2e_tests::{DaemonGuard, read_pid_file};
-use nix::unistd::{Pid, getsid};
+use nix::unistd::getsid;
 
 /// The `daemonizable-test-background` helper, run as the daemon (in
 /// `sentinel_loop` mode) by the spawner process.
