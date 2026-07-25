@@ -216,9 +216,7 @@ mod tests {
         // process — none exists today — isn't spuriously rejected.
         DAEMON_FD_CLAIMED.store(false, Ordering::SeqCst);
 
-        let err = result
-            .err()
-            .expect("a second claim of the daemon channel fd must be rejected");
+        let err = result.expect_err("a second claim of the daemon channel fd must be rejected");
         assert!(
             matches!(err, InheritedFdError::AlreadyClaimed { .. }),
             "expected AlreadyClaimed, got: {err:?}"

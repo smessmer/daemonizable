@@ -108,8 +108,7 @@ mod tests {
             .unwrap();
         send_handshake(&mut server, "some-other-version-1.2.3").unwrap();
         let err = validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
-            .err()
-            .expect("mismatched build_id should be rejected");
+            .expect_err("mismatched build_id should be rejected");
         match err {
             HandshakeError::Mismatch { expected, received } => {
                 assert_eq!(TEST_BUILD_ID, expected);
@@ -128,8 +127,7 @@ mod tests {
         // 0xff is never valid as a leading UTF-8 byte.
         server.send_raw_handshake(&[0xff, 0xfe]).unwrap();
         let err = validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
-            .err()
-            .expect("non-UTF-8 should be rejected");
+            .expect_err("non-UTF-8 should be rejected");
         assert!(
             matches!(err, HandshakeError::InvalidUtf8(_)),
             "expected InvalidUtf8, got: {err:?}",
@@ -147,8 +145,7 @@ mod tests {
             .unwrap();
         drop(server);
         let err = validate_handshake_and_build_client(client, TEST_BUILD_ID, HANDSHAKE_TIMEOUT)
-            .err()
-            .expect("missing handshake should be rejected");
+            .expect_err("missing handshake should be rejected");
         assert!(
             matches!(err, HandshakeError::Recv(ChannelRecvError::SenderClosed)),
             "expected Recv(SenderClosed), got: {err:?}",
