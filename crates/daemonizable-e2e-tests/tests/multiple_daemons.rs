@@ -115,8 +115,9 @@ fn assert_n_isolated_daemons(result: &str, n: usize) {
         );
 
         // The framework put every daemon at cwd `/`, and no framework env
-        // var exists in any daemon's environment (stage identity rides argv;
-        // nothing is ever set) — same as the single-daemon case.
+        // var exists in any daemon's environment (stage identity rides the
+        // in-band channel token; nothing is ever set in argv or the
+        // environment) — same as the single-daemon case.
         assert_eq!(rec["cwd"], "/", "daemon {idx} cwd is not /:\n{result}");
         assert_eq!(
             rec["marker"], "removed",

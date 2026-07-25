@@ -29,7 +29,9 @@ struct Response {
 }
 
 fn helper_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_daemonizable-test-background"))
+    // Single source of truth for the CARGO_BIN_EXE key: the shared macro in
+    // the e2e support lib (it must be a macro — see its doc).
+    daemonizable_e2e_tests::background_helper_exe!()
 }
 
 #[test]

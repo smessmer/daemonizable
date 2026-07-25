@@ -63,6 +63,7 @@ fn main() {
     // Exit immediately, like a CLI that has launched its daemon and is done.
     // `exit(0)` skips destructors (dropping `_client` is unnecessary — the OS
     // closes our channel end on exit, and the daemon must survive regardless),
-    // matching the real cryfs parent CLI after a successful mount.
+    // matching a real embedding application's parent CLI after successful
+    // startup (e.g. a mount helper once its filesystem is mounted).
     std::process::exit(0);
 }
