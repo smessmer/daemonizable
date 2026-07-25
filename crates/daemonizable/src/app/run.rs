@@ -78,7 +78,10 @@ static RUN_CALLED: AtomicBool = AtomicBool::new(false);
 /// dispatch peeks the head of fd 3 (a non-consuming, non-blocking `recv`) to
 /// route. A foreground invocation has no framework channel there — fd 3 closed,
 /// or a stranger — so its peek finds no token and it runs foreground having
-/// touched nothing; the daemon's argv stays empty (`run_daemon` sees no injected
+/// consumed no data (one scoped caveat, part of the reserved-fd-3 contract: a
+/// *failing* `recv` on a stranger socket consumes that socket's one-shot
+/// pending asynchronous error, `sk_err` — see the probe's doc in
+/// `ipc::spawn::token`); the daemon's argv stays empty (`run_daemon` sees no injected
 /// argument) and nothing is left in `ps`. Fd 3 is a **reserved descriptor**: a
 /// process that inherits a socket there whose peer writes the (public) token
 /// bytes is routed to a daemon stage, which then authenticates the channel —
