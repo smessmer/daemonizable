@@ -73,7 +73,7 @@ where
     }
 
     pub fn recv(&mut self) -> Result<T, ChannelRecvError> {
-        let buf = self.read_length_prefixed()?;
+        let buf = self.read_frame(ReadMode::Blocking)?;
         // A decode failure here does NOT poison: the whole frame was read off
         // the wire correctly, so the stream is still synchronized.
         Ok(postcard::from_bytes(&buf)?)
@@ -97,56 +97,7 @@ where
         &mut self,
         timeout: Duration,
     ) -> Result<Vec<u8>, ChannelRecvError> {
-        if self.poisoned {
-            return Err(ChannelRecvError::Desynchronized);
-        }
-        let timeout_at = deadline_from(timeout);
-
-        // Length prefix. A failure that consumed 0 bytes (an idle timeout, or
-        // an errno before anything was read) leaves the wire coherent and must
-        // not poison; any failure after a partial prefix (1–3 bytes) leaves it
-        // mid-frame and must — Timeout and Io alike (see `poison_after`).
-        let mut len_bytes = [0u8; 4];
-        let mut prefix_read = 0;
-        if let Err(err) = read_exact_with_timeout(
-            self.recver.as_fd(),
-            &mut len_bytes,
-            timeout_at,
-            &mut prefix_read,
-        ) {
-            if poison_after(&err, prefix_read) {
-                self.poisoned = true;
-            }
-            return Err(err);
-        }
-
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        if len > MAX_MESSAGE_SIZE {
-            // The prefix is consumed but the declared payload is still on the
-            // wire; a later read would misframe it. Poison.
-            self.poisoned = true;
-            return Err(ChannelRecvError::MessageTooLarge {
-                size: len,
-                max: MAX_MESSAGE_SIZE,
-            });
-        }
-
-        // Payload. The prefix was fully consumed, so ANY failure here is
-        // mid-frame; `poison_after` is passed the 4 prefix bytes so even a
-        // zero-progress payload error poisons (only EOF is exempt — terminal
-        // on its own).
-        let mut buf = vec![0u8; len];
-        let mut payload_read = 0;
-        if let Err(err) =
-            read_exact_with_timeout(self.recver.as_fd(), &mut buf, timeout_at, &mut payload_read)
-        {
-            if poison_after(&err, 4 + payload_read) {
-                self.poisoned = true;
-            }
-            return Err(err);
-        }
-
-        Ok(buf)
+        self.read_frame(ReadMode::Deadline(deadline_from(timeout)))
     }
 
     /// Receive one postcard-decoded message, bounded by `timeout`. Framing (and
@@ -167,59 +118,120 @@ where
         Ok(postcard::from_bytes(&buf)?)
     }
 
-    fn read_length_prefixed(&mut self) -> Result<Vec<u8>, ChannelRecvError> {
+    /// Read one `[u32 length | payload]` frame — the framing and poisoning
+    /// logic shared by the blocking ([`recv`](Self::recv)) and timeout-bounded
+    /// ([`recv_raw_timeout`](Self::recv_raw_timeout)) receive paths, which
+    /// differ only in the [`ReadMode`] read primitive.
+    fn read_frame(&mut self, mode: ReadMode) -> Result<Vec<u8>, ChannelRecvError> {
         if self.poisoned {
             return Err(ChannelRecvError::Desynchronized);
         }
-        // The socket is blocking (never toggled — see `Receiver`'s timeout
-        // path), so `read_exact` blocks until the frame arrives or the peer
-        // closes.
-        //
-        // Poisoning on the blocking path: `std::io::Read::read_exact` documents
-        // that on error the number of bytes it consumed is unspecified, so a
-        // non-EOF error from EITHER read must conservatively poison — the wire
-        // may be mid-frame even on the prefix read. EOF (`SenderClosed`) stays
-        // unpoisoned: it is terminal on its own and every later read reports it
-        // consistently. (A blocking read can't time out mid-frame.)
+
+        // Length prefix. A failure that provably consumed 0 bytes (an idle
+        // timeout, or an errno before anything was read) leaves the wire
+        // coherent and must not poison; one after a partial prefix — or with
+        // unknown consumption, as on the blocking path — leaves it possibly
+        // mid-frame and must, Timeout and Io alike (see `poison_after`).
         let mut len_bytes = [0u8; 4];
-        if let Err(e) = self.recver.read_exact(&mut len_bytes) {
-            let err = normalize_blocking_read_err(e);
-            if !matches!(err, ChannelRecvError::SenderClosed) {
+        if let Err(failure) = mode.read_exact_from(&mut self.recver, &mut len_bytes) {
+            if poison_after(&failure.err, failure.consumed) {
                 self.poisoned = true;
             }
-            return Err(err);
+            return Err(failure.err);
         }
+
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len > MAX_MESSAGE_SIZE {
-            // Prefix consumed, oversized payload left unread → desynced, same as
-            // the timeout path.
+            // The prefix is consumed but the declared payload is still on the
+            // wire; a later read would misframe it. Poison.
             self.poisoned = true;
             return Err(ChannelRecvError::MessageTooLarge {
                 size: len,
                 max: MAX_MESSAGE_SIZE,
             });
         }
+
+        // Payload. The prefix was fully consumed, so ANY failure here is
+        // mid-frame; the prefix bytes are counted into the consumed total so
+        // even a zero-progress payload error poisons (only EOF is exempt —
+        // terminal on its own).
         let mut buf = vec![0u8; len];
-        if let Err(e) = self.recver.read_exact(&mut buf) {
-            let err = normalize_blocking_read_err(e);
-            if !matches!(err, ChannelRecvError::SenderClosed) {
+        if let Err(failure) = mode.read_exact_from(&mut self.recver, &mut buf) {
+            let consumed = failure
+                .consumed
+                .map(|payload_read| len_bytes.len() + payload_read);
+            if poison_after(&failure.err, consumed) {
                 self.poisoned = true;
             }
-            return Err(err);
+            return Err(failure.err);
         }
+
         Ok(buf)
     }
+}
+
+/// How [`Receiver::read_frame`] waits for bytes. The two receive paths share
+/// all framing and poisoning logic and differ only in this read primitive.
+/// Neither mode ever toggles the socket's `O_NONBLOCK` (see
+/// [`read_exact_with_timeout`] for why that must hold).
+#[derive(Clone, Copy)]
+enum ReadMode {
+    /// Block until the bytes arrive or the peer closes, via plain
+    /// `read_exact` on the (blocking) socket.
+    ///
+    /// On failure, how many bytes were consumed is unknown —
+    /// `std::io::Read::read_exact` leaves it unspecified — so the poison rule
+    /// conservatively treats every non-EOF error as possibly mid-frame, even
+    /// on the prefix read. (A blocking read can't time out mid-frame, so the
+    /// conservatism costs precision only on rare I/O errors.)
+    Blocking,
+    /// Wait at most until the deadline, via the poll + `recv(MSG_DONTWAIT)`
+    /// loop ([`read_exact_with_timeout`]). Reports exactly how many bytes a
+    /// failed read consumed, so a clean idle timeout (0 bytes) stays
+    /// unpoisoned.
+    Deadline(Instant),
+}
+
+impl ReadMode {
+    /// Fill `buf` completely from `stream`, or fail with the error and how
+    /// many bytes were consumed before it.
+    fn read_exact_from(self, stream: &mut UnixStream, buf: &mut [u8]) -> Result<(), ReadFailure> {
+        match self {
+            ReadMode::Blocking => stream.read_exact(buf).map_err(|e| ReadFailure {
+                err: normalize_blocking_read_err(e),
+                consumed: None,
+            }),
+            ReadMode::Deadline(timeout_at) => {
+                let mut consumed = 0;
+                read_exact_with_timeout(stream.as_fd(), buf, timeout_at, &mut consumed).map_err(
+                    |err| ReadFailure {
+                        err,
+                        consumed: Some(consumed),
+                    },
+                )
+            }
+        }
+    }
+}
+
+/// A failed [`ReadMode::read_exact_from`]: the error, plus how many bytes of
+/// `buf` it consumed first — `None` when the primitive doesn't report it
+/// (blocking `read_exact`), which [`poison_after`] treats as possibly-partial.
+struct ReadFailure {
+    err: ChannelRecvError,
+    consumed: Option<usize>,
 }
 
 /// The receiver-side poison decision, split out as a pure function so the rule
 /// is unit-testable without fault injection: given a failed receive's error and
 /// how many bytes of the current frame were consumed before it (prefix bytes
-/// count), decide whether the stream is desynchronized. The rule (also on the
-/// `poisoned` field doc): any failure after partial consumption poisons, except
-/// EOF — `SenderClosed` is terminal on its own, so every later receive already
-/// fails consistently without the flag.
-fn poison_after(err: &ChannelRecvError, consumed: usize) -> bool {
-    consumed > 0 && !matches!(err, ChannelRecvError::SenderClosed)
+/// count; `None` when the read primitive doesn't report consumption), decide
+/// whether the stream is desynchronized. The rule (also on the `poisoned` field
+/// doc): any failure after partial — or unknown, possibly partial — consumption
+/// poisons, except EOF — `SenderClosed` is terminal on its own, so every later
+/// receive already fails consistently without the flag.
+fn poison_after(err: &ChannelRecvError, consumed: Option<usize>) -> bool {
+    consumed != Some(0) && !matches!(err, ChannelRecvError::SenderClosed)
 }
 
 /// Upper bound on the deadline a caller-supplied timeout can produce, used only
@@ -352,24 +364,29 @@ fn read_exact_with_timeout_impl(
 mod tests {
     use super::*;
 
-    // The poison rule as a decision table: any failure after partial
-    // consumption poisons, except EOF (terminal on its own); zero-consumption
-    // failures never poison (clean idle timeout, pre-read errno). This pins
-    // the rule for the error variants fault injection can't easily produce on
-    // a real socketpair (mid-frame `Io`).
+    // The poison rule as a decision table: any failure after partial (or
+    // unknown, possibly partial) consumption poisons, except EOF (terminal on
+    // its own); provably-zero-consumption failures never poison (clean idle
+    // timeout, pre-read errno). This pins the rule for the error variants
+    // fault injection can't easily produce on a real socketpair (mid-frame
+    // `Io`).
     #[test]
     fn poison_after_decision_table() {
         let io = || ChannelRecvError::Io(std::io::Error::other("injected"));
-        // Nothing consumed → never poison, whatever the error.
-        assert!(!poison_after(&ChannelRecvError::Timeout, 0));
-        assert!(!poison_after(&io(), 0));
-        assert!(!poison_after(&ChannelRecvError::SenderClosed, 0));
+        // Provably nothing consumed → never poison, whatever the error.
+        assert!(!poison_after(&ChannelRecvError::Timeout, Some(0)));
+        assert!(!poison_after(&io(), Some(0)));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, Some(0)));
         // Partial consumption → poison for Timeout and Io alike...
-        assert!(poison_after(&ChannelRecvError::Timeout, 1));
-        assert!(poison_after(&io(), 3));
-        assert!(poison_after(&ChannelRecvError::Timeout, 4));
+        assert!(poison_after(&ChannelRecvError::Timeout, Some(1)));
+        assert!(poison_after(&io(), Some(3)));
+        assert!(poison_after(&ChannelRecvError::Timeout, Some(4)));
         // ...but not for EOF, which is terminal without the flag.
-        assert!(!poison_after(&ChannelRecvError::SenderClosed, 3));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, Some(3)));
+        // Unknown consumption (blocking `read_exact` doesn't report it) is
+        // conservatively treated as possibly mid-frame: poison, except EOF.
+        assert!(poison_after(&io(), None));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, None));
     }
 
     // Regression test for the deadline-overflow guard: `Instant::now() + timeout`
