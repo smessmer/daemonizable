@@ -88,15 +88,12 @@ where
         // client's send/recv halves), the child gets the other.
         let (parent_end, child_end) =
             UnixStream::pair().map_err(ChannelCreateError::CreateSocket)?;
-        // Apple targets: set SO_NOSIGPIPE on both ends OURSELVES. std sets it
-        // only on sockets from `Socket::new` (connect/accept paths), NOT in
-        // `new_pair`/`UnixStream::pair` — verified against std's source, and
-        // caught live by the macOS SIG_DFL dead-peer e2e test — and Apple has
-        // no MSG_NOSIGNAL to put on the writes instead. The option lives on
-        // the socket, so the daemon's inherited fd-3 end and every `try_clone`
-        // dup share it; this is what makes the dead-peer-send guarantee
-        // (`Io(BrokenPipe)`, never a fatal SIGPIPE) disposition-independent on
-        // Apple. See the SIGPIPE note on `channel_pair` in `channel/mod.rs`.
+        // Apple targets: set SO_NOSIGPIPE on both ends OURSELVES — std does
+        // not for socketpairs, and Apple has no MSG_NOSIGNAL to put on the
+        // writes instead. The option lives on the socket, so the daemon's
+        // inherited fd-3 end and every `try_clone` dup share it. This is what
+        // makes the dead-peer-send guarantee disposition-independent on Apple;
+        // see the SIGPIPE note on `channel_pair` in `channel/mod.rs`.
         #[cfg(target_vendor = "apple")]
         for end in [&parent_end, &child_end] {
             set_nosigpipe(end).map_err(ChannelCreateError::CreateSocket)?;

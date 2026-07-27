@@ -106,16 +106,13 @@ where
                 max: MAX_MESSAGE_SIZE,
             });
         }
-        // The socket is always blocking — it is created blocking and nothing
-        // ever switches it to non-blocking (the receiver's timeout path polls
-        // and reads with `MSG_DONTWAIT` rather than toggling the shared
-        // description's `O_NONBLOCK`; see `Receiver`). So `write_all` can't
-        // return `WouldBlock` mid-frame under backpressure — a full send blocks
-        // until the peer drains, and a broken pipe surfaces as a terminal Io
-        // error. (For why a write to a closed peer surfaces as `EPIPE` rather
-        // than a process-killing `SIGPIPE` — unconditionally, whatever the
-        // process's SIGPIPE disposition — see the note on `channel_pair` in
-        // `channel/mod.rs`; it is why the MSRV is 1.90.)
+        // The socket is always blocking — nothing ever switches it to
+        // non-blocking (the receiver's timeout path uses `MSG_DONTWAIT`
+        // instead of toggling the shared description's `O_NONBLOCK`; see
+        // `Receiver`). So `write_all` can't return `WouldBlock` mid-frame
+        // under backpressure — a full send blocks until the peer drains, and a
+        // broken pipe surfaces as a terminal Io error, never a fatal SIGPIPE
+        // (see the SIGPIPE note on `channel_pair` in `channel/mod.rs`).
         //
         // Any error from either write poisons the sender: `write_all` gives no
         // way to observe how many bytes landed before the failure, so the wire

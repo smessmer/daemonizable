@@ -141,11 +141,8 @@ where
 /// ownership**: bare `fstat` on the raw number — no fd wrapper, no claim, no flag
 /// changes. It owns nothing and changes nothing; its one caller is the
 /// mandatory validation step inside [`rpc_server_from_inherited_fd`]'s claim.
-/// (Stage 1's equivalent usable-socket check is the in-band token peek —
-/// `channel_has_stage2_token`, see `app::daemon_child` — which subsumed the
-/// separate pre-fork `fstat` probe stage 1 once ran.) Kept as its own function
-/// rather than inlined: it isolates the raw-fd `fstat` unsafe and is named in
-/// the claim's `# Safety` docs.
+/// Kept as its own function rather than inlined: it isolates the raw-fd
+/// `fstat` unsafe and is named in the claim's `# Safety` docs.
 fn validate_inherited_fd() -> Result<(), InheritedFdError> {
     let fd = DAEMON_CHANNEL_FD;
     // Probe the raw fd number with a bare `fstat` BEFORE building any fd

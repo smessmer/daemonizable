@@ -47,9 +47,8 @@ impl<A: Daemonizable> Daemonizer<A> {
     ///
     /// Blocks until the daemon has passed the build-id handshake. Any
     /// configuration the daemon needs travels afterwards as an ordinary
-    /// request on the returned client (it gets no app arguments — its argv is
-    /// empty, since stage identity rides an in-band channel token, not argv —
-    /// so it can't parse flags itself).
+    /// request on the returned client (its argv is empty — stage identity
+    /// rides an in-band channel token — so it can't parse flags itself).
     ///
     /// The daemon is a **grandchild**: the re-exec'd child forks again after
     /// `setsid` so it is never a session leader (and can never acquire a
@@ -68,15 +67,14 @@ impl<A: Daemonizable> Daemonizer<A> {
     /// Because the daemon is created with fork+exec (not a bare `fork()`), it
     /// is safe to call this with a thread pool or async runtime already
     /// running — `execve` gives the child a fresh process image, so none of
-    /// the parent's threads or lock state carry over. On Linux/Android, the
-    /// *BSDs, and the other targets with `SOCK_CLOEXEC`, the channel fds are
-    /// created with `FD_CLOEXEC` already set, so there is no fd-inheritance
-    /// race regardless of what other threads are doing. macOS/iOS have no
-    /// `SOCK_CLOEXEC`, so there the flag is set in a separate step just after
-    /// creation and a narrow race remains: if another thread performs its own
-    /// fork+exec in that brief window it can leak a copy of those fds into an
-    /// unrelated child. On those targets, spawning the daemon before the
-    /// process starts spawning other subprocesses avoids it entirely.
+    /// the parent's threads or lock state carry over. On targets with
+    /// `SOCK_CLOEXEC` (Linux/Android, the *BSDs, …) the channel fds are
+    /// close-on-exec from creation, so there is no fd-inheritance race.
+    /// macOS/iOS lack `SOCK_CLOEXEC`, so a narrow race remains there: while
+    /// the flag is being set just after creation, another thread's concurrent
+    /// fork+exec can leak a copy of those fds into an unrelated child. On
+    /// those targets, spawning the daemon before the process starts spawning
+    /// other subprocesses avoids it entirely.
     pub fn spawn_daemon(&self) -> Result<RpcClient<A::Request, A::Response>, SpawnDaemonError> {
         spawn_daemon_process::<A::Request, A::Response>(&A::build_id())
     }

@@ -1,29 +1,22 @@
-//! Minimal [`Daemonizable`] app used by the framework end-to-end test
-//! (`tests/framework_e2e.rs`). Unlike `daemonizable-test-background` (which
-//! bypasses the framework and drives the raw IPC primitives), this binary
-//! goes through the full production path: `#[daemonizable::main]` generates
-//! the `main` that calls `daemonizable::run::<TestApp>()`, so a
-//! `--daemonize` invocation exercises the in-band channel-token stage dispatch, the real
-//! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
-//! channel end-to-end — and dogfoods the attribute macro under that real
-//! fork+exec path.
+//! Minimal [`Daemonizable`] app used by the framework end-to-end tests.
+//! Unlike `daemonizable-test-background` (which bypasses the framework and
+//! drives the raw IPC primitives), this binary goes through the full
+//! production path — `#[daemonizable::main]`, the in-band channel-token stage
+//! dispatch, the real `/proc/self/exe` re-exec spawn, the build-id handshake,
+//! and the typed RPC channel — dogfooding the attribute macro along the way.
+//! Arguments are parsed by hand (the API imposes no argument parser).
 //!
-//! Arguments are parsed by hand — the new API imposes no argument parser on
-//! applications, and this binary proves none is needed.
-//!
-//! Beyond the single-daemon `--daemonize` path (`tests/framework_e2e.rs`), it
-//! also drives the *multiple-daemon* paths exercised by
+//! `--daemonize` drives `tests/framework_e2e.rs`; the multi-daemon flags drive
 //! `tests/multiple_daemons.rs`: `--spawn-many N` spawns N daemons from one
-//! foreground (all live at once, then a round-trip each), `--spawn-many N
-//! --concurrent` spawns them from N threads that all enter `spawn_daemon`
-//! together (the advertised `Copy + Send + Sync` `Daemonizer` use), and
-//! `--spawn-interleaved` keeps two daemons live and interleaves requests to
-//! prove the two channels never cross-talk.
+//! foreground (all live at once, then a round-trip each), `--concurrent`
+//! spawns them from N threads entering `spawn_daemon` together (the advertised
+//! `Copy + Send + Sync` `Daemonizer` use), and `--spawn-interleaved` keeps two
+//! daemons live and interleaves requests to prove the channels never
+//! cross-talk.
 //!
 //! One knob rides the environment instead of argv, because it must reach the
 //! *daemon* image (argv does not survive the re-exec spawn; the environment
-//! passes through both daemon-stage execs untouched):
-//! `DAEMONIZABLE_TEST_APP_SENTINEL`, used by
+//! passes through untouched): `DAEMONIZABLE_TEST_APP_SENTINEL`, used by
 //! `tests/framework_daemon_survives_parent_exit.rs`, switches `run_daemon`
 //! into a long-lived mode that outlives the foreground process — see the
 //! comment in `run_daemon`.
@@ -47,16 +40,14 @@ struct TestResponse {
     /// chdir'd it to `/` (it must not pin the parent's cwd).
     daemon_cwd: String,
     /// Whether the legacy daemon-child env marker is set inside `run_daemon`.
-    /// Stage identity rides an in-band channel token now, so no framework env var may exist in
-    /// the daemon's environment at all (its children would inherit it); the
-    /// test asserts "removed". Kept as a regression pin against any future
-    /// design reintroducing environment leakage.
+    /// No framework env var may exist in the daemon's environment (its
+    /// children would inherit it); the test asserts "removed" as a regression
+    /// pin against any design reintroducing environment leakage.
     marker: String,
     /// Whether the daemon's `argv` is empty (only `argv[0]`). Stage identity
-    /// rides an in-band channel token now, not argv, so the daemon receives NO
-    /// arguments — `std::env::args().nth(1)` is `None`. The test asserts
-    /// "empty". Kept as a regression pin against any future design reintroducing
-    /// argv injection.
+    /// rides an in-band channel token, not argv, so `std::env::args().nth(1)`
+    /// must be `None`; the test asserts "empty" as a regression pin against
+    /// any design reintroducing argv injection.
     argv1: String,
     /// The daemon's own pid (`std::process::id()`). With `sid` below it proves
     /// the daemon is a grandchild, not a session leader.
@@ -170,9 +161,8 @@ impl Daemonizable for TestApp {
     }
 
     fn run_daemon(mut rpc: RpcServer<TestRequest, TestResponse>) -> ! {
-        // Report the daemon's cwd so the test can confirm the framework
-        // chdir'd it to `/` rather than inheriting the parent's working
-        // directory, plus the marker/argv1 environment- and argv-contract probes.
+        // Gather the observable daemon-side facts the response reports (see
+        // the `TestResponse` field docs for what each one pins).
         let daemon_cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
@@ -181,8 +171,7 @@ impl Daemonizable for TestApp {
         } else {
             "removed"
         };
-        // The daemon's argv must be empty (stage identity rides an in-band
-        // channel token now, not argv). Pin that nth(1) is None.
+        // The daemon's argv must be empty (see the `argv1` field doc).
         let argv1 = if std::env::args_os().nth(1).is_none() {
             "empty"
         } else {

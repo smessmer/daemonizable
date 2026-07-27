@@ -516,17 +516,8 @@
 //! Unix-only (Linux is the primary target; macOS works with caveats documented
 //! in the source).
 
-// On the platforms that have `SOCK_CLOEXEC` (Linux/Android, the *BSDs, and
-// more), the channel fds are created with FD_CLOEXEC set atomically, so the
-// fd-inheritance race is closed there regardless of runtime — including a
-// second spawn_daemon from another thread, an advertised use of the
-// Copy+Send+Sync Daemonizer. macOS/iOS lack `SOCK_CLOEXEC` (and any atomic
-// equivalent), so on those targets the CLOEXEC flag is still set in a separate
-// step and a concurrent fork/Command::spawn in that window can leak duplicate
-// channel ends across execve, silently defeating EOF liveness (EOF only fires
-// once ALL peer-end copies close). There we rely on the documented
-// spawn-at-startup caller contract instead. See the race discussion in
-// ipc/channel/mod.rs.
+// The macOS/iOS CLOEXEC race the docs above mention is discussed in full in
+// ipc/channel/mod.rs (targets with `SOCK_CLOEXEC` have no race at all).
 
 mod app;
 mod ipc;
@@ -534,61 +525,33 @@ mod stdio;
 
 pub use app::{Daemonizable, Daemonizer, run};
 
-// The #[daemonizable::main] attribute: generates `fn main` from an
-// `impl Daemonizable for X` block. Lives in the companion proc-macro crate
-// (proc macros can't be defined here) and is re-exported so applications
-// only ever depend on `daemonizable` itself.
+// The #[daemonizable::main] attribute. Lives in the companion proc-macro crate
+// (proc macros can't be defined here) and is re-exported so applications only
+// ever depend on `daemonizable` itself.
 #[cfg(feature = "macros")]
 pub use daemonizable_macros::main;
 
-// Re-exported so applications can name the typed handles they receive: the
-// client handle from `Daemonizer::spawn_daemon` and the server handle passed
-// to `Daemonizable::run_daemon`. `RpcConnection` — the channel owner used to
-// build an in-process client+server for unit tests — is a `testutils`-only
-// construct (re-exported below), never named by production app code.
+// The typed handles applications receive: the client from
+// `Daemonizer::spawn_daemon` and the server passed to `Daemonizable::run_daemon`.
 pub use ipc::{RpcClient, RpcServer};
 
 // Typed errors returned by the IPC layer (thiserror, not anyhow) so callers
-// can match on failure modes, e.g. distinguish a peer that closed the channel
-// (`ChannelRecvError::SenderClosed`) from a timeout. Only errors reachable from
-// the stable public API are here; `InheritedFdError` is produced solely by the
-// `testutils` fd-claim helper and is re-exported alongside it below.
+// can match on failure modes. Only errors reachable from the stable public API
+// are here; `InheritedFdError` comes solely from the `testutils` fd-claim
+// helper and is re-exported alongside it below.
 pub use ipc::{
     ChannelCreateError, ChannelRecvError, ChannelSendError, HandshakeError, SpawnDaemonError,
 };
 
-// Process-global helper: the daemon calls this at its post-startup boundary
-// to detach the inherited stdio from the parent's terminal. Lives in its own
-// `stdio` module — it is an app-facing lifecycle utility, not IPC.
+// App-facing daemon-lifecycle utility, not IPC — hence its own `stdio` module.
 pub use stdio::{DetachStdioError, detach_stdio};
 
-// Lower-level handles that substitute an external helper binary for the
-// re-execed self and drive the spawn/handshake machinery directly. These exist
-// ONLY for `daemonizable-e2e-tests` (and downstream crates unit-testing their
-// own IPC wiring), so they are gated behind `testutils` and hidden from docs —
-// exactly like the rest of the test-only surface — rather than shipping in the
-// default published API.
-//
-// Production app code should not reach for these — implement [`Daemonizable`]
-// and let [`run`] orchestrate the daemon side. (The daemon-child arm uses
-// `send_handshake` / `rpc_server_from_inherited_fd` internally too, but via
-// the crate-private `ipc` module, so those call sites don't depend on these
-// re-exports.)
-//
-//   * `RpcConnection` / `InheritedFdError` — build an in-process connection
-//     and the error its fd-claim can return.
-//   * `send_handshake` / `rpc_server_from_inherited_fd` — the daemon-side
-//     primitives a helper binary needs to stand in for a (correct or
-//     deliberately wrong) daemon.
-//   * `start_background_process_with_exe` — spawn an arbitrary helper binary,
-//     skipping the handshake.
-//   * `spawn_daemon_process_with_exe` — like the above but keeps the full
-//     handshake + failed-spawn cleanup, so the cleanup contract `spawn_daemon`
-//     promises stays testable (production always re-execs `/proc/self/exe`,
-//     which a libtest binary cannot stand in for).
-//   * `stage_token_bytes` — the raw stage-identity token bytes, so e2e tests
-//     can craft channel contents and exercise dispatch (defined next to the
-//     token constants in `ipc::spawn`, which stay private to that module).
+// Test-only surface (each item documents itself): lower-level handles that let
+// `daemonizable-e2e-tests` (and downstream crates testing their own IPC wiring)
+// substitute a helper binary for the re-exec'd self and drive the
+// spawn/handshake machinery directly. Gated behind `testutils` and hidden from
+// docs; production code implements [`Daemonizable`] and lets [`run`]
+// orchestrate the daemon side instead.
 #[cfg(any(test, feature = "testutils"))]
 #[doc(hidden)]
 pub use ipc::{

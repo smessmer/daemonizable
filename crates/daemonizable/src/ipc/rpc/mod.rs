@@ -87,11 +87,10 @@ mod tests {
 
     #[test]
     fn next_request_errors_when_the_client_drops_its_end() {
-        // Mirror liveness (the phase-2 centerpiece for a single shared fd): when
-        // the parent drops its `RpcClient`, BOTH clones of the client's end
-        // close, so the daemon's blocking `next_request` sees EOF promptly
-        // rather than hanging. This is what lets a daemon shut its request loop
-        // down when its foreground peer exits.
+        // Mirror liveness: when the parent drops its `RpcClient`, BOTH clones
+        // of the client's end close, so the daemon's blocking `next_request`
+        // sees EOF promptly rather than hanging. This is what lets a daemon
+        // shut its request loop down when its foreground peer exits.
         let (mut server, client) = RpcConnection::<u32, u32>::new_channel()
             .unwrap()
             .into_server_and_client()

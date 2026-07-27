@@ -1,30 +1,20 @@
-//! Parent-exit survival of the FULL framework path.
-//!
-//! `daemon_survives_parent_exit.rs` proves a daemon outlives the process that
-//! spawned it — but through the raw spawn machinery
-//! (`start_background_process_with_exe`), which deliberately bypasses the
-//! framework's daemon-stage arms, and the `setsid` it observes is one its
-//! helper binary performs by hand. `framework_e2e.rs` covers the framework's
-//! own detachment *mechanism* (setsid + second fork) via session-id
-//! assertions, but its daemon exits with the parent, so nothing there
-//! observes a framework-spawned daemon alive after the foreground is gone.
-//! This test closes that gap: the production path end-to-end (`run::<App>()`
-//! in-band channel-token dispatch, `/proc/self/exe` re-exec spawn, build-id
-//! handshake, typed RPC), the foreground process exits, and the daemon is
-//! observed STILL DOING WORK afterward.
+//! Parent-exit survival of the FULL framework path: the foreground process
+//! exits, and a framework-spawned daemon is observed STILL DOING WORK
+//! afterward. This is the gap between `daemon_survives_parent_exit.rs` (same
+//! survival property, but through the raw spawn machinery that bypasses the
+//! framework's daemon-stage arms) and `framework_e2e.rs` (full framework path,
+//! but its daemon exits with the parent).
 //!
 //! Mechanics: the `daemonizable-test-app` helper is launched with
-//! `--daemonize` plus `DAEMONIZABLE_TEST_APP_SENTINEL` in the environment.
-//! Argv does not survive the re-exec spawn but the environment passes through
-//! both daemon-stage execs untouched, so the daemon sees the variable and,
-//! after answering the parent's single round-trip (whose response carries its
-//! pid into the outfile), detaches stdio and writes a tick counter to the
-//! sentinel path forever (see the sentinel-mode comment in the test app's
-//! `run_daemon`). The foreground process exits as usual; the test then checks
-//! the surviving daemon's session ids live via `getsid()` — not just the
-//! values it self-reported over RPC while the parent still ran — and polls
-//! the sentinel until its contents change. Cleans up via `DaemonGuard`
-//! (SIGTERM, then SIGKILL).
+//! `--daemonize` plus `DAEMONIZABLE_TEST_APP_SENTINEL` in the environment
+//! (which, unlike argv, reaches the daemon image). The daemon answers the
+//! parent's single round-trip — whose response carries its pid into the
+//! outfile — then detaches stdio and writes a tick counter to the sentinel
+//! path forever (see the sentinel-mode comment in the test app's
+//! `run_daemon`). The test then checks the surviving daemon's session ids
+//! live via `getsid()` — not just the values it self-reported while the
+//! parent still ran — and polls the sentinel until its contents change.
+//! Cleans up via `DaemonGuard`.
 
 use std::process::Command;
 use std::thread;

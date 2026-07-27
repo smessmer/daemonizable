@@ -46,12 +46,10 @@ pub enum DetachStdioError {
 ///
 /// Concurrency: prefer calling while no other thread is creating file
 /// descriptors. Any std fd still *closed* when this is called is a hole a
-/// concurrently-allocated descriptor can land in — from entry until the
-/// `open` fills the lowest hole and the matching `dup2`s fill the rest —
-/// after which the redirect silently clobbers whatever landed there. (The
-/// function doesn't widen that window internally: once the `open` fills the
-/// lowest hole, the relocation deliberately leaks rather than closes the low
-/// fd, so that hole never reopens mid-flight — see the relocation comments.)
+/// concurrently-allocated descriptor can land in, after which the redirect
+/// silently clobbers whatever landed there. (The function doesn't widen that
+/// window internally: once the `open` fills the lowest hole, it never reopens
+/// — see the relocation below.)
 ///
 /// We `dup2` rather than `close` to keep fd numbers 0/1/2 valid — a later
 /// allocation that re-grabs those numbers would otherwise produce garbage in
@@ -89,12 +87,9 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
     let mut source = OwnedFd::from(devnull);
 
     // If `/dev/null` opened onto one of the std fds (only reachable when that fd
-    // was already closed on entry), move it above the range first — otherwise
-    // the `dup2(fd, fd)` self-copy below is a no-op and the end-of-scope drop
-    // would close the std fd we just "redirected". See the doc comment.
+    // was already closed on entry), move it above the range first — see the
+    // relocation subtlety in the doc comment.
     if source.as_raw_fd() <= libc::STDERR_FILENO {
-        // Duplicate `source` above the std range with CLOEXEC in one `fcntl`.
-        // Safe: it borrows `source` and only reads/duplicates the descriptor.
         let relocated = fcntl(
             source.as_fd(),
             FcntlArg::F_DUPFD_CLOEXEC(libc::STDERR_FILENO + 1),
@@ -105,13 +100,11 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
         // else owns it, so adopting it into an `OwnedFd` (which closes it on
         // drop) is sound.
         let relocated = unsafe { OwnedFd::from_raw_fd(relocated) };
-        // Deliberately LEAK the old low fd instead of dropping (closing) it:
-        // closing would reopen the std-fd hole for a moment, and in a
-        // multithreaded process a descriptor another thread allocates in that
-        // window would land on the hole only to be silently clobbered by the
-        // dup2s below. Leaked, the low number stays parked on /dev/null until
-        // its matching dup2 atomically replaces it in place (every fd <= 2 is
-        // a dup2 target below); on a dup2 error return it stays open on
+        // Deliberately LEAK the old low fd (`into_raw_fd`, not drop): closing
+        // would reopen the std-fd hole for a moment, and a descriptor another
+        // thread allocates in that window would be silently clobbered by the
+        // dup2s below. Leaked, it stays parked on /dev/null until its matching
+        // dup2 replaces it in place; on a dup2 error return it stays open on
         // /dev/null — a strictly better failure state than a closed std fd.
         let _ = std::mem::replace(&mut source, relocated).into_raw_fd();
     }

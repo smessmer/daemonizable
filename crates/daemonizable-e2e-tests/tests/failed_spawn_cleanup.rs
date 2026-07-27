@@ -25,16 +25,13 @@ use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::Pid;
 
 fn helper_exe() -> PathBuf {
-    // Single source of truth for the CARGO_BIN_EXE key: the shared macro in
-    // the e2e support lib (it must be a macro — see its doc).
     daemonizable_e2e_tests::background_helper_exe!()
 }
 
-/// Poll the pid file the helper writes until it has parseable content. The
-/// helper writes it before it does anything the parent can observe, so it is
-/// always present by the time the spawn call returns — but poll defensively
-/// (via the shared content-polling helper, which documents the create-then-
-/// write race a bare existence check would hit).
+/// Poll the pid file the helper writes until it has parseable content (via
+/// the shared content-polling helper, `read_pid_file`). The helper writes it
+/// before anything the parent can observe, so it is present by the time the
+/// spawn call returns.
 fn read_helper_pid(pid_path: &Path) -> Pid {
     daemonizable_e2e_tests::read_pid_file(pid_path, Duration::from_secs(5))
 }
@@ -166,13 +163,13 @@ fn failed_spawn_reaps_a_child_that_died_before_the_handshake() {
     assert_reaped_and_gone(pid);
 }
 
-/// The third documented cleanup trigger, previously untested: a child that
-/// holds the channel open but NEVER handshakes, so the parent's bounded
-/// handshake recv expires. Driven through the timeout-injectable spawn
-/// variant so the test waits ~2 s, not the production 10 s. The kill-and-reap
-/// contract must hold on this arm exactly as on Mismatch/EOF — a regression
-/// that special-cased Timeout ("the child may still come up") would leave a
-/// live orphan after every wedged spawn.
+/// The third documented cleanup trigger: a child that holds the channel open
+/// but NEVER handshakes, so the parent's bounded handshake recv expires.
+/// Driven through the timeout-injectable spawn variant so the test waits
+/// ~2 s, not the production 10 s. The kill-and-reap contract must hold on
+/// this arm exactly as on Mismatch/EOF — a regression that special-cased
+/// Timeout ("the child may still come up") would leave a live orphan after
+/// every wedged spawn.
 ///
 /// The 2 s timeout is not a synchronization point: the helper writes its pid
 /// file immediately after claiming the channel (milliseconds), and only then

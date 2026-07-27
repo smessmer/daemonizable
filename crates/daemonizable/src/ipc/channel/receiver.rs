@@ -159,9 +159,9 @@ where
     //
     // No `T: Send` here: the timeout machinery is a same-thread poll +
     // `recv(MSG_DONTWAIT)` loop (`read_exact_with_timeout`); nothing crosses a
-    // thread boundary, so the bound would be pure API noise. (It once existed
-    // and cascaded all the way into `Daemonizable::Response` — don't cargo-cult
-    // it back without something that actually moves `T` between threads.)
+    // thread boundary, so the bound would be pure API noise that cascades into
+    // `Daemonizable::Response` — don't add it back without something that
+    // actually moves `T` between threads.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, ChannelRecvError> {
         let buf = self.recv_raw_timeout(timeout)?;
         Ok(postcard::from_bytes(&buf)?)
@@ -271,10 +271,8 @@ fn normalize_blocking_read_err(e: std::io::Error) -> ChannelRecvError {
 /// The socket is left BLOCKING throughout: readiness is awaited with `poll`,
 /// and the actual read uses `recv(MSG_DONTWAIT)` so it never blocks even on a
 /// spurious poll wake-up. This deliberately avoids toggling the description's
-/// `O_NONBLOCK` — the sender may share this same open file description (they are
-/// two ends... two clones of one socket once the channel is collapsed to a
-/// single fd), and flipping `O_NONBLOCK` would corrupt the sender's blocking
-/// writes.
+/// `O_NONBLOCK` — the sender is a `dup`-clone of the same open file
+/// description, and flipping `O_NONBLOCK` would corrupt its blocking writes.
 fn read_exact_with_timeout(
     fd: BorrowedFd<'_>,
     buf: &mut [u8],
@@ -408,9 +406,10 @@ mod tests {
     }
 
     // Regression test for the poll-window clamp: a read whose deadline is longer
-    // than a single poll window must not be cut short when the window expires.
-    // Driven with a tiny window so we don't need a 65s wait; the production path
-    // uses u16::MAX. With the old `Ok(0) => bail!` this failed after one window.
+    // than a single poll window must not be cut short when the window expires
+    // (a poll-window expiry must loop, not error out as a timeout). Driven with
+    // a tiny window so we don't need a 65s wait; the production path uses
+    // u16::MAX.
     #[test]
     fn read_exact_with_timeout_receives_data_spanning_multiple_poll_windows() {
         use std::io::Write;
@@ -442,8 +441,8 @@ mod tests {
     }
 
     // The wait must run until the *real* deadline, not stop after one poll
-    // window. No data ever arrives; with a 20ms window and a 120ms deadline the
-    // buggy `Ok(0) => bail!` would return after ~20ms.
+    // window. No data ever arrives; an implementation that treated a poll-window
+    // expiry as the deadline would return after ~20ms instead of ~120ms.
     #[test]
     fn read_exact_with_timeout_waits_full_deadline_not_one_poll_window() {
         let (sender, recver) = UnixStream::pair().unwrap();

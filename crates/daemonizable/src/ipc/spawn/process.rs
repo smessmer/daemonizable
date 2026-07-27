@@ -208,13 +208,13 @@ fn usable_execfn(bytes: &[u8]) -> Option<PathBuf> {
 
 /// Spawn the current binary as a background daemon via fork+exec — the
 /// engine behind `Daemonizer::spawn_daemon`. Re-execs the current binary with
-/// an EMPTY argv (stage identity rides an in-band channel token, not argv — see
-/// `TOKEN_MAGIC`'s doc in `spawn::mod`; the parent pre-queues both stage tokens
-/// into the channel before the spawn). The child receives its full-duplex
-/// channel as fd `DAEMON_CHANNEL_FD` (3); every other fd the framework or Rust's
-/// std opened carries `FD_CLOEXEC`, so the kernel closes those during `execve` —
-/// fds the application deliberately created *non*-CLOEXEC still survive into the
-/// daemon. Validates the build-id handshake.
+/// an EMPTY argv; stage identity rides in-band channel tokens the parent
+/// pre-queues before the spawn (see `TOKEN_MAGIC`'s doc). The child receives
+/// its full-duplex channel as fd `DAEMON_CHANNEL_FD` (3); every other fd the
+/// framework or Rust's std opened carries `FD_CLOEXEC`, so the kernel closes
+/// those during `execve` — fds the application deliberately created
+/// *non*-CLOEXEC still survive into the daemon. Validates the build-id
+/// handshake.
 ///
 /// The handshake is a raw (not postcard-encoded) frame *from* the daemon
 /// child, bounded by `HANDSHAKE_TIMEOUT`, and the spawn is rejected if the
@@ -254,14 +254,12 @@ where
     // fallback, `current_exe()` also fails, so argv[0] becomes `exe`, which is
     // then already the real AT_EXECFN / argv[0] path — still recognizable.)
     let argv0 = std::env::current_exe().unwrap_or_else(|_| exe.clone());
-    // Pre-queue both stage-identity tokens into the parent→daemon direction:
-    // `TOKEN_MAGIC ‖ TOKEN_STAGE1` then `TOKEN_MAGIC ‖ TOKEN_STAGE2`, as one
-    // contiguous write before the spawn. Stage 1's dispatch consumes token 1,
-    // stage 2's (in the re-exec'd image) consumes token 2, then the framed RPC
-    // begins. The daemon's argv stays EMPTY — stage identity no longer rides
-    // argv (see `TOKEN_MAGIC`'s doc). The tokens are written by
-    // `start_background_process_inner` after the client is built; the test-only
-    // `*_with_exe` spawns pass `None` and never pollute their stream.
+    // Pre-queue both stage-identity tokens into the parent→daemon direction as
+    // one contiguous write before the spawn: stage 1's dispatch consumes
+    // token 1, stage 2's (in the re-exec'd image) consumes token 2, then the
+    // framed RPC begins. Written by `start_background_process_inner` after the
+    // client is built; the test-only `*_with_exe` spawns pass `None` and never
+    // pollute their stream.
     let mut tokens = [0u8; TOKEN_LEN * 2];
     tokens[..TOKEN_LEN].copy_from_slice(&stage_token(TOKEN_STAGE1));
     tokens[TOKEN_LEN..].copy_from_slice(&stage_token(TOKEN_STAGE2));
@@ -401,10 +399,8 @@ where
             //
             // `Pid::from_raw(-child_pid)` is the process group: nix passes it
             // straight to `kill(2)`, so a negative pid signals the group, same
-            // as the raw call. Which group is actually signalled — that
-            // `-child_pid` reaches the daemon grandchild and cannot hit a
-            // pid-reused foreign group — is the correctness property argued
-            // above. A stale/foreign pid only yields ESRCH/EPERM (discarded).
+            // as the raw call. A stale/foreign pid only yields ESRCH/EPERM
+            // (discarded).
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(-child_pid),
                 nix::sys::signal::Signal::SIGKILL,
@@ -489,9 +485,7 @@ where
     // No argv beyond argv0, BY DESIGN: stage identity rides the in-band
     // channel tokens (see `TOKEN_MAGIC`), and the documented contract is that
     // the daemon's argv stays empty (`run_daemon` sees no injected argument).
-    // Do not add an args parameter here without confronting that invariant —
-    // a vestigial one from the old argv-sentinel design was deliberately
-    // removed.
+    // Do not add an args parameter here without confronting that invariant.
     let mut cmd = Command::new(exe);
     if let Some(argv0) = argv0 {
         cmd.arg0(argv0);

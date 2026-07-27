@@ -1,9 +1,9 @@
-//! Adversarial coverage for the in-band channel dispatch (Phase 3): what a
-//! process does when fd 3 carries something OTHER than a genuine framework
-//! channel — a foreign non-socket (a make jobserver FIFO), a socket with the
-//! wrong bytes, a socket carrying a truncated (short-read) token, a crafted
-//! socket carrying only the first token, and a crafted socket carrying a valid
-//! stage-2 token from a hand-run.
+//! Adversarial coverage for the in-band channel dispatch: what a process does
+//! when fd 3 carries something OTHER than a genuine framework channel — a
+//! foreign non-socket (a make jobserver FIFO), a socket with the wrong bytes,
+//! a socket carrying a truncated (short-read) token, a crafted socket carrying
+//! only the first token, and a crafted socket carrying a valid stage-2 token
+//! from a hand-run.
 //!
 //! Each test spawns the real framework app (`daemonizable-test-app`, which goes
 //! through `daemonizable::run`) with fd 3 set up in a `pre_exec` closure, and

@@ -5,11 +5,10 @@
 //! test can verify what happens on the daemon's side after the process that
 //! spawned it is gone (that it keeps running; that its sends fail cleanly).
 //!
-//! This is launched by the test via `std::process::Command` (a fresh process
-//! image), NOT by forking the multithreaded libtest harness, so it carries none
-//! of the fork-in-a-multithreaded-process hazard the previous in-test `fork()`
-//! did — while exercising the identical "daemon survives its spawner's exit"
-//! guarantee.
+//! The tests launch it via `std::process::Command` (a fresh process image)
+//! rather than forking the multithreaded libtest harness, which would be
+//! unsound — and a genuine separate process is also the more faithful stand-in
+//! for a real embedding parent CLI.
 //!
 //! Inputs (from the environment, set by the test on our `Command`):
 //!   - `DAEMONIZABLE_TEST_DAEMON_EXE`: path to the `daemonizable-test-background`

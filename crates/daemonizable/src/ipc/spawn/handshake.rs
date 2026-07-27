@@ -12,17 +12,13 @@ use crate::ipc::{RpcClient, RpcServer};
 
 /// How long the spawning parent will wait for the daemon to send its
 /// build-id handshake after fork+exec. The daemon handshakes before any app
-/// code runs, but the window now spans the *whole two-stage startup*: two
-/// full exec + dynamic-loader passes (stage 1, then the final daemon image),
-/// two runs of any pre-main constructors the application links, plus the
-/// stages' few syscalls (the token peek/consume, `setsid`, the second `fork`,
-/// the stage-2 peer-credential check and fd claim, `chdir`).
-/// Tens of milliseconds on a cold cache, low single-digit milliseconds warm;
-/// the generous bound is for loaded CI machines and apps with heavy
-/// constructors (which pay their cost twice inside this window). The timeout
-/// also matters when the parent accidentally exec'd a wrong binary that
-/// opens the channel fd but never writes (or hangs); without a bound the spawn
-/// would hang forever in that case.
+/// code runs, but the window spans the *whole two-stage startup*: two full
+/// exec + dynamic-loader passes (and two runs of any pre-main constructors)
+/// plus the stages' few syscalls. Tens of milliseconds on a cold cache, low
+/// single-digit milliseconds warm; the generous bound is for loaded CI
+/// machines and apps with heavy constructors. The timeout also matters when
+/// the parent accidentally exec'd a wrong binary that opens the channel fd
+/// but never writes (or hangs); without a bound the spawn would hang forever.
 ///
 /// `pub(super)`: the production spawn passes this constant into
 /// `complete_spawn`; the testutils timeout-injecting spawn variant passes a
