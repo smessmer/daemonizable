@@ -169,12 +169,14 @@ pub(crate) fn validate_inherited_fd() -> Result<(), InheritedFdError> {
         });
     }
     if statbuf.st_mode & libc::S_IFMT != libc::S_IFSOCK {
-        return Err(InheritedFdError::NotASocket {
-            fd,
-            // Widened to u32 so the (platform-varying) libc::mode_t alias
-            // stays out of the public error type.
-            st_mode: statbuf.st_mode as u32,
-        });
+        // Widened to u32 so the (platform-varying) libc::mode_t alias stays
+        // out of the public error type. Not an identity cast everywhere:
+        // mode_t is u32 on Linux but u16 on Apple, so the cast is a real
+        // widening there — clippy (1.94+) only sees the Linux view, where it
+        // degenerates to u32-to-u32.
+        #[allow(clippy::unnecessary_cast)]
+        let st_mode = statbuf.st_mode as u32;
+        return Err(InheritedFdError::NotASocket { fd, st_mode });
     }
     Ok(())
 }
