@@ -123,13 +123,11 @@ use crate::ipc::RpcServer;
 /// `fn main() -> ExitCode { daemonizable::run::<MyApp>() }` — the entire `main`
 /// an application on this library should have. Build with
 /// `default-features = false` and the attribute is gone; write that one line
-/// yourself, and keep `main` to exactly that one line: the re-exec'd daemon
-/// child runs the same `main`, so anything in front of [`run`](super::run) runs
-/// in the daemon too (a thread spawned there exists in the child as well). The
-/// attribute guarantees an empty preamble by construction. (The example above
-/// is shown, not compiled; the compiled equivalent is the doctest on
-/// [`run`](super::run), and the macro's expansion is covered by the trybuild
-/// snapshots in `daemonizable-e2e-tests/tests/macro_ui/`.)
+/// yourself, and keep `main` to exactly that one line (see [`run`](super::run)
+/// for why the empty preamble matters). The example above is shown, not
+/// compiled; the compiled equivalent is the doctest on [`run`](super::run), and
+/// the macro's expansion is covered by the trybuild snapshots in
+/// `daemonizable-e2e-tests/tests/macro_ui/`.
 pub trait Daemonizable: Sized {
     /// Typed request the parent sends to the daemon over the RPC channel.
     ///
@@ -169,9 +167,9 @@ pub trait Daemonizable: Sized {
     /// directory to `/`, and passed the build-id handshake. The process is
     /// otherwise pristine: no logging, no panic hooks, stdio still inherited
     /// from the parent — install whatever you need before serving requests.
-    /// Any configuration the daemon needs (it gets no app arguments — its
-    /// argv is empty, since stage identity rides an in-band channel token —
-    /// so it can't parse flags) travels as an ordinary first RPC request on `rpc`.
+    /// The daemon's argv is empty (stage identity rides an in-band channel
+    /// token), so any configuration it needs travels as an ordinary first RPC
+    /// request on `rpc`.
     ///
     /// Diverges: drive the request loop until [`RpcServer::next_request`]
     /// returns [`ChannelRecvError::SenderClosed`](crate::ChannelRecvError::SenderClosed)

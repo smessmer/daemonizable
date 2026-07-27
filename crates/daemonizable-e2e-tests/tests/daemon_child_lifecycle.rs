@@ -1,16 +1,12 @@
-//! Integration version of the daemonize `test_child_*` lifecycle tests.
+//! Daemon-lifecycle tests: what the parent-side client observes when the
+//! daemon echoes, panics, or exits at various points.
 //!
-//! These previously lived as unit tests in `ipc/daemonize.rs` and forked an
-//! in-process fn pointer. That spawn shape suffered an ~5% flake rate in
-//! parallel `cargo test` runs: sibling tests' pipe fds were inherited into
-//! each others' daemonized children, preventing EOF/EPIPE delivery on the
-//! rightful pipe owners.
-//!
-//! Reworked here to spawn a dedicated helper binary via fork+exec, so:
-//! - The daemon child is a clean single-threaded process image (no inherited
-//!   libtest threads or mutexes).
-//! - Inherited fds are limited to the two we explicitly `dup2` onto fds 3 and
-//!   4 — everything else dies under `FD_CLOEXEC` during `execve`.
+//! Each test spawns the dedicated helper binary via fork+exec, so the daemon
+//! child is a clean single-threaded process image (no inherited libtest
+//! threads or mutexes) and the only non-stdio fd it inherits is the channel
+//! end mapped onto fd 3 — everything else dies under `FD_CLOEXEC` during
+//! `execve`, which keeps parallel test runs from leaking each other's pipe
+//! fds into the daemons and starving EOF/EPIPE delivery.
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -34,8 +30,6 @@ struct Response {
 }
 
 fn helper_exe() -> PathBuf {
-    // Single source of truth for the CARGO_BIN_EXE key: the shared macro in
-    // the e2e support lib (it must be a macro — see its doc).
     daemonizable_e2e_tests::background_helper_exe!()
 }
 

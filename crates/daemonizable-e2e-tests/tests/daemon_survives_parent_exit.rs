@@ -1,33 +1,19 @@
-//! Regression test for daemon detachment.
-//!
-//! Launches a dedicated helper *process* (`daemonizable-test-spawn-then-exit`)
-//! via `std::process::Command`. That helper calls
-//! `start_background_process_with_exe` to spawn the `daemonizable-test-background`
-//! helper in `sentinel_loop` mode (ignores RPC, writes a tick counter to a file
-//! forever), then exits immediately. The main test waits for the spawner process
-//! to reap, verifies the daemon is in its own session (setsid took effect), and
-//! that it's still updating the sentinel. Cleans up via SIGTERM.
-//!
-//! Covers parent-exit survival of the **raw** spawn machinery
+//! Parent-exit survival of the **raw** spawn machinery
 //! (`start_background_process_with_exe`): the daemon keeps running after the
-//! process that spawned it exits. Using a separate spawner process launched with
-//! `Command` (rather than an in-test `fork()`) exercises the identical survival
-//! guarantee while keeping the test free of the fork-in-a-multithreaded-process
-//! hazard — libtest runs each test on a worker thread, so a `fork()` here would
-//! run in a multithreaded process and the (non-async-signal-safe) child could
-//! deadlock. The spawner is also a more faithful stand-in for a real embedding
-//! parent CLI: a genuine separate process image, not a snapshot of the harness.
+//! process that spawned it exits.
 //!
-//! Note: the `setsid` this test observes via `getsid()` is one the HELPER
-//! BINARY performs itself (daemonizable_test_background.rs `sentinel_loop`),
-//! not the framework's `setsid`/second fork in its daemon-stage arms
-//! (`run_as_daemon_stage1`) — the raw
-//! path deliberately bypasses the framework's child arm. The framework's own
-//! `setsid` (and that the daemon is not a session leader) is covered by
-//! `framework_e2e.rs`, which asserts the daemon's session differs from the test
-//! process's AND from the daemon's own pid; the framework-path counterpart of
-//! THIS test — parent exits, framework-spawned daemon observed still doing
-//! work — is `framework_daemon_survives_parent_exit.rs`.
+//! Launches the `daemonizable-test-spawn-then-exit` helper *process* (see its
+//! doc for why a separate process rather than an in-test `fork()`), which
+//! spawns the `daemonizable-test-background` helper in `sentinel_loop` mode
+//! (ignores RPC, writes a tick counter to a file forever) and exits
+//! immediately. The test then verifies the daemon is in its own session and
+//! still updating the sentinel. Cleans up via `DaemonGuard`.
+//!
+//! Note: the `setsid` this test observes is one the helper binary performs
+//! itself — the raw path deliberately bypasses the framework's daemon-stage
+//! arms. The framework's own `setsid`/second fork is covered by
+//! `framework_e2e.rs`, and the framework-path counterpart of THIS test is
+//! `framework_daemon_survives_parent_exit.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -58,15 +44,11 @@ fn daemon_survives_parent_exit() {
     let sentinel_path = tmp.path().join("sentinel");
     let pid_path = tmp.path().join("daemon.pid");
 
-    // Run the spawner as a separate process: it launches the daemon (the
-    // `daemonizable-test-background` helper in `sentinel_loop` mode) and exits
-    // immediately, simulating a parent CLI that daemonizes and returns. The
-    // daemon paths are handed over the environment — passed to the spawner's
-    // `Command` here, then inherited by the daemon across the spawn — so we
-    // never mutate this test process's own environment (no `set_var`, hence no
-    // cross-thread env race). `exit(0)` in the spawner skips destructors, just
-    // like a real embedding application's parent CLI after successful startup
-    // (e.g. a mount helper once its filesystem is mounted).
+    // Run the spawner: it launches the daemon and exits immediately,
+    // simulating a parent CLI that daemonizes and returns. The daemon paths
+    // ride the environment — set on the spawner's `Command`, inherited by the
+    // daemon across the spawn — so this test process never mutates its own
+    // environment (no `set_var`, hence no cross-thread env race).
     let status = Command::new(spawner_exe())
         .env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
         .env("DAEMONIZABLE_TEST_SENTINEL", &sentinel_path)
@@ -78,13 +60,8 @@ fn daemon_survives_parent_exit() {
         "spawner process did not exit cleanly: {status:?}",
     );
 
-    // Daemon is a grandchild of this test; discover its PID through the file it
-    // writes on startup.
-    //
-    // Poll on parseable content rather than just file existence: `std::fs::write`
-    // (used by the daemon) creates the file before it writes, so a naive
-    // `pid_path.exists()` check can win the race and read an empty file. macOS
-    // exposes this race more often than Linux.
+    // The daemon is not our child; discover its PID through the file it
+    // writes on startup (content-polled — see `read_pid_file`).
     let daemon_pid = read_pid_file(&pid_path, Duration::from_secs(5));
     // Installed *before* any assertion below, so the daemon gets killed even if
     // a check panics.

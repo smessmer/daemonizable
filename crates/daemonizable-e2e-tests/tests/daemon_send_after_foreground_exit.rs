@@ -51,13 +51,11 @@ fn daemon_send_response_after_foreground_exited() {
 /// The same scenario with SIGPIPE reset to SIG_DFL in the daemon — the common
 /// real-daemon configuration (set before spawning pipeline children), which
 /// forfeits Rust's process-wide SIG_IGN. The clean-BrokenPipe outcome must be
-/// disposition-independent: on Linux, std's UnixStream writes carry
-/// MSG_NOSIGNAL (documented std behavior since Rust 1.90, and the reason for
-/// the crate's MSRV); on Apple, the channel constructor sets SO_NOSIGPIPE on
-/// the socket (std does not do that for socketpairs — the macOS leg of this
-/// very test is what caught it). A regression on either platform kills the
-/// daemon with SIGPIPE before it publishes any outcome, failing this test's
-/// 10 s ceiling loudly.
+/// disposition-independent; this is the end-to-end pin of the per-platform
+/// mechanism described in the SIGPIPE note on `channel_pair` in the library's
+/// channel module. A regression on either platform kills the daemon with
+/// SIGPIPE before it publishes any outcome, failing this test's 10 s ceiling
+/// loudly.
 #[test]
 fn daemon_send_response_after_foreground_exited_with_sigpipe_default() {
     dead_peer_send_reports_broken_pipe(/* reset_sigpipe_to_default */ true);
@@ -92,9 +90,6 @@ fn dead_peer_send_reports_broken_pipe(reset_sigpipe_to_default: bool) {
 
     // The daemon writes its pid on startup; discover it so cleanup can kill
     // the daemon if an assertion below fails before it exits on its own.
-    // Poll on parseable content, not existence (`std::fs::write` creates the
-    // file before writing, so an existence check can win the race and read
-    // an empty file).
     let daemon_pid = read_pid_file(&pid_path, Duration::from_secs(5));
     let _guard = DaemonGuard(daemon_pid);
 

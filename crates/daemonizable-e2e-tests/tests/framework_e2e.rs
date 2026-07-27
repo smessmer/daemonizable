@@ -41,14 +41,10 @@ fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
     );
     // "parent-got:43" proves the whole chain worked: the parent re-exec'd
     // itself, the daemon passed the build-id handshake, and the typed echo+1
-    // RPC round-tripped through `run_daemon`. "cwd:/" proves the framework
-    // chdir'd the daemon to `/` instead of pinning the parent's cwd.
-    // "marker:removed" proves no framework env var exists in the daemon's
-    // environment (stage identity rides an in-band channel token now — nothing
-    // is ever set, so nothing can leak to the daemon's own children; this pins
-    // that absence against any future design change). "argv1:empty" pins the
-    // argv contract: the daemon receives NO arguments (only argv[0]), since the
-    // token is carried in-band on the channel fd, not in argv.
+    // RPC round-tripped through `run_daemon`. "cwd:/" pins the framework
+    // chdir; "marker:removed" pins that no framework env var exists in the
+    // daemon's environment; "argv1:empty" pins that the daemon receives no
+    // arguments (see the `TestResponse` field docs in the test app).
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
     let fields = parse_outfile(&result);
     assert_eq!(fields["parent-got"], "43", "outfile: {result}");
@@ -117,11 +113,11 @@ fn foreground_dispatch_runs_run_foreground_without_spawning() {
 
 /// Spawn the test app with `arg` as its first argument (the way a shell
 /// hand-run would) and assert it is treated as an ORDINARY foreground argument,
-/// not a daemon-stage trigger. Dispatch reads only the in-band channel token on
-/// fd 3 now, so the former argv sentinels are inert as dispatch signals: the app
-/// runs `run_foreground`, whose hand-rolled parser rejects the unknown argument
-/// with its own "unknown argument" message — proving the process was NOT
-/// hijacked into a daemon stage (which would print "internal to this binary").
+/// not a daemon-stage trigger: dispatch reads only the in-band channel token on
+/// fd 3, never argv. The app must reach `run_foreground`, whose parser rejects
+/// the unknown argument with its own "unknown argument" message — proving the
+/// process was NOT hijacked into a daemon stage (which would print "internal
+/// to this binary").
 fn assert_former_sentinel_is_foreground(arg: &str) {
     let output = Command::new(test_app_exe())
         .arg(arg)
@@ -144,25 +140,22 @@ fn assert_former_sentinel_is_foreground(arg: &str) {
 
 #[test]
 fn former_stage1_sentinel_is_an_ordinary_argument() {
-    // The old stage-1 argv sentinel is no longer a dispatch signal — dispatch
-    // reads the channel token on fd 3, never argv. Passing it by hand must reach
-    // the app's foreground code as a plain (here, unrecognized) argument.
+    // Regression pin: the argv sentinels of older releases must stay inert as
+    // dispatch signals.
     assert_former_sentinel_is_foreground("__daemonizable-stage1");
 }
 
 #[test]
 fn former_stage2_sentinel_is_an_ordinary_argument() {
-    // Same for the old stage-2 sentinel.
     assert_former_sentinel_is_foreground("__daemonizable-daemon");
 }
 
 #[test]
 fn legacy_env_marker_is_ignored() {
-    // The pre-argv-sentinel design dispatched on this environment variable.
-    // It must now be completely inert — an app whose environment happens to
-    // carry it (stale wrapper scripts, supervisor units written against the
-    // old scheme) runs its normal foreground code instead of being hijacked
-    // into a daemon arm.
+    // Regression pin: the env var older releases dispatched on must be
+    // completely inert — an app whose environment happens to carry it (stale
+    // wrapper scripts, supervisor units) runs its normal foreground code
+    // instead of being hijacked into a daemon arm.
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
 

@@ -106,11 +106,8 @@ pub fn run<A: Daemonizable>() -> ExitCode {
     {
         panic!("daemonizable::run may only be called once per process");
     }
-    // Dispatch reads nothing but the head of the channel fd (3): peek an
-    // in-band stage token (non-consuming, non-blocking), consume it on a match,
-    // and route. A plain foreground invocation has no framework socket there —
-    // closed, or a stranger — so the peek yields no token and this falls to the
-    // foreground arm having touched nothing. See `crate::ipc`'s `TOKEN_MAGIC`.
+    // Peek the head of the channel fd (3) for a stage token and route on it —
+    // non-consuming and non-blocking; see the doc above and `TOKEN_MAGIC`.
     match dispatch_from_channel() {
         StageDispatch::DaemonStage1 => run_as_daemon_stage1(), // diverges
         StageDispatch::DaemonStage2 => run_as_daemon_stage2::<A>(), // diverges
@@ -153,11 +150,9 @@ mod tests {
     // the spawned-binary e2e tests.
 
     /// The ONLY in-process test allowed to call `run` — the once-guard is a
-    /// process-global, so any second test calling `run` would race this one
-    /// for the first-call slot. In this libtest process fd 3 is not a framework
-    /// channel (no queued token), so dispatch falls to the foreground arm; the
-    /// stage arms can't be tested in-process (they claim fd 3 and exit) and are
-    /// covered by the spawned-binary e2e tests.
+    /// process-global, so a second test calling `run` would race this one for
+    /// the first-call slot. Fd 3 is not a framework channel in this libtest
+    /// process, so dispatch falls to the foreground arm.
     #[test]
     fn run_dispatches_to_foreground_and_panics_on_second_call() {
         assert_eq!(0, STUB_FOREGROUND_RUNS.load(Ordering::SeqCst));

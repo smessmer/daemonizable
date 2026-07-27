@@ -2,18 +2,12 @@
 //! daemons through the public [`Daemonizer::spawn_daemon`] API — sequentially,
 //! and concurrently from several threads (the advertised `Copy + Send + Sync`
 //! use of the `Daemonizer` token) — with each daemon a distinct, isolated
-//! process on its own RPC channel.
+//! process on its own RPC channel. The rest of the suite only ever spawns one
+//! daemon per test.
 //!
-//! The library documents this as supported (`lib.rs` calls out "a second
-//! `spawn_daemon` from another thread, an advertised use of the
-//! Copy+Send+Sync Daemonizer"), but the rest of the suite only ever spawns one
-//! daemon per test. These tests close that gap.
-//!
-//! Like `framework_e2e.rs`, they drive the full production path through the
-//! `daemonizable-test-app` helper binary — in-band channel-token stage dispatch, the real
-//! `/proc/self/exe` re-exec spawn, the build-id handshake, and the typed RPC
-//! channel — rather than the raw `start_background_process_with_exe` shortcut,
-//! so they cover `spawn_daemon` exactly as an application calls it.
+//! Like `framework_e2e.rs`, these drive the full production path through the
+//! `daemonizable-test-app` helper binary, so they cover `spawn_daemon` exactly
+//! as an application calls it.
 //!
 //! The isolation checks rest on two observable fingerprints the helper reports
 //! per daemon: the echoed request value (each daemon is sent a value unique to
@@ -165,16 +159,13 @@ fn foreground_spawns_many_daemons_sequentially_each_isolated() {
 }
 
 // Concurrent `spawn_daemon` from several threads is race-free only on targets
-// with `SOCK_CLOEXEC` (Linux/Android, the *BSDs, …), where the channel fds are
-// close-on-exec from creation. macOS/iOS lack `SOCK_CLOEXEC`, so the crate
-// documents a narrow spawn-time window there in which one thread's
-// `Command::spawn` can leak another thread's not-yet-CLOEXEC channel ends across
-// `execve` — which would keep a daemon's channel open past its client drop,
-// defeat EOF liveness, and hang this test's `Command::output()`. That is exactly
-// the case the library's caller contract says to avoid (spawn before starting
-// other subprocesses), so exercising the concurrent path is only valid on the
-// SOCK_CLOEXEC platforms; the serial `--spawn-many` / `--spawn-interleaved`
-// tests cover macOS.
+// with `SOCK_CLOEXEC`; on macOS/iOS the documented spawn-time race (see the
+// CLOEXEC discussion in the library's channel module) can leak one thread's
+// channel ends into another thread's daemon, defeating EOF liveness and
+// hanging this test's `Command::output()`. That is exactly the case the
+// library's caller contract says to avoid, so the concurrent path is only
+// exercised on the SOCK_CLOEXEC platforms; the serial `--spawn-many` /
+// `--spawn-interleaved` tests cover macOS.
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[test]
 fn foreground_spawns_many_daemons_concurrently_from_threads() {

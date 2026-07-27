@@ -38,11 +38,11 @@ pub use process::{
 
 /// Fd number the fork+exec child receives its inherited full-duplex channel on.
 /// Matches `sd_listen_fds(3)`-style convention (parent-provided fds start at 3).
-/// Exactly ONE fd crosses the exec boundary now: the channel is a single
-/// full-duplex `AF_UNIX` socket rather than a pair of one-way pipes on 3+4. (The
-/// daemon's `RpcServer` dups this fd at runtime — via `endpoint_from_stream` — so
-/// it can read and write independently; that runtime clone lands on whatever fd
-/// the OS assigns, typically 4, and is CLOEXEC so it never leaks to children.)
+/// Exactly ONE fd crosses the exec boundary: a single full-duplex `AF_UNIX`
+/// socket. (The daemon's `RpcServer` dups it at runtime — via
+/// `endpoint_from_stream` — so it can read and write independently; that
+/// runtime clone lands on whatever fd the OS assigns and is CLOEXEC, so it
+/// never leaks to children.)
 const DAEMON_CHANNEL_FD: i32 = 3;
 
 /// Length of a stage-identity token: the 32-byte [`TOKEN_MAGIC`] prefix plus a
@@ -77,13 +77,12 @@ const TOKEN_STAGE2: u8 = 2;
 ///
 /// # Threat model — an accident authenticator, NOT a forgery defense
 ///
-/// `TOKEN_MAGIC` is a FIXED, PUBLIC constant (as public as the old argv
-/// sentinel strings were). Its sole job is to make a *coincidental* match with
-/// unrelated inherited data astronomically unlikely (2⁻²⁵⁶), so a foreign fd
-/// on number 3 — a systemd socket-activation socket, a make jobserver FIFO —
-/// is not mistaken for a framework channel. It does NOT stop a deliberate
-/// forger: anyone who can plant a socket on fd 3 can also write these public
-/// bytes into it.
+/// `TOKEN_MAGIC` is a FIXED, PUBLIC constant. Its sole job is to make a
+/// *coincidental* match with unrelated inherited data astronomically unlikely
+/// (2⁻²⁵⁶), so a foreign fd on number 3 — a systemd socket-activation socket,
+/// a make jobserver FIFO — is not mistaken for a framework channel. It does
+/// NOT stop a deliberate forger: anyone who can plant a socket on fd 3 can
+/// also write these public bytes into it.
 ///
 /// The real defense against a forged channel is downstream, in
 /// [`run_as_daemon_stage2`](crate::run) (all applied *before* any application
@@ -104,10 +103,9 @@ const TOKEN_STAGE2: u8 = 2;
 ///   a shell or a setsid-wrapped launcher is refused.
 ///
 /// A same-uid local process that plants a crafted channel can still reach
-/// `run_daemon` (it could equally `ptrace` us), so — exactly as with the old
-/// argv sentinel — applications must not treat `run_daemon`'s RPC input as
-/// authenticated-by-provenance. See `run`'s docs for the same-principal and
-/// file-capabilities caveats.
+/// `run_daemon` (it could equally `ptrace` us), so applications must not treat
+/// `run_daemon`'s RPC input as authenticated-by-provenance. See `run`'s docs
+/// for the same-principal and file-capabilities caveats.
 const TOKEN_MAGIC: [u8; 32] = [
     0x54, 0x97, 0x91, 0xf3, 0xcc, 0x75, 0xa4, 0x5c, 0x7c, 0x42, 0x9c, 0xbd, 0x37, 0x14, 0x89, 0xb1,
     0x67, 0x7b, 0x6b, 0xf3, 0xf3, 0x38, 0x49, 0x44, 0x05, 0x0a, 0x7f, 0x6d, 0xfa, 0x9c, 0xbe, 0x94,

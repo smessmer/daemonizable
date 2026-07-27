@@ -1,10 +1,8 @@
 //! Helper binary used by `start_background_process_with_exe` integration
-//! tests. Reads `DAEMONIZABLE_TEST_BEHAVIOR` from the environment and replays one of
-//! a few canned daemon behaviors against the inherited channel fd (3).
-//!
-//! This binary is what the test_child_* daemon-lifecycle tests now spawn
-//! instead of forking an in-process fn pointer, so they no longer suffer the
-//! parallel-test fd-inheritance flake.
+//! tests. Reads `DAEMONIZABLE_TEST_BEHAVIOR` from the environment and replays
+//! one of a few canned daemon behaviors against the inherited channel fd (3),
+//! giving those tests a clean single-threaded daemon process image (no
+//! inherited libtest threads or sibling-test fds).
 
 use daemonizable::{ChannelRecvError, ChannelSendError, RpcServer, rpc_server_from_inherited_fd};
 use serde::{Deserialize, Serialize};
@@ -209,14 +207,11 @@ fn main() {
             // Optionally reset SIGPIPE to its default disposition — the common
             // real-daemon configuration (done before spawning pipeline
             // children) that forfeits Rust's process-wide SIG_IGN. The
-            // dead-peer send below must STILL surface as a clean BrokenPipe:
-            // on Linux std's UnixStream writes carry MSG_NOSIGNAL (documented
-            // since Rust 1.90 — the crate's MSRV exists for exactly this); on
-            // Apple the channel constructor sets SO_NOSIGPIPE on the socket
-            // (std does NOT for socketpairs — this very test caught that on
-            // the macOS CI leg). If the guarantee ever broke, this process
-            // would die on SIGPIPE here and never publish an outcome, failing
-            // the test loudly.
+            // dead-peer send below must STILL surface as a clean BrokenPipe
+            // (see the SIGPIPE note on `channel_pair` in the library's
+            // channel module for the per-platform mechanism). If the guarantee
+            // ever broke, this process would die on SIGPIPE here and never
+            // publish an outcome, failing the test loudly.
             if std::env::var_os("DAEMONIZABLE_TEST_SIGPIPE_DFL").is_some() {
                 // SAFETY: `libc::signal` with SIG_DFL installs the default
                 // disposition for SIGPIPE — no handler function pointer is

@@ -1,20 +1,14 @@
-//! Regression test for inherited-fd isolation across `start_background_process`.
+//! Regression test for inherited-fd isolation across the daemon spawn: fds the
+//! parent holds (e.g. pipes belonging to sibling tests in a parallel
+//! `cargo test` run) must not leak into the daemon — a fork-only daemonizer
+//! would inherit them all, while fork+exec + `FD_CLOEXEC` closes them during
+//! `execve`.
 //!
-//! Before the fork+exec switch, `start_background_process` did a bare `fork()`
-//! via the `daemonize` crate. Pipes created without CLOEXEC meant the daemon
-//! child inherited every fd open in the parent at fork time — including pipes
-//! belonging to sibling tests running in parallel. The original ~5% flake
-//! rate on `cargo test` came from that.
-//!
-//! This test opens a "sentinel" pipe in the parent, then spawns the
+//! The test opens a "sentinel" pipe in the parent, then spawns the
 //! `daemonizable-test-background` helper binary as a daemon, asking it to
-//! write to the sentinel's *fd number*. Under fork+exec + `FD_CLOEXEC` on
-//! every pipe, the sentinel fd is closed by the kernel during `execve` in
-//! the daemon, so the write fails and the parent never receives anything on
-//! its read end. The test asserts EOF.
-//!
-//! On the previous fork-only daemonize path this test would have observed
-//! the sentinel byte in the parent — i.e. it was the canary for the bug.
+//! write to the sentinel's *fd number*. The daemon's copy of that fd must
+//! already be closed, so the write fails and the parent's read end sees EOF
+//! instead of the sentinel byte.
 
 use std::ffi::{OsStr, OsString};
 use std::io::Read;

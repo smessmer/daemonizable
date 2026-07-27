@@ -33,13 +33,8 @@ pub use spawn::{rpc_server_from_inherited_fd, send_handshake};
 
 // Test-only surface, gated so it never ships in the default published API
 // (mirrored by the `testutils`-gated crate-root re-exports in `lib.rs`).
-// `InheritedFdError` is produced only by the fd-claim helper — internal code
-// names it via the `error` submodule directly, so this re-export exists purely
-// for the crate-root one — the `*_with_exe` spawn helpers and the raw-token
-// helper `stage_token_bytes` exist only for the e2e tests, and `RpcConnection`
-// reaches beyond `ipc` only as the `testutils` in-process-connection surface
-// (the spawn machinery, `ipc`'s one internal user, names it via the `rpc`
-// submodule directly).
+// Internal code doesn't use these re-exports — it names the submodules
+// directly — so they exist purely to feed the crate-root ones.
 #[cfg(any(test, feature = "testutils"))]
 pub use error::InheritedFdError;
 #[cfg(any(test, feature = "testutils"))]

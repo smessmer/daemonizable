@@ -84,11 +84,9 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 ///   and Apple has no `MSG_NOSIGNAL` to use instead.
 ///
 /// (Rust's default process-wide `SIGPIPE` ignore also applies, but the
-/// guarantee no longer depends on it.) The disposition-independence is pinned
+/// guarantee doesn't depend on it.) The disposition-independence is pinned
 /// end-to-end, on both Linux and macOS CI, by the `SIG_DFL` dead-peer e2e
 /// test in `daemon_send_after_foreground_exit`.
-///
-/// T: The type of the data that will be sent through the channel.
 ///
 /// Test-only: production builds the full-duplex daemon channel through
 /// [`endpoint_from_stream`]; this one-way constructor exists to exercise the
@@ -157,14 +155,10 @@ mod tests {
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
         // Writing to a socket whose peer has closed returns EPIPE (an error),
-        // NOT a `SIGPIPE` that kills the test process — std's MSG_NOSIGNAL
-        // (Linux, documented since Rust 1.90 — hence the MSRV) / the
-        // SO_NOSIGPIPE this crate's channel constructor sets (Apple) make
-        // that disposition-independent; see `channel_pair`'s doc. The SIG_DFL
-        // variant is pinned by the e2e test in
-        // `daemon_send_after_foreground_exit`. (This fixture builds its pair
-        // directly, without the constructor's Apple option — fine here: the
-        // test process keeps Rust's default SIGPIPE ignore.)
+        // NOT a `SIGPIPE` that kills the test process — see the SIGPIPE note
+        // on `channel_pair`. (This fixture builds its pair directly, without
+        // the constructor's Apple SO_NOSIGPIPE — fine here: the test process
+        // keeps Rust's default SIGPIPE ignore.)
         assert!(sender.send(&42).is_err());
     }
 
@@ -195,12 +189,9 @@ mod tests {
 
     #[test]
     fn channel_ends_have_cloexec_set() {
-        // Both ends of channels created by our `channel_pair()` wrapper must have
-        // FD_CLOEXEC set, so they're closed automatically by the kernel when
-        // the daemon child execs the new binary. `UnixStream::pair()` sets this
-        // atomically via `SOCK_CLOEXEC` on Linux (and with a separate
-        // `ioctl(FIOCLEX)` on macOS/iOS); either way std guarantees CLOEXEC on
-        // the fds it creates.
+        // Both ends must have FD_CLOEXEC set, so the kernel closes them when
+        // the daemon child execs the new binary (see `channel_pair`'s doc for
+        // how std establishes the flag per platform).
         let (sender, recver) = channel_pair::<u32>().unwrap();
         // Recover the owned fds so the descriptors stay valid for the fcntl
         // check below; they're closed when these `OwnedFd`s drop at the end.
@@ -298,15 +289,11 @@ mod tests {
         fn completes_when_data_arrives_from_another_thread() {
             // Cross-thread wakeup: a blocking `recv` must return the value
             // another thread sends, whichever side reaches the socket first.
-            // Which interleaving actually occurs is scheduler-dependent and
-            // cannot be forced portably from userspace — a previous version
-            // "arranged" for the receiver to block first with a 1s sleep,
-            // which only made that interleaving likely, at the cost of a
-            // timing dependency and a second of wall clock. Both orders are
-            // correct and both occur across runs; the "empty channel waits
-            // instead of erroring" property is pinned deterministically by
-            // the `recv_timeout` tests, which drive the wait path on a channel
-            // that provably never receives data.
+            // No sleep "arranges" the receiver to block first — the
+            // interleaving can't be forced portably, both orders are correct,
+            // and the "empty channel waits instead of erroring" property is
+            // pinned deterministically by the `recv_timeout` tests (a channel
+            // that provably never receives data).
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
@@ -382,12 +369,9 @@ mod tests {
 
         #[test]
         fn completes_when_data_arrives_from_another_thread() {
-            // Cross-thread wakeup for the timeout path — see the blocking
-            // twin in `recv::completes_when_data_arrives_from_another_thread`
-            // for why no sleep "arranges" the receiver to block first: the
-            // interleaving can't be forced portably, both orders are correct,
-            // and the genuinely-waiting case is pinned deterministically by
-            // `timeout` below (a channel that provably never receives data).
+            // Cross-thread wakeup for the timeout path — see the blocking twin
+            // in `recv::completes_when_data_arrives_from_another_thread` for
+            // why no sleep sequences the two sides.
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
