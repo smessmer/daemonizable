@@ -3,10 +3,10 @@
 //!
 //! Each test spawns the dedicated helper binary via fork+exec, so the daemon
 //! child is a clean single-threaded process image (no inherited libtest
-//! threads or mutexes) and the only inherited fd is the channel end mapped
-//! onto fd 3 — everything else dies under `FD_CLOEXEC` during `execve`, which
-//! keeps parallel test runs from leaking each other's pipe fds into the
-//! daemons and starving EOF/EPIPE delivery.
+//! threads or mutexes) and the only non-stdio fd it inherits is the channel
+//! end mapped onto fd 3 — everything else dies under `FD_CLOEXEC` during
+//! `execve`, which keeps parallel test runs from leaking each other's pipe
+//! fds into the daemons and starving EOF/EPIPE delivery.
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;

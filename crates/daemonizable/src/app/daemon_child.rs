@@ -47,7 +47,9 @@ pub(super) fn run_as_daemon_stage1() -> ! {
     // rejected HERE, pre-fork (message on the inherited stderr, exit 2, no
     // session created, no process left behind) — rather than the stage-2 image
     // later finding no token and silently running foreground code in a
-    // detached process.
+    // detached process. (The peek succeeding also proves fd 3 is a usable
+    // socket, which is why stage 1 needs no separate fd validation — stage 2
+    // gets its own via the claim's fstat probe.)
     if !channel_has_stage2_token() {
         eprintln!(
             "daemon stage 1: the channel is missing stage 2's token. This entry point is \
@@ -103,9 +105,9 @@ pub(super) fn run_as_daemon_stage1() -> ! {
     //
     // Ordering — all load-bearing:
     //   * AFTER setsid(): the spawned child must be a non-leader member of the
-    //     new session, and it stays in the process group setsid() created —
-    //     the group the parent's failed-spawn cleanup signals via
-    //     kill(-child_pid).
+    //     new session, and it stays in the process group setsid() created
+    //     (neither `Command` nor `execve` changes the process group) — the
+    //     group the parent's failed-spawn cleanup signals via kill(-child_pid).
     //   * BEFORE the handshake (sent by stage 2): the parent must validate —
     //     and channel-EOF liveness must track — the process that actually serves.
     //
@@ -175,8 +177,10 @@ pub(super) fn run_as_daemon_stage2<A: Daemonizable>() -> ! {
     //     own dispatch see token 2 and run THIS arm in the parent's direct
     //     child (never setsid'd/double-forked). That is caught only when the
     //     foreground's own sid != pgid — true under an interactive job-control
-    //     shell, but not under a launcher whose sid == pgid (a script, cron, or
-    //     a setsid'd supervisor) — so this is a backstop, not a complete guard;
+    //     shell (the job is its own group leader while the shell is the
+    //     session leader), but not under a launcher whose sid == pgid (a
+    //     script, cron, or a setsid'd supervisor) — so this is a backstop,
+    //     not a complete guard;
     //     the real protection is the documented "constructors must not read
     //     fd 3" caveat, plus the peer-cred check below for the cross-principal
     //     case.

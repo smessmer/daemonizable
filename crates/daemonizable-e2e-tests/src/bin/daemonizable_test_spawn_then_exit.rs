@@ -6,9 +6,11 @@
 //! spawned it is gone (that it keeps running; that its sends fail cleanly).
 //!
 //! The tests launch it via `std::process::Command` (a fresh process image)
-//! rather than forking the multithreaded libtest harness, which would be
-//! unsound — and a genuine separate process is also the more faithful stand-in
-//! for a real embedding parent CLI.
+//! rather than forking the libtest harness: libtest runs tests on worker
+//! threads, and the child of a fork in a multithreaded process may only run
+//! async-signal-safe code, which this helper's body is not. A genuine
+//! separate process is also the more faithful stand-in for a real embedding
+//! parent CLI.
 //!
 //! Inputs (from the environment, set by the test on our `Command`):
 //!   - `DAEMONIZABLE_TEST_DAEMON_EXE`: path to the `daemonizable-test-background`

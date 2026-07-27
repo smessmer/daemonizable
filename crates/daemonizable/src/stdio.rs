@@ -46,10 +46,11 @@ pub enum DetachStdioError {
 ///
 /// Concurrency: prefer calling while no other thread is creating file
 /// descriptors. Any std fd still *closed* when this is called is a hole a
-/// concurrently-allocated descriptor can land in, after which the redirect
-/// silently clobbers whatever landed there. (The function doesn't widen that
-/// window internally: once the `open` fills the lowest hole, it never reopens
-/// — see the relocation below.)
+/// concurrently-allocated descriptor can land in — from entry until the
+/// `open` and the `dup2`s fill it — after which the redirect silently
+/// clobbers whatever landed there. (The function doesn't widen that window
+/// internally: once the `open` fills the lowest hole, it never reopens — see
+/// the relocation below.)
 ///
 /// We `dup2` rather than `close` to keep fd numbers 0/1/2 valid — a later
 /// allocation that re-grabs those numbers would otherwise produce garbage in
