@@ -157,10 +157,7 @@ where
         // terminal on its own).
         let mut buf = vec![0u8; len];
         if let Err(failure) = mode.read_exact_from(&mut self.recver, &mut buf) {
-            let consumed = failure
-                .consumed
-                .map(|payload_read| len_bytes.len() + payload_read);
-            if poison_after(&failure.err, consumed) {
+            if poison_after(&failure.err, failure.consumed.plus(len_bytes.len())) {
                 self.poisoned = true;
             }
             return Err(failure.err);
@@ -199,14 +196,14 @@ impl ReadMode {
         match self {
             ReadMode::Blocking => stream.read_exact(buf).map_err(|e| ReadFailure {
                 err: normalize_blocking_read_err(e),
-                consumed: None,
+                consumed: Consumed::Unknown,
             }),
             ReadMode::Deadline(timeout_at) => {
                 let mut consumed = 0;
                 read_exact_with_timeout(stream.as_fd(), buf, timeout_at, &mut consumed).map_err(
                     |err| ReadFailure {
                         err,
-                        consumed: Some(consumed),
+                        consumed: Consumed::Exactly(consumed),
                     },
                 )
             }
@@ -215,23 +212,48 @@ impl ReadMode {
 }
 
 /// A failed [`ReadMode::read_exact_from`]: the error, plus how many bytes of
-/// `buf` it consumed first — `None` when the primitive doesn't report it
-/// (blocking `read_exact`), which [`poison_after`] treats as possibly-partial.
+/// `buf` it consumed first — the input to the [`poison_after`] decision.
 struct ReadFailure {
     err: ChannelRecvError,
-    consumed: Option<usize>,
+    consumed: Consumed,
+}
+
+/// How many bytes a failed read consumed from the stream, as reported by
+/// [`ReadMode::read_exact_from`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Consumed {
+    /// The read primitive tracks consumption exactly (the deadline path's
+    /// poll + `recv` loop). `Exactly(0)` proves the wire is untouched, which
+    /// is what lets a clean idle timeout go unpoisoned.
+    Exactly(usize),
+    /// The primitive doesn't report consumption on failure (blocking
+    /// `read_exact` leaves it unspecified), so the stream may or may not be
+    /// mid-frame — [`poison_after`] conservatively treats this as partial.
+    Unknown,
+}
+
+impl Consumed {
+    /// Fold `prior` bytes consumed earlier in the frame into the count (the
+    /// payload read adds the already-consumed length prefix); `Unknown` stays
+    /// `Unknown`.
+    fn plus(self, prior: usize) -> Consumed {
+        match self {
+            Consumed::Exactly(n) => Consumed::Exactly(prior + n),
+            Consumed::Unknown => Consumed::Unknown,
+        }
+    }
 }
 
 /// The receiver-side poison decision, split out as a pure function so the rule
 /// is unit-testable without fault injection: given a failed receive's error and
 /// how many bytes of the current frame were consumed before it (prefix bytes
-/// count; `None` when the read primitive doesn't report consumption), decide
-/// whether the stream is desynchronized. The rule (also on the `poisoned` field
-/// doc): any failure after partial — or unknown, possibly partial — consumption
-/// poisons, except EOF — `SenderClosed` is terminal on its own, so every later
-/// receive already fails consistently without the flag.
-fn poison_after(err: &ChannelRecvError, consumed: Option<usize>) -> bool {
-    consumed != Some(0) && !matches!(err, ChannelRecvError::SenderClosed)
+/// count), decide whether the stream is desynchronized. The rule (also on the
+/// `poisoned` field doc): any failure after partial — or [`Consumed::Unknown`],
+/// possibly partial — consumption poisons, except EOF — `SenderClosed` is
+/// terminal on its own, so every later receive already fails consistently
+/// without the flag.
+fn poison_after(err: &ChannelRecvError, consumed: Consumed) -> bool {
+    consumed != Consumed::Exactly(0) && !matches!(err, ChannelRecvError::SenderClosed)
 }
 
 /// Upper bound on the deadline a caller-supplied timeout can produce, used only
@@ -372,21 +394,33 @@ mod tests {
     // `Io`).
     #[test]
     fn poison_after_decision_table() {
+        use Consumed::{Exactly, Unknown};
         let io = || ChannelRecvError::Io(std::io::Error::other("injected"));
         // Provably nothing consumed → never poison, whatever the error.
-        assert!(!poison_after(&ChannelRecvError::Timeout, Some(0)));
-        assert!(!poison_after(&io(), Some(0)));
-        assert!(!poison_after(&ChannelRecvError::SenderClosed, Some(0)));
+        assert!(!poison_after(&ChannelRecvError::Timeout, Exactly(0)));
+        assert!(!poison_after(&io(), Exactly(0)));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, Exactly(0)));
         // Partial consumption → poison for Timeout and Io alike...
-        assert!(poison_after(&ChannelRecvError::Timeout, Some(1)));
-        assert!(poison_after(&io(), Some(3)));
-        assert!(poison_after(&ChannelRecvError::Timeout, Some(4)));
+        assert!(poison_after(&ChannelRecvError::Timeout, Exactly(1)));
+        assert!(poison_after(&io(), Exactly(3)));
+        assert!(poison_after(&ChannelRecvError::Timeout, Exactly(4)));
         // ...but not for EOF, which is terminal without the flag.
-        assert!(!poison_after(&ChannelRecvError::SenderClosed, Some(3)));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, Exactly(3)));
         // Unknown consumption (blocking `read_exact` doesn't report it) is
         // conservatively treated as possibly mid-frame: poison, except EOF.
-        assert!(poison_after(&io(), None));
-        assert!(!poison_after(&ChannelRecvError::SenderClosed, None));
+        assert!(poison_after(&io(), Unknown));
+        assert!(!poison_after(&ChannelRecvError::SenderClosed, Unknown));
+    }
+
+    // `plus` folds bytes consumed earlier in the frame into the count — a
+    // zero-progress payload read after the 4-byte prefix is still mid-frame
+    // (`Exactly(0).plus(4)` must poison, per the table above) — and `Unknown`
+    // is absorbing.
+    #[test]
+    fn consumed_plus_folds_prior_bytes_and_preserves_unknown() {
+        assert_eq!(Consumed::Exactly(0).plus(4), Consumed::Exactly(4));
+        assert_eq!(Consumed::Exactly(3).plus(4), Consumed::Exactly(7));
+        assert_eq!(Consumed::Unknown.plus(4), Consumed::Unknown);
     }
 
     // Regression test for the deadline-overflow guard: `Instant::now() + timeout`
