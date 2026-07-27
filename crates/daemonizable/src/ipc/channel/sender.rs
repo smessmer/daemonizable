@@ -11,7 +11,7 @@ use serde::Serialize;
 use super::MAX_MESSAGE_SIZE;
 use crate::ipc::error::ChannelSendError;
 
-pub struct Sender<T>
+pub(in crate::ipc) struct Sender<T>
 where
     T: Serialize,
 {
@@ -55,9 +55,10 @@ where
     }
 
     /// Surrender the typed wrapper and recover the underlying owned file
-    /// descriptor. Test-only (used to inspect the raw fd's flags).
+    /// descriptor. Test-only (used by the parent module's tests to inspect the
+    /// raw fd's flags).
     #[cfg(test)]
-    pub fn into_owned_fd(self) -> OwnedFd {
+    pub(super) fn into_owned_fd(self) -> OwnedFd {
         OwnedFd::from(self.sender)
     }
 
@@ -75,7 +76,7 @@ where
     /// Used for the build-id handshake before typed RPC begins: encoding the
     /// handshake via postcard would defeat its purpose of validating that
     /// parent and child agree on the postcard schema.
-    pub(crate) fn send_raw(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
+    pub(in crate::ipc) fn send_raw(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
         self.write_length_prefixed(bytes)
     }
 
@@ -84,7 +85,7 @@ where
     /// begins. The daemon's dispatch consumes these raw (they are not
     /// length-prefixed), then reads framed messages after. Must be called
     /// before any `send`/`send_raw` so the tokens lead the stream.
-    pub(crate) fn write_prelude(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    pub(in crate::ipc) fn write_prelude(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.sender.write_all(bytes)
     }
 

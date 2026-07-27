@@ -8,13 +8,11 @@
 //! - [`mod@spawn`] — the fork+exec daemon spawn, stage-identity tokens,
 //!   peer-credential check, fd claim, and build-id handshake.
 //! - [`mod@error`] — the typed error enums for all of the above.
-//! - [`mod@cloexec`] — the shared `FD_CLOEXEC` set helper.
 //!
 //! (The app-facing stdio utility `detach_stdio` is deliberately NOT here — it
 //! is not IPC; see `crate::stdio`.)
 
 mod channel;
-mod cloexec;
 mod error;
 mod rpc;
 mod spawn;
@@ -22,9 +20,7 @@ mod spawn;
 pub use error::{
     ChannelCreateError, ChannelRecvError, ChannelSendError, HandshakeError, SpawnDaemonError,
 };
-pub use rpc::{RpcClient, RpcConnection, RpcServer};
-#[cfg(any(test, feature = "testutils"))]
-pub(crate) use spawn::stage_token;
+pub use rpc::{RpcClient, RpcServer};
 pub(crate) use spawn::{
     StageDispatch, channel_has_stage2_token, daemon_exe_path, dispatch_from_channel,
     spawn_daemon_process, verify_channel_peer_creds,
@@ -39,12 +35,17 @@ pub use spawn::{rpc_server_from_inherited_fd, send_handshake};
 // (mirrored by the `testutils`-gated crate-root re-exports in `lib.rs`).
 // `InheritedFdError` is produced only by the fd-claim helper — internal code
 // names it via the `error` submodule directly, so this re-export exists purely
-// for the crate-root one — and the `*_with_exe` spawn helpers exist only for
-// the e2e tests.
+// for the crate-root one — the `*_with_exe` spawn helpers and the raw-token
+// helper `stage_token_bytes` exist only for the e2e tests, and `RpcConnection`
+// reaches beyond `ipc` only as the `testutils` in-process-connection surface
+// (the spawn machinery, `ipc`'s one internal user, names it via the `rpc`
+// submodule directly).
 #[cfg(any(test, feature = "testutils"))]
 pub use error::InheritedFdError;
 #[cfg(any(test, feature = "testutils"))]
+pub use rpc::RpcConnection;
+#[cfg(any(test, feature = "testutils"))]
 pub use spawn::{
-    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,
+    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout, stage_token_bytes,
     start_background_process_with_exe,
 };

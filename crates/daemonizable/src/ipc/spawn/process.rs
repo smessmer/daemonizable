@@ -17,8 +17,10 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::handshake::{HANDSHAKE_TIMEOUT, validate_handshake_and_build_client};
 use super::{DAEMON_CHANNEL_FD, TOKEN_LEN, TOKEN_STAGE1, TOKEN_STAGE2, stage_token};
 use crate::ipc::RpcClient;
-use crate::ipc::RpcConnection;
 use crate::ipc::error::SpawnDaemonError;
+// Via the `rpc` submodule, not `crate::ipc`'s re-export: that re-export is the
+// `testutils` surface (cfg-gated), while this is `ipc`-internal plumbing.
+use crate::ipc::rpc::RpcConnection;
 
 /// Resolve the path to exec for the daemon child.
 ///

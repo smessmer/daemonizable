@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use super::MAX_MESSAGE_SIZE;
 use crate::ipc::error::ChannelRecvError;
 
-pub struct Receiver<T>
+pub(in crate::ipc) struct Receiver<T>
 where
     T: DeserializeOwned,
 {
@@ -65,9 +65,10 @@ where
     }
 
     /// Surrender the typed wrapper and recover the underlying owned file
-    /// descriptor. Test-only (used to inspect the raw fd's flags).
+    /// descriptor. Test-only (used by the parent module's tests to inspect the
+    /// raw fd's flags).
     #[cfg(test)]
-    pub fn into_owned_fd(self) -> OwnedFd {
+    pub(super) fn into_owned_fd(self) -> OwnedFd {
         OwnedFd::from(self.recver)
     }
 
@@ -92,7 +93,7 @@ where
     /// consumed) does not poison, so polling an idle channel with short
     /// timeouts keeps working, and EOF (`SenderClosed`) does not need to — it
     /// is already terminal (see the `poisoned` field doc for the full rule).
-    pub(crate) fn recv_raw_timeout(
+    pub(in crate::ipc) fn recv_raw_timeout(
         &mut self,
         timeout: Duration,
     ) -> Result<Vec<u8>, ChannelRecvError> {

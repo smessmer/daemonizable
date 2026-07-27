@@ -47,11 +47,11 @@ const DAEMON_CHANNEL_FD: i32 = 3;
 
 /// Length of a stage-identity token: the 32-byte [`TOKEN_MAGIC`] prefix plus a
 /// one-byte stage tag.
-pub(crate) const TOKEN_LEN: usize = TOKEN_MAGIC.len() + 1;
+const TOKEN_LEN: usize = TOKEN_MAGIC.len() + 1;
 
 /// Stage-identity tag bytes appended to [`TOKEN_MAGIC`] to form the two tokens.
-pub(crate) const TOKEN_STAGE1: u8 = 1;
-pub(crate) const TOKEN_STAGE2: u8 = 2;
+const TOKEN_STAGE1: u8 = 1;
+const TOKEN_STAGE2: u8 = 2;
 
 /// Fixed 32-byte magic prefixing each in-band stage-identity token.
 ///
@@ -108,15 +108,28 @@ pub(crate) const TOKEN_STAGE2: u8 = 2;
 /// argv sentinel — applications must not treat `run_daemon`'s RPC input as
 /// authenticated-by-provenance. See `run`'s docs for the same-principal and
 /// file-capabilities caveats.
-pub(crate) const TOKEN_MAGIC: [u8; 32] = [
+const TOKEN_MAGIC: [u8; 32] = [
     0x54, 0x97, 0x91, 0xf3, 0xcc, 0x75, 0xa4, 0x5c, 0x7c, 0x42, 0x9c, 0xbd, 0x37, 0x14, 0x89, 0xb1,
     0x67, 0x7b, 0x6b, 0xf3, 0xf3, 0x38, 0x49, 0x44, 0x05, 0x0a, 0x7f, 0x6d, 0xfa, 0x9c, 0xbe, 0x94,
 ];
 
 /// Build the `TOKEN_LEN`-byte stage token `TOKEN_MAGIC ‖ stage`.
-pub(crate) fn stage_token(stage: u8) -> [u8; TOKEN_LEN] {
+fn stage_token(stage: u8) -> [u8; TOKEN_LEN] {
     let mut token = [0u8; TOKEN_LEN];
     token[..TOKEN_MAGIC.len()].copy_from_slice(&TOKEN_MAGIC);
     token[TOKEN_MAGIC.len()] = stage;
     token
+}
+
+/// Test-only: the raw stage-identity token bytes (`TOKEN_MAGIC ‖ stage`) a
+/// parent pre-queues onto the channel fd, so e2e tests can craft channel
+/// contents (a valid token, a single token, wrong magic) and exercise dispatch
+/// and the daemon-stage guards from a spawned binary. `stage` is 1 or 2.
+/// `#[doc(hidden)]`, `testutils`-gated — not part of the stable surface; lives
+/// here (rather than in `lib.rs`) so [`stage_token`] and the token constants
+/// can stay private to this module.
+#[cfg(any(test, feature = "testutils"))]
+#[doc(hidden)]
+pub fn stage_token_bytes(stage: u8) -> Vec<u8> {
+    stage_token(stage).to_vec()
 }

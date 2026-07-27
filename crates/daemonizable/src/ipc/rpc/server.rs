@@ -40,7 +40,7 @@ where
     Request: DeserializeOwned,
     Response: Serialize,
 {
-    pub(super) fn new(sender: Sender<Response>, receiver: Receiver<Request>) -> Self {
+    fn new(sender: Sender<Response>, receiver: Receiver<Request>) -> Self {
         Self { sender, receiver }
     }
 
@@ -56,12 +56,12 @@ where
     /// (EMFILE/ENFILE) → [`InheritedFdError::CloneFd`]; on that error the
     /// adopted fd is closed as the `OwnedFd` drops.
     ///
-    /// Crate-internal: the daemon child never constructs its own `RpcServer`
+    /// `ipc`-internal: the daemon child never constructs its own `RpcServer`
     /// (it receives one, already built, in `Daemonizable::run_daemon`). This
     /// constructor exists only for the one internal caller
     /// `rpc_server_from_inherited_fd`, so it stays off the public API rather
     /// than exposing an fd-adopting constructor on a type every daemon app holds.
-    pub(crate) fn from_owned_fd(fd: OwnedFd) -> Result<Self, InheritedFdError> {
+    pub(in crate::ipc) fn from_owned_fd(fd: OwnedFd) -> Result<Self, InheritedFdError> {
         Self::from_stream(UnixStream::from(fd))
             .map_err(|source| InheritedFdError::CloneFd { source })
     }
@@ -69,7 +69,7 @@ where
     /// Build a server from one full-duplex socket endpoint, cloning it into the
     /// send/recv halves. Shared by [`from_owned_fd`](Self::from_owned_fd) (the
     /// fork+exec claim) and the in-process `RpcConnection::into_server_and_client`.
-    pub(crate) fn from_stream(stream: UnixStream) -> std::io::Result<Self> {
+    pub(super) fn from_stream(stream: UnixStream) -> std::io::Result<Self> {
         // The server SENDS `Response` and RECEIVES `Request` over the shared fd.
         let (sender, receiver) = endpoint_from_stream::<Response, Request>(stream)?;
         Ok(Self::new(sender, receiver))
@@ -105,7 +105,10 @@ where
     /// garbage / timeout.
     ///
     /// [`RpcClient::recv_raw_handshake_with_timeout`]: super::RpcClient::recv_raw_handshake_with_timeout
-    pub(crate) fn send_raw_handshake(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
+    pub(in crate::ipc) fn send_raw_handshake(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), ChannelSendError> {
         self.sender.send_raw(bytes)
     }
 }

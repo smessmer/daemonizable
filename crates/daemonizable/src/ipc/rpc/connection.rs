@@ -115,11 +115,13 @@ where
     /// fd onto `DAEMON_CHANNEL_FD` (3) in a `pre_exec` closure, then drops the
     /// original after `Command::spawn` returns.
     ///
-    /// Crate-internal: this is the parent-side fork+exec plumbing, used only by
+    /// `ipc`-internal: this is the parent-side fork+exec plumbing, used only by
     /// the spawn machinery. The `testutils` in-process path uses
     /// `into_server_and_client` instead, so this stays off even the `testutils`
     /// surface.
-    pub(crate) fn into_client_and_child_fd(self) -> (RpcClient<Request, Response>, OwnedFd) {
+    pub(in crate::ipc) fn into_client_and_child_fd(
+        self,
+    ) -> (RpcClient<Request, Response>, OwnedFd) {
         let client = RpcClient::new(self.client_sender, self.client_receiver);
         (client, OwnedFd::from(self.child_end))
     }
