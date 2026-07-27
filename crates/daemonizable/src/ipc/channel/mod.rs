@@ -17,8 +17,10 @@ use super::error::ChannelCreateError;
 mod receiver;
 mod sender;
 
-pub use receiver::Receiver;
-pub use sender::Sender;
+// `pub(super)`: the channel primitives are consumed only by the `rpc` endpoint
+// layer next door, so they surface no wider than `ipc`.
+pub(super) use receiver::Receiver;
+pub(super) use sender::Sender;
 
 /// Maximum message size (1 MiB). Protects against DoS from malicious/buggy senders.
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
@@ -92,7 +94,7 @@ const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 /// [`endpoint_from_stream`]; this one-way constructor exists to exercise the
 /// `Sender`/`Receiver` framing, timeout, and poison machinery in unit tests.
 #[cfg(test)]
-pub fn channel_pair<T>() -> Result<(Sender<T>, Receiver<T>), ChannelCreateError>
+fn channel_pair<T>() -> Result<(Sender<T>, Receiver<T>), ChannelCreateError>
 where
     T: Serialize + DeserializeOwned,
 {
@@ -118,7 +120,7 @@ where
 ///
 /// `try_clone` (a `dup`) can fail (EMFILE/ENFILE); the caller maps the
 /// `io::Error` into its own error type.
-pub(crate) fn endpoint_from_stream<S, R>(
+pub(super) fn endpoint_from_stream<S, R>(
     stream: UnixStream,
 ) -> std::io::Result<(Sender<S>, Receiver<R>)>
 where

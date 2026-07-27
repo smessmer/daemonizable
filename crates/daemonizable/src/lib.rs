@@ -586,21 +586,13 @@ pub use stdio::{DetachStdioError, detach_stdio};
 //     handshake + failed-spawn cleanup, so the cleanup contract `spawn_daemon`
 //     promises stays testable (production always re-execs `/proc/self/exe`,
 //     which a libtest binary cannot stand in for).
+//   * `stage_token_bytes` — the raw stage-identity token bytes, so e2e tests
+//     can craft channel contents and exercise dispatch (defined next to the
+//     token constants in `ipc::spawn`, which stay private to that module).
 #[cfg(any(test, feature = "testutils"))]
 #[doc(hidden)]
 pub use ipc::{
     InheritedFdError, RpcConnection, rpc_server_from_inherited_fd, send_handshake,
-    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,
+    spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout, stage_token_bytes,
     start_background_process_with_exe,
 };
-
-/// Test-only: the raw stage-identity token bytes (`TOKEN_MAGIC ‖ stage`) a
-/// parent pre-queues onto the channel fd, so e2e tests can craft channel
-/// contents (a valid token, a single token, wrong magic) and exercise dispatch
-/// and the daemon-stage guards from a spawned binary. `stage` is 1 or 2.
-/// `#[doc(hidden)]`, `testutils`-gated — not part of the stable surface.
-#[cfg(any(test, feature = "testutils"))]
-#[doc(hidden)]
-pub fn stage_token_bytes(stage: u8) -> Vec<u8> {
-    ipc::stage_token(stage).to_vec()
-}

@@ -50,9 +50,9 @@ where
 
     /// Pre-queue raw, unframed bytes (the stage-identity tokens) at the head of
     /// the parent→daemon stream, before any framed request. The daemon's
-    /// dispatch consumes them raw; the framed RPC follows. Crate-internal, used
+    /// dispatch consumes them raw; the framed RPC follows. `ipc`-internal, used
     /// only by the spawn machinery.
-    pub(crate) fn write_channel_prelude(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+    pub(in crate::ipc) fn write_channel_prelude(&mut self, bytes: &[u8]) -> std::io::Result<()> {
         self.sender.write_prelude(bytes)
     }
 
@@ -106,7 +106,7 @@ where
     /// forever in that case.
     ///
     /// [`RpcServer::send_raw_handshake`]: super::RpcServer::send_raw_handshake
-    pub(crate) fn recv_raw_handshake_with_timeout(
+    pub(in crate::ipc) fn recv_raw_handshake_with_timeout(
         &mut self,
         timeout: Duration,
     ) -> Result<Vec<u8>, ChannelRecvError> {

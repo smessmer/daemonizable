@@ -1,14 +1,14 @@
 //! The daemon child's one-time claim of the single IPC channel fd it inherited
 //! from its parent across `execve`, rebuilt into a typed [`RpcServer`].
 
-use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use serde::{Serialize, de::DeserializeOwned};
 
 use super::DAEMON_CHANNEL_FD;
 use crate::ipc::RpcServer;
-use crate::ipc::cloexec::set_cloexec;
 use crate::ipc::error::InheritedFdError;
 
 /// Guards the process-wide claim on the inherited daemon channel fd (3).
@@ -67,7 +67,7 @@ static DAEMON_FD_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// the calling process already owns fd 3 (e.g. an unrelated program that
 /// happened to open a socket there and called this directly), the second owner
 /// minted here causes a double-close / use-after-free once both drop. The
-/// `fstat` open+socket probe (`validate_inherited_fd` — crate-private, so not
+/// `fstat` open+socket probe (`validate_inherited_fd` — private, so not
 /// linkable from these public docs) and the process-wide `DAEMON_FD_CLAIMED`
 /// guard are best-effort validation — they reject the common "invoked by hand"
 /// mistake and any second claim — but they cannot prove exclusive ownership,
@@ -146,7 +146,7 @@ where
 /// separate pre-fork `fstat` probe stage 1 once ran.) Kept as its own function
 /// rather than inlined: it isolates the raw-fd `fstat` unsafe and is named in
 /// the claim's `# Safety` docs.
-pub(crate) fn validate_inherited_fd() -> Result<(), InheritedFdError> {
+fn validate_inherited_fd() -> Result<(), InheritedFdError> {
     let fd = DAEMON_CHANNEL_FD;
     // Probe the raw fd number with a bare `fstat` BEFORE building any fd
     // wrapper. A hand-invoked daemon may have closed fd 3, and a `BorrowedFd` /
@@ -178,6 +178,26 @@ pub(crate) fn validate_inherited_fd() -> Result<(), InheritedFdError> {
         let st_mode = statbuf.st_mode as u32;
         return Err(InheritedFdError::NotASocket { fd, st_mode });
     }
+    Ok(())
+}
+
+/// Set `FD_CLOEXEC` on `fd`, preserving any other descriptor flags. On failure
+/// returns the `fcntl` operation that failed (`"F_GETFD"` or `"F_SETFD"`) and
+/// the OS error, so the caller can fold it into its own error type.
+///
+/// The claim above is the one place that needs this: the spawn's `dup2` onto the
+/// fixed fd number cleared `FD_CLOEXEC` so the fd would survive `execve`, and it
+/// must be re-set here. (Channel *creation* doesn't need it: `UnixStream::pair`
+/// sets `FD_CLOEXEC` on the fds it creates itself.)
+///
+/// Takes a [`BorrowedFd`], so the caller has already established (once, where it
+/// wraps the raw fd) that the descriptor is valid — the two `fcntl` calls here
+/// go through `nix` and need no `unsafe`.
+fn set_cloexec(fd: BorrowedFd<'_>) -> Result<(), (&'static str, std::io::Error)> {
+    let flags = fcntl(fd, FcntlArg::F_GETFD).map_err(|e| ("F_GETFD", e.into()))?;
+    // Preserve any other descriptor flags; only add FD_CLOEXEC.
+    let flags = FdFlag::from_bits_retain(flags | libc::FD_CLOEXEC);
+    fcntl(fd, FcntlArg::F_SETFD(flags)).map_err(|e| ("F_SETFD", e.into()))?;
     Ok(())
 }
 
@@ -222,6 +242,38 @@ mod tests {
         assert!(
             matches!(err, InheritedFdError::AlreadyClaimed { .. }),
             "expected AlreadyClaimed, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn sets_cloexec_on_a_fd_that_lacks_it() {
+        use std::os::unix::net::UnixStream;
+
+        // `UnixStream::pair` sets CLOEXEC, so clear it first to observe
+        // `set_cloexec` re-adding it (mirrors the claim's restore, where the
+        // spawn's `dup2` had cleared the flag).
+        let (sender, _recver) = UnixStream::pair().unwrap();
+        let fd = sender.as_fd();
+
+        // Precondition: clear the flag so we can observe set_cloexec setting it.
+        let flags = fcntl(fd, FcntlArg::F_GETFD).unwrap();
+        fcntl(
+            fd,
+            FcntlArg::F_SETFD(FdFlag::from_bits_retain(flags) & !FdFlag::FD_CLOEXEC),
+        )
+        .unwrap();
+        assert!(
+            !FdFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFD).unwrap())
+                .contains(FdFlag::FD_CLOEXEC),
+            "precondition: CLOEXEC should be clear before the call"
+        );
+
+        set_cloexec(fd).expect("set_cloexec should succeed on a valid open fd");
+
+        assert!(
+            FdFlag::from_bits_retain(fcntl(fd, FcntlArg::F_GETFD).unwrap())
+                .contains(FdFlag::FD_CLOEXEC),
+            "set_cloexec must leave FD_CLOEXEC set"
         );
     }
 }
