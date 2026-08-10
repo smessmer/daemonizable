@@ -438,10 +438,14 @@
 //! - **Initialization runs three times.** The daemon spawn loads the binary
 //!   twice more (a short-lived staging image that `setsid`s + forks, then the
 //!   final daemon image the fork execs into), each re-running the dynamic
-//!   loader and everything before `run` (with `#[daemonizable::main]`, that's
-//!   nothing); parent state must be shipped explicitly via the typed RPC
-//!   channel. The extra exec is what makes the second fork safe regardless of
-//!   threads — see the process contract below.
+//!   loader and everything before `run` — with `#[daemonizable::main]` that's
+//!   none of your Rust code, but pre-main constructors (`#[ctor]` functions,
+//!   C++ static initializers in linked native libraries) do run in all three
+//!   images. Lazy statics are unaffected: they initialize on first access,
+//!   not at load time, so they run once in each image that actually uses
+//!   them — and the staging image uses none. Parent state must be shipped
+//!   explicitly via the typed RPC channel. The extra exec is what makes the
+//!   second fork safe regardless of threads — see the process contract below.
 //! - **If systemd manages your process, don't daemonize at all.**
 //!   `daemon(7)`'s "new-style daemons" doctrine is that services should run
 //!   in the foreground and report readiness via `sd_notify(3)`; SysV-style
