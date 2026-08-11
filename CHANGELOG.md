@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   testing their own typed request/response wiring against the real socketpair
   and the real postcard framing.
 
+- Documentation of which serde constructs the postcard wire format cannot
+  carry (`#[serde(flatten)]`, the non-default enum tag representations,
+  `#[serde(skip_serializing_if)]`, `deserialize_any`-based types such as
+  `serde_json::Value`), on `Daemonizable::Request` and in the protocol
+  reference, with links to postcard's own documentation.
+
 ### Removed
 
 - **Breaking (`testutils` feature only):** `RpcConnection` is no longer exported

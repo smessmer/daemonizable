@@ -151,9 +151,16 @@ where
 ///
 /// This is what downstream crates want when they test their own typed
 /// `Request`/`Response` wiring: it exercises the real socketpair and the real
-/// postcard framing, so a payload the wire format cannot represent fails here
-/// rather than in production. No process is spawned and no handshake runs —
-/// for that, drive the spawn helpers instead.
+/// postcard framing, so most payloads the wire format cannot represent fail
+/// here rather than in production — `#[serde(flatten)]` errors on send and
+/// the non-default enum tag representations error on receive,
+/// deterministically. The exception is `#[serde(skip_serializing_if)]`: it
+/// corrupts the stream only when a field is actually skipped, and the result
+/// can be a silent misparse rather than an error, so a test through this pair
+/// must cover the skipped-field case to mean anything. The full list of
+/// wire-format hazards is on [`Request`](crate::Daemonizable::Request). No
+/// process is spawned and no handshake runs — for that, drive the spawn
+/// helpers instead.
 ///
 /// ```
 /// // (this item only exists with the `testutils` feature enabled)
@@ -169,7 +176,7 @@ where
 /// client and surrender the child's raw fd — and nothing outside this crate
 /// should have to name it, let alone know that the split step is where the
 /// `dup` happens. Keeping it unexported is what lets the two-step
-/// `new_channel` + [`RpcConnection::into_server_and_client`] sequence stay a
+/// `new_channel` + `RpcConnection::into_server_and_client` sequence stay a
 /// private implementation detail.
 #[allow(clippy::type_complexity)]
 #[cfg(any(test, feature = "testutils"))]

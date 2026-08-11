@@ -135,11 +135,49 @@ pub trait Daemonizable: Sized {
     /// individual endpoint types, whose bounds are direction-correct): the
     /// same binary is both endpoints, so the foreground serializes what the
     /// daemon deserializes.
+    ///
+    /// # Not every serde type survives the wire
+    ///
+    /// RPC payloads are postcard-encoded, and postcard is [not a
+    /// self-describing format][postcard-nsd]: field names and struct lengths
+    /// never reach the wire (structs are purely positional), and its
+    /// deserializer rejects serde's `deserialize_any` outright. Derived types
+    /// using serde's default representations all work — including
+    /// `u128`/`i128`, `char`, non-string map keys, and NaN floats (preserved
+    /// bit-exactly) — but constructs that only a self-describing format can
+    /// carry do not:
+    ///
+    /// - `#[serde(flatten)]` fails at *serialize* time (a flattened struct
+    ///   becomes a map of unknown length, which postcard refuses);
+    /// - `#[serde(untagged)]` and `#[serde(tag = "...")]` (with or without
+    ///   `content = "..."`) enum representations serialize but *always* fail
+    ///   to deserialize — only serde's default externally tagged
+    ///   representation round-trips;
+    /// - `#[serde(skip_serializing_if = "...")]` is the treacherous one: a
+    ///   skipped field's bytes are simply absent, shifting every later
+    ///   field. Decoding then errors *or silently misparses into wrong
+    ///   values* depending on the data — and round-trips fine whenever the
+    ///   field happens to be present, so a happy-path test proves nothing.
+    ///   (`#[serde(skip)]` on a struct field skips both directions
+    ///   symmetrically and is fine; on enum *variants* it offsets later
+    ///   discriminants unless the skipped variants are declared last.)
+    /// - types whose `Deserialize` impl needs `deserialize_any` — e.g.
+    ///   `serde_json::Value` — and hand-written impls that call
+    ///   `serialize_map(None)` / `serialize_seq(None)`.
+    ///
+    /// Postcard's own documentation of this lives in its README's
+    /// [Unsupported serde attributes][postcard-attrs] section (which links a
+    /// tracking issue for the full list) and in the wire spec's
+    /// [Non Self-Describing Format][postcard-nsd] section.
+    ///
+    /// [postcard-attrs]: https://github.com/jamesmunns/postcard#unsupported-serde-attributes
+    /// [postcard-nsd]: https://postcard.jamesmunns.com/wire-format#non-self-describing-format
     type Request: Serialize + DeserializeOwned;
 
-    /// Typed response the daemon sends back. Both serde directions required,
-    /// as for [`Request`](Self::Request). (No `Send` bound: nothing in the
-    /// channel machinery crosses threads with these values.)
+    /// Typed response the daemon sends back. Both serde directions required
+    /// and the same wire-format constraints apply, as for
+    /// [`Request`](Self::Request). (No `Send` bound: nothing in the channel
+    /// machinery crosses threads with these values.)
     type Response: Serialize + DeserializeOwned;
 
     /// The identity string exchanged in the parent↔daemon handshake.

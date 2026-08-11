@@ -58,7 +58,12 @@
 //! 3. **Typed RPC** (framed, postcard payload). Every frame after the
 //!    handshake is a postcard-encoded
 //!    [`Request`](crate::Daemonizable::Request) (parent→daemon) or
-//!    [`Response`](crate::Daemonizable::Response) (daemon→parent).
+//!    [`Response`](crate::Daemonizable::Response) (daemon→parent). Postcard
+//!    is [not a self-describing format][postcard-nsd], which rules out the
+//!    serde constructs that need one — `#[serde(flatten)]`, the non-default
+//!    enum tag representations, `#[serde(skip_serializing_if)]` — in these
+//!    two types; the full contract is documented on
+//!    [`Request`](crate::Daemonizable::Request).
 //!
 //! A frame is a 4-byte little-endian payload length followed by the payload:
 //!
@@ -312,3 +317,4 @@
 //! [`ipc/spawn/inherited.rs`]: https://github.com/smessmer/daemonizable/blob/main/crates/daemonizable/src/ipc/spawn/inherited.rs
 //! [`ipc/channel/mod.rs`]: https://github.com/smessmer/daemonizable/blob/main/crates/daemonizable/src/ipc/channel/mod.rs
 //! [`ipc/channel/`]: https://github.com/smessmer/daemonizable/tree/main/crates/daemonizable/src/ipc/channel
+//! [postcard-nsd]: https://postcard.jamesmunns.com/wire-format#non-self-describing-format
