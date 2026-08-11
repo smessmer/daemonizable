@@ -545,9 +545,10 @@ faith into an operation that can fail loudly.
   `main`. Disable it and you hand-write
   `fn main() -> ExitCode { daemonizable::run::<MyApp>() }` instead; nothing
   else about the API changes.
-- `testutils`: test-only helpers (e.g.
-  `RpcConnection::into_server_and_client`) so downstream crates can drive the
-  IPC primitives in their own unit tests. Not part of the stable surface.
+- `testutils`: test-only helpers so downstream crates can drive the IPC
+  primitives in their own unit tests — start with `in_process_rpc_pair`,
+  which hands back a connected server/client pair for your own
+  `Request`/`Response` types. Not part of the stable surface.
 
 Unix-only (Linux is the primary target; macOS works with caveats documented
 in the source).
