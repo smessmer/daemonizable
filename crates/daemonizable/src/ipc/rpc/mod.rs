@@ -16,6 +16,9 @@ pub use client::RpcClient;
 pub use connection::RpcConnection;
 pub use server::RpcServer;
 
+#[cfg(any(test, feature = "testutils"))]
+pub use connection::in_process_rpc_pair;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,11 +51,24 @@ mod tests {
     }
 
     #[test]
+    fn in_process_rpc_pair_round_trips_a_request_and_response() {
+        // The one-call helper must be equivalent to
+        // `new_channel().into_server_and_client()`: a connected, usable pair.
+        // This is the entry point downstream crates use to test their own typed
+        // `Request`/`Response` against the real wire format, so a round trip
+        // through it is exactly what it has to guarantee.
+        let (mut server, mut client) = in_process_rpc_pair::<u32, u32>().unwrap();
+
+        client.send_request(&41).unwrap();
+        assert_eq!(41, server.next_request().unwrap());
+
+        server.send_response(&42).unwrap();
+        assert_eq!(42, client.recv_response_blocking().unwrap());
+    }
+
+    #[test]
     fn recv_response_blocking_returns_the_response() {
-        let (mut server, mut client) = RpcConnection::<u32, u32>::new_channel()
-            .unwrap()
-            .into_server_and_client()
-            .unwrap();
+        let (mut server, mut client) = in_process_rpc_pair::<u32, u32>().unwrap();
 
         let server = std::thread::spawn(move || {
             let req = server.next_request().unwrap();
@@ -70,10 +86,7 @@ mod tests {
         // parent's blocking receive returns an error immediately instead of
         // hanging. Both `dup`-clones that make up the server endpoint must close
         // for the client to see EOF; dropping the whole `RpcServer` closes both.
-        let (server, mut client) = RpcConnection::<u32, u32>::new_channel()
-            .unwrap()
-            .into_server_and_client()
-            .unwrap();
+        let (server, mut client) = in_process_rpc_pair::<u32, u32>().unwrap();
         drop(server); // daemon "dies": closes both clones of the server's end
 
         let err = client
@@ -91,10 +104,7 @@ mod tests {
         // of the client's end close, so the daemon's blocking `next_request`
         // sees EOF promptly rather than hanging. This is what lets a daemon
         // shut its request loop down when its foreground peer exits.
-        let (mut server, client) = RpcConnection::<u32, u32>::new_channel()
-            .unwrap()
-            .into_server_and_client()
-            .unwrap();
+        let (mut server, client) = in_process_rpc_pair::<u32, u32>().unwrap();
         drop(client); // foreground "exits": closes both clones of the client's end
 
         let err = server

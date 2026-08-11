@@ -145,3 +145,39 @@ where
         Ok((server, client))
     }
 }
+
+/// Build a connected in-process [`RpcServer`]/[`RpcClient`] pair for tests —
+/// the whole `testutils` RPC surface in one call.
+///
+/// This is what downstream crates want when they test their own typed
+/// `Request`/`Response` wiring: it exercises the real socketpair and the real
+/// postcard framing, so a payload the wire format cannot represent fails here
+/// rather than in production. No process is spawned and no handshake runs —
+/// for that, drive the spawn helpers instead.
+///
+/// ```
+/// // (this item only exists with the `testutils` feature enabled)
+/// use daemonizable::in_process_rpc_pair;
+///
+/// let (mut server, mut client) = in_process_rpc_pair::<u32, u32>().unwrap();
+/// client.send_request(&41).unwrap();
+/// assert_eq!(41, server.next_request().unwrap());
+/// ```
+///
+/// A free function rather than a constructor on `RpcConnection`: that type is
+/// the fork+exec path's intermediate — it exists so the parent can keep the
+/// client and surrender the child's raw fd — and nothing outside this crate
+/// should have to name it, let alone know that the split step is where the
+/// `dup` happens. Keeping it unexported is what lets the two-step
+/// `new_channel` + [`RpcConnection::into_server_and_client`] sequence stay a
+/// private implementation detail.
+#[allow(clippy::type_complexity)]
+#[cfg(any(test, feature = "testutils"))]
+pub fn in_process_rpc_pair<Request, Response>()
+-> Result<(RpcServer<Request, Response>, RpcClient<Request, Response>), ChannelCreateError>
+where
+    Request: Serialize + DeserializeOwned,
+    Response: Serialize + DeserializeOwned,
+{
+    RpcConnection::<Request, Response>::new_channel()?.into_server_and_client()
+}

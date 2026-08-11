@@ -76,7 +76,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::{ChannelRecvError, RpcConnection};
+    use crate::ipc::ChannelRecvError;
+    use crate::ipc::rpc::RpcConnection;
     use serde::Deserialize;
 
     #[derive(Debug, Serialize, Deserialize)]

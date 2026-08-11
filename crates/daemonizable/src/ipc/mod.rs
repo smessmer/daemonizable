@@ -37,8 +37,11 @@ pub use spawn::{rpc_server_from_inherited_fd, send_handshake};
 // directly — so they exist purely to feed the crate-root ones.
 #[cfg(any(test, feature = "testutils"))]
 pub use error::InheritedFdError;
+// `in_process_rpc_pair`, not `RpcConnection`: downstream tests only ever want
+// the connected pair, and keeping the connection type out of the re-export
+// chain is what makes `new_channel` / `into_server_and_client` internal.
 #[cfg(any(test, feature = "testutils"))]
-pub use rpc::RpcConnection;
+pub use rpc::in_process_rpc_pair;
 #[cfg(any(test, feature = "testutils"))]
 pub use spawn::{
     spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout, stage_token_bytes,
