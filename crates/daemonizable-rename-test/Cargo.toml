@@ -21,4 +21,4 @@ publish = false
 workspace = true
 
 [dependencies]
-dz = { package = "daemonizable", path = "../daemonizable", version = "0.0.3" }
+dz = { package = "daemonizable", path = "../daemonizable", version = "0.1.0" }
