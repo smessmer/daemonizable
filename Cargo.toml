@@ -15,7 +15,7 @@ license = "MIT OR Apache-2.0"
 # process-wide SIGPIPE ignore, which daemons commonly reset. Keep in sync
 # with the CI MSRV leg and the macro-UI snapshot gate.
 rust-version = "1.90"
-version = "0.1.0"
+version = "0.2.0"
 
 # Every member crate opts in with `[lints] workspace = true`. Note that the
 # table only reaches a crate's own targets — each file under `tests/` and
@@ -45,7 +45,7 @@ command-fds = "^0.3.0"
 # say `daemonizable-macros = { workspace = true }`. The `version` must match the
 # workspace `version` above on release — keep the two in sync (or bump both via
 # a release tool such as `cargo-release` / `release-plz`).
-daemonizable-macros = { path = "crates/daemonizable-macros", version = "0.1.0" }
+daemonizable-macros = { path = "crates/daemonizable-macros", version = "0.2.0" }
 libc = "^0.2.182"
 nix = "^0.31.2"
 postcard = { version = "^1.0.0", default-features = false }
