@@ -350,21 +350,44 @@
 //! ## Why not a second binary?
 //!
 //! The other conventional design is to ship a separate `myapp-daemon`
-//! executable and `Command::spawn` it (the dockerd / ssh-agent shape). That
-//! costs you two artifacts to build, package and install, a lookup problem
-//! (absolute path? `$PATH`? relative to `argv[0]`?), and — worst — a version
-//! skew problem: nothing stops CLI 1.4 from spawning a daemon 1.3 whose wire
-//! format differs silently.
+//! executable and `Command::spawn` it (the dockerd / ssh-agent shape). To be
+//! fair to it: it solves the fork problems above exactly as completely as
+//! re-exec does — it *is* fork+exec, and the daemon gets a clean process
+//! image that never saw the parent's threads. Where the codebase can be
+//! structured for it — a workspace where CLI and daemon share the wire
+//! protocol as a library crate — it is a sound design with decades of
+//! precedent, not a lesser one.
 //!
-//! Re-exec'ing the current binary makes skew structurally impossible on
-//! Linux whenever `/proc` is mounted:
+//! Its costs: two artifacts to build, package and install; a lookup problem
+//! (absolute path? `$PATH`? relative to `argv[0]`?) that in a
+//! security-critical application is an attack surface, not a nuisance — the
+//! daemon is resolved by name at spawn time, so whoever can influence that
+//! resolution (a writable directory on `$PATH`, the cwd behind a relative
+//! path) picks the binary the CLI then trusts with everything it ships over
+//! the channel. CryFS — the encrypted filesystem this library came from —
+//! hands its daemon the password that unlocks the volume; "whichever
+//! executable the lookup finds" was not an acceptable recipient for that.
+//! And — worst for everyday operation — a version skew problem: nothing
+//! stops CLI 1.4 from spawning a daemon 1.3 whose wire format differs
+//! silently. That is not hypothetical: an `apt upgrade` replaces the two
+//! executables one rename at a time — atomic per file, not per pair — so a
+//! CLI that runs while the upgrade is in flight spawns whichever daemon
+//! binary is on disk at that instant, possibly the other release's.
+//!
+//! Re-exec'ing the current binary keeps the same clean image while making
+//! skew structurally impossible on Linux whenever `/proc` is mounted:
 //! [`/proc/self/exe`](https://man7.org/linux/man-pages/man5/proc_pid_exe.5.html)
 //! is a kernel magic link to the running image's inode, so the daemon is
 //! byte-identical to the parent even if the on-disk binary was replaced by a
-//! package upgrade mid-run, and the build-id handshake catches whatever the
-//! platform can't guarantee (the macOS `current_exe()` fallback, the Linux
-//! `AT_EXECFN` / `argv[0]` fallback used when `/proc` is absent, operator
-//! mistakes). This is well-trodden ground: Docker/Moby ships a dedicated
+//! package upgrade mid-run — and there is no name resolution for an
+//! adversary to poison, because the image that runs is the image already
+//! running. The build-id handshake catches whatever the platform can't
+//! guarantee (the macOS `current_exe()` fallback, the Linux `AT_EXECFN` /
+//! `argv[0]` fallback used when `/proc` is absent, operator mistakes) —
+//! though it is an accident detector, not a security boundary: a hostile
+//! binary could echo the expected id, so the no-lookup guarantee belongs to
+//! the `/proc/self/exe` path alone. This is well-trodden ground:
+//! Docker/Moby ships a dedicated
 //! [`reexec` package](https://pkg.go.dev/github.com/moby/sys/reexec) whose
 //! `Self()` returns the literal string `/proc/self/exe` ("safe to delete or
 //! replace the on-disk binary"); [runc](https://github.com/opencontainers/runc)
