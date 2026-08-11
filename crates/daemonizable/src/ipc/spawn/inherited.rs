@@ -1,5 +1,9 @@
 //! The daemon child's one-time claim of the single IPC channel fd it inherited
 //! from its parent across `execve`, rebuilt into a typed [`RpcServer`].
+//!
+//! The claim is part of the daemonization protocol; the public step-by-step
+//! reference is [`crate::protocol`] — keep that page in sync when changing
+//! behavior here.
 
 use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};

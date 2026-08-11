@@ -2,6 +2,10 @@
 //! sends its build id ([`send_handshake`]); the parent validates it against
 //! what it expected and refuses the spawn on mismatch
 //! ([`validate_handshake_and_build_client`]).
+//!
+//! The handshake is part of the daemonization protocol; the public
+//! step-by-step reference is [`crate::protocol`] — keep that page in sync
+//! when changing behavior here.
 
 use std::time::Duration;
 

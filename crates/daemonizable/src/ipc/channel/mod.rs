@@ -6,6 +6,10 @@
 //! read side (including the timeout-bounded read machinery). The socket fds are
 //! `FD_CLOEXEC` so they don't leak across the fork+exec daemon spawn. Both ends
 //! share the [`MAX_MESSAGE_SIZE`] wire-format cap defined here.
+//!
+//! The framing is part of the daemonization protocol; the public wire-format
+//! reference is [`crate::protocol`] — keep that page in sync when changing
+//! the format here.
 
 use std::os::unix::net::UnixStream;
 

@@ -16,6 +16,10 @@
 //!
 //! The channel fd number and the stage-identity token constants shared across
 //! those modules live here.
+//!
+//! All of it implements the daemonization protocol; the public step-by-step
+//! reference is [`crate::protocol`] — keep that page in sync when changing
+//! behavior here.
 
 mod handshake;
 mod inherited;

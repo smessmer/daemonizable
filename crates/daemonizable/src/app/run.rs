@@ -2,6 +2,10 @@
 //! invocation goes to the app's foreground code; the two re-exec'd daemon
 //! stages (each recognized by an in-band token at the head of the channel fd)
 //! go to the daemon startup sequence.
+//!
+//! The dispatch is part of the daemonization protocol; the public
+//! step-by-step reference is [`crate::protocol`] — keep that page in sync
+//! when changing behavior here.
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -7,6 +7,10 @@
 //! tokens are a PUBLIC accident-authenticator (routing, not security — see
 //! [`TOKEN_MAGIC`](super::TOKEN_MAGIC)'s threat model); the credential check
 //! here is the unforgeable barrier that backs it.
+//!
+//! The check is part of the daemonization protocol; the public step-by-step
+//! reference is [`crate::protocol`] — keep that page in sync when changing
+//! behavior here.
 
 use std::os::fd::BorrowedFd;
 

@@ -23,6 +23,10 @@
 //! (see `TOKEN_MAGIC`'s doc), so the daemon's argv stays empty and neither
 //! image reads or mutates the environment for dispatch — the environment passes
 //! through both execs untouched.
+//!
+//! Both stage sequences are part of the daemonization protocol; the public
+//! step-by-step reference is [`crate::protocol`] — keep that page in sync
+//! when changing behavior here.
 
 use std::os::unix::process::CommandExt;
 

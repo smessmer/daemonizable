@@ -168,6 +168,11 @@ From there the descriptor is simply your channel: [`Daemonizable::Request`](http
 [`Daemonizable::Response`](https://docs.rs/daemonizable/latest/daemonizable/app/daemonizable/trait.Daemonizable.html#associatedtype.Response) values, serialized and framed, until
 `run_foreground` returns and its end closes.
 
+That is deliberately the mid-altitude view. The full wire-level reference —
+the exact token layout, every check each of the three processes runs and
+the threat it rejects, exit codes, the handshake timeout, and the framing —
+is the [`protocol`](https://docs.rs/daemonizable/latest/daemonizable/protocol/) module's documentation.
+
 ## Why fork+exec? A comparison with the alternatives
 
 Every other option in this space — the classic double-fork ritual, the

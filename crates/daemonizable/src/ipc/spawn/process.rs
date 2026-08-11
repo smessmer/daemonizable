@@ -5,6 +5,10 @@
 //! is never a session leader, and the forked child immediately re-execs into
 //! the final daemon image (stage 2); the direct child this parent holds a
 //! `Child` handle for is the short-lived stage-1 intermediate.
+//!
+//! The parent's half of the daemonization protocol lives here; the public
+//! step-by-step reference is [`crate::protocol`] — keep that page in sync
+//! when changing behavior here.
 
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;

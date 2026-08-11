@@ -6,6 +6,10 @@
 //! classifier) and the token consume. The stage-2 peer-credential check that
 //! authenticates a genuine channel lives in its own module,
 //! [`mod@super::peercred`].
+//!
+//! The tokens and the probe are part of the daemonization protocol; the
+//! public step-by-step reference is [`crate::protocol`] — keep that page in
+//! sync when changing behavior here.
 
 use nix::errno::Errno;
 use nix::sys::socket::{MsgFlags, recv};
