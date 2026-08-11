@@ -148,7 +148,7 @@ fn expand(
     let is_daemonizable_impl = item_impl
         .trait_
         .as_ref()
-        .and_then(|(_, path, _)| path.segments.last())
+        .and_then(|(path, _)| path.segments.last())
         .is_some_and(|segment| segment.ident == "Daemonizable");
     if !is_daemonizable_impl {
         return Err(syn::Error::new_spanned(
