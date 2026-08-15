@@ -244,7 +244,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --all-features --no-deps
       - name: Install cargo-rdme
-        uses: taiki-e/install-action@v2.85.4
+        uses: taiki-e/install-action@v2.85.12
         with:
           tool: cargo-rdme@2.1.0
       - name: Install cargo-rdme's pinned nightly (for intra-doc link resolution only)
