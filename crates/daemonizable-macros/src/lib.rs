@@ -90,10 +90,8 @@ pub fn main(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand(attr.into(), item.clone()) {
         Ok(expanded) => expanded.into(),
         Err(err) => {
-            // Re-emit the original item alongside the error: the impl (or
-            // whatever the attribute was attached to) stays alive, so the
-            // caller sees our diagnostic instead of a cascade of unresolved
-            // names.
+            // Re-emitted alongside the error so the item stays alive and the
+            // caller sees our diagnostic instead of a cascade of unresolved names.
             let err = err.to_compile_error();
             quote!( #item #err ).into()
         }
@@ -181,10 +179,9 @@ mod tests {
     use super::*;
     use quote::quote as q;
 
-    // The argument parser's decision table, tested directly on token streams
-    // (no trybuild snapshot needed, so no diagnostic-rendering drift risk;
-    // the happy paths are additionally compiled for real by the trybuild
-    // pass cases in daemonizable-e2e-tests/tests/macro_ui/).
+    // Tested directly on token streams, so there's no diagnostic-rendering drift
+    // risk. The happy paths are additionally compiled for real by the trybuild
+    // pass cases in daemonizable-e2e-tests/tests/macro_ui/.
     #[test]
     fn parse_crate_path_accepts_default_and_rename_and_rejects_junk() {
         // Empty → the absolute default path.

@@ -49,7 +49,5 @@ fn roundtrip_many_requests() {
         assert_eq!(response, Response { response: i + 1 });
     }
 
-    // Dropping the client closes its end of the channel; the daemon's
-    // `next_request` should observe EOF and the daemon should `exit(0)`.
     drop(client);
 }

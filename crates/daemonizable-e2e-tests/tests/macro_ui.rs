@@ -13,12 +13,9 @@
 //! the gate one minor above the workspace `rust-version` when bumping the
 //! MSRV. The pass cases compare no diagnostics and run everywhere.
 
-// (The `crate = "..."` renamed-dependency pass case cannot live here: Cargo
-// rejects one crate depending on the same package twice under different
-// names, and this crate already depends on `daemonizable` by its real name.
-// It lives in the sibling `daemonizable-rename-test` crate instead, whose
-// ONLY daemonizable dependency is the renamed one — its compilation is the
-// test.)
+// The `crate = "..."` renamed-dependency pass case lives in the sibling
+// `daemonizable-rename-test` crate instead: Cargo rejects one crate depending on
+// the same package twice under different names.
 #[test]
 fn macro_expands_on_a_valid_impl() {
     let t = trybuild::TestCases::new();

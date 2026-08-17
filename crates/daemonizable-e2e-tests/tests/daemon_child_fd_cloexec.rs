@@ -46,16 +46,12 @@ impl Drop for Cleanup {
             // issue (defined ESRCH/EPERM behavior); the result is discarded.
             let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
         }
-        // Reap the daemon (our direct child; the raw helper-spawn path does not
-        // go through the framework's second fork, so it stays our child). It has
-        // already exited, so a non-blocking reap suffices; retry briefly in case
-        // cleanup races its exit.
+        // The raw helper-spawn path skips the framework's second fork, so the
+        // daemon stays our direct child and must be reaped.
         for _ in 0..100 {
             match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
                 // Not reaped yet; retry briefly in case cleanup races the exit.
                 Ok(WaitStatus::StillAlive) => thread::sleep(Duration::from_millis(10)),
-                // Reaped our only direct child, or ECHILD (nothing to reap) —
-                // either way we're done.
                 Ok(_) | Err(_) => break,
             }
         }
@@ -71,11 +67,8 @@ fn rpc_fds_do_not_leak_into_daemon_spawned_child() {
     let sleeper_pid_file = tmp.path().join("sleeper.pid");
 
     let pid_param: OsString = sleeper_pid_file.clone().into_os_string();
-    // Both variables ride `extra_env` (`Command::env`, applied in the spawned
-    // child) rather than `std::env::set_var` on this process: mutating our own
-    // environment is `unsafe` (racy with any concurrently-reading thread, e.g.
-    // the libtest controller), and the helper only reads these from its own
-    // environment anyway.
+    // `extra_env` rather than `std::env::set_var`: mutating our own environment
+    // is `unsafe`, racy against the libtest controller's own reads.
     let env: [(&OsStr, &OsStr); 2] = [
         (
             OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
@@ -86,17 +79,14 @@ fn rpc_fds_do_not_leak_into_daemon_spawned_child() {
     let mut client =
         start_background_process_with_exe::<(), ()>(&helper_exe(), &env).expect("spawn daemon");
 
-    // Installed before the assertion so the daemon/grandchild are cleaned up
-    // even if it fails or panics.
+    // Before the assertion, so both are cleaned up even if it panics.
     let _cleanup = Cleanup {
         sleeper_pid_file: sleeper_pid_file.clone(),
     };
 
-    // The daemon fork+execs a `sleep` grandchild and exits. With FD_CLOEXEC
-    // restored on the inherited channel fd, the grandchild does not hold the
-    // channel end, so once the daemon exits the parent's receive returns
-    // EOF (SenderClosed) well within the timeout. If the fd leaked, the
-    // grandchild keeps fd 3 open for its full sleep and this times out.
+    // The daemon fork+execs a `sleep` grandchild and exits. If fd 3 leaked, that
+    // grandchild would hold the channel end open for its full sleep and this
+    // would time out instead of seeing EOF.
     let result = client.recv_response(Duration::from_secs(5));
 
     assert!(

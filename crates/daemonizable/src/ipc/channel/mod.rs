@@ -21,8 +21,6 @@ use super::error::ChannelCreateError;
 mod receiver;
 mod sender;
 
-// `pub(super)`: the channel primitives are consumed only by the `rpc` endpoint
-// layer next door, so they surface no wider than `ipc`.
 pub(super) use receiver::Receiver;
 pub(super) use sender::Sender;
 
@@ -100,11 +98,6 @@ fn channel_pair<T>() -> Result<(Sender<T>, Receiver<T>), ChannelCreateError>
 where
     T: Serialize + DeserializeOwned,
 {
-    // `UnixStream::pair()` returns two connected endpoints of one socketpair.
-    // A `SOCK_STREAM` socketpair is full-duplex, but here we use it
-    // unidirectionally: writes on the `Sender` end are read on the `Receiver`
-    // end. (The daemon channel uses [`endpoint_from_stream`] to drive both
-    // directions over a single fd; at this layer they are still one direction.)
     let (sender, recver) = UnixStream::pair().map_err(ChannelCreateError::CreateSocket)?;
     Ok((Sender::new(sender), Receiver::new(recver)))
 }
@@ -146,9 +139,7 @@ mod tests {
 
     /// A raw socketpair for driving unframed bytes at a `Receiver`: `.0` is
     /// the write end (a plain `UnixStream`), `.1` is wrapped in the typed
-    /// `Receiver` under test. Shared by the `recv_timeout` and `poison`
-    /// submodules (which both `use super::*`), so the framing/poison tests all
-    /// drive the same fixture over the real socket transport.
+    /// `Receiver` under test.
     fn raw_channel<T: DeserializeOwned>() -> (UnixStream, Receiver<T>) {
         let (writer, reader) = UnixStream::pair().unwrap();
         (writer, Receiver::new(reader))
@@ -158,23 +149,14 @@ mod tests {
     fn dropped_recver() {
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
-        // Writing to a socket whose peer has closed returns EPIPE (an error),
-        // NOT a `SIGPIPE` that kills the test process — see the SIGPIPE note
-        // on `channel_pair`. (This fixture builds its pair directly, without
-        // the constructor's Apple SO_NOSIGPIPE — fine here: the test process
-        // keeps Rust's default SIGPIPE ignore.)
         assert!(sender.send(&42).is_err());
     }
 
     #[test]
     fn writing_after_peer_close_errors_without_sigpipe() {
-        // Stronger form of `dropped_recver`: repeated sends after the peer
-        // closed must each surface as an ordinary error and never raise
-        // `SIGPIPE` (which would abort the process, failing the test loudly —
-        // see `channel_pair`'s doc for the suppression mechanism).
-        // The first failed send reports the Io(BrokenPipe) and poisons the
-        // sender; every retry then fails fast with `Desynchronized` (the wire
-        // may be mid-frame after any write failure), still without SIGPIPE.
+        // A raised SIGPIPE would abort the process, failing this loudly. The
+        // first send reports Io(BrokenPipe) and poisons the sender; retries
+        // then fail fast with `Desynchronized`.
         let (mut sender, recver) = channel_pair::<u32>().unwrap();
         drop(recver);
         let err = sender.send(&1).unwrap_err();
@@ -193,12 +175,8 @@ mod tests {
 
     #[test]
     fn channel_ends_have_cloexec_set() {
-        // Both ends must have FD_CLOEXEC set, so the kernel closes them when
-        // the daemon child execs the new binary (see `channel_pair`'s doc for
-        // how std establishes the flag per platform).
         let (sender, recver) = channel_pair::<u32>().unwrap();
-        // Recover the owned fds so the descriptors stay valid for the fcntl
-        // check below; they're closed when these `OwnedFd`s drop at the end.
+        // Owned, so the descriptors stay valid for the fcntl check below.
         let sender_fd = sender.into_owned_fd();
         let recver_fd = recver.into_owned_fd();
         for (label, fd) in [("sender", sender_fd.as_fd()), ("recver", recver_fd.as_fd())] {
@@ -256,8 +234,6 @@ mod tests {
 
         #[test]
         fn dropped_sender() {
-            // Blocking-path EOF must be normalized to `SenderClosed`, not
-            // surface as the raw `Io(UnexpectedEof)` that `read_exact` reports.
             let (sender, mut recver) = channel_pair::<u32>().unwrap();
             drop(sender);
             let error = recver.recv().unwrap_err();
@@ -267,18 +243,14 @@ mod tests {
             );
         }
 
-        // On Linux, closing an AF_UNIX stream socket while unread bytes remain
-        // in ITS receive queue makes the peer's next read fail with
-        // `ECONNRESET` rather than a clean EOF — a case pipes never produced.
-        // The blocking receive must normalize that to `SenderClosed` too, not
-        // surface a raw `Io(ConnectionReset)`.
+        // On Linux, closing an AF_UNIX stream socket with unread bytes still in
+        // its receive queue makes the peer's next read fail with ECONNRESET
+        // rather than give a clean EOF.
         #[cfg(target_os = "linux")]
         #[test]
         fn peer_reset_with_unread_data_is_sender_closed() {
             use std::os::unix::net::UnixStream;
             let (a, b) = UnixStream::pair().unwrap();
-            // Put unread data into b's receive queue (a -> b), then close b
-            // without reading it: a's subsequent read gets ECONNRESET.
             (&a).write_all(b"unread junk").unwrap();
             drop(b);
             let mut recver: Receiver<u32> = Receiver::new(a);
@@ -291,13 +263,9 @@ mod tests {
 
         #[test]
         fn completes_when_data_arrives_from_another_thread() {
-            // Cross-thread wakeup: a blocking `recv` must return the value
-            // another thread sends, whichever side reaches the socket first.
-            // No sleep "arranges" the receiver to block first — the
-            // interleaving can't be forced portably, both orders are correct,
-            // and the "empty channel waits instead of erroring" property is
-            // pinned deterministically by the `recv_timeout` tests (a channel
-            // that provably never receives data).
+            // Both interleavings are correct, so nothing sleeps to force the
+            // receiver to block first. "Empty channel waits instead of
+            // erroring" is pinned deterministically by the `recv_timeout` tests.
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
@@ -309,12 +277,10 @@ mod tests {
 
     mod recv_timeout {
         // Timing policy, so these stay deterministic without a mocked clock:
-        // lower bounds on elapsed time are asserted tightly — the kernel
-        // never wakes a poll before its deadline, so "returned too early" is
-        // a real bug regardless of machine load. Upper bounds are asserted
-        // only as hang detectors, at ceilings orders of magnitude above the
-        // deadline, so a heavily loaded CI runner can't flake them. Nothing
-        // in here sleeps to sequence events.
+        // lower bounds are asserted tightly, since the kernel never wakes a poll
+        // early and "returned too soon" is a real bug regardless of load. Upper
+        // bounds are hang detectors only, set orders of magnitude above the
+        // deadline so a loaded CI runner can't flake them.
 
         use super::*;
 
@@ -373,9 +339,6 @@ mod tests {
 
         #[test]
         fn completes_when_data_arrives_from_another_thread() {
-            // Cross-thread wakeup for the timeout path — see the blocking twin
-            // in `recv::completes_when_data_arrives_from_another_thread` for
-            // why no sleep sequences the two sides.
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             let send_thread = thread::spawn(move || {
                 sender.send(&42).unwrap();
@@ -398,7 +361,6 @@ mod tests {
 
         #[test]
         fn zero_timeout_with_data_ready() {
-            // Data already in channel, zero timeout should still succeed
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send(&42).unwrap();
             assert_eq!(recver.recv_timeout(Duration::ZERO).unwrap(), 42);
@@ -406,7 +368,6 @@ mod tests {
 
         #[test]
         fn zero_timeout_without_data() {
-            // No data, zero timeout should fail immediately
             let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let error = recver.recv_timeout(Duration::ZERO).unwrap_err();
             assert!(
@@ -418,7 +379,6 @@ mod tests {
 
         #[test]
         fn very_short_timeout_without_data() {
-            // Very short timeout (1ms) without data
             let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let start = Instant::now();
             let error = recver.recv_timeout(Duration::from_millis(1)).unwrap_err();
@@ -428,21 +388,18 @@ mod tests {
                 "Unexpected error: {:?}",
                 error,
             );
-            // Hang detector only (see the mod-level timing policy): far above
-            // the 1ms deadline so scheduler delay can't flake it, far below
-            // the 65s a poll stuck on its full u16::MAX-ms window would take.
+            // Hang detector only: far below the 65s a poll stuck on its full
+            // u16::MAX-ms window would take.
             assert!(elapsed < Duration::from_secs(10));
         }
 
         #[test]
         fn large_message() {
-            // Large message that may require multiple read chunks
-            // Note: socket buffers are finite, so we send/recv concurrently
             let (mut sender, mut recver) = channel_pair::<Vec<u8>>().unwrap();
             let large_data: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();
             let expected = large_data.clone();
 
-            // Send in a separate thread to avoid blocking on full socket buffer
+            // Separate thread, so a full socket buffer can't deadlock the two.
             let send_thread = thread::spawn(move || {
                 sender.send(&large_data).unwrap();
             });
@@ -454,7 +411,6 @@ mod tests {
 
         #[test]
         fn multiple_sequential_messages() {
-            // Multiple messages in sequence
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             for i in 0..10 {
                 sender.send(&i).unwrap();
@@ -466,8 +422,6 @@ mod tests {
 
         #[test]
         fn timeout_waiting_for_length_bytes() {
-            // Sender sends nothing, timeout waiting for length prefix
-            // This is essentially the same as the `timeout` test but with explicit timing check
             let (_sender, mut recver) = channel_pair::<u32>().unwrap();
             let start = Instant::now();
             let error = recver.recv_timeout(Duration::from_millis(50)).unwrap_err();
@@ -477,16 +431,12 @@ mod tests {
                 "Unexpected error: {:?}",
                 error,
             );
-            // Verify timeout was respected (within reasonable margin)
-            // Use >= 40ms to account for timing jitter
+            // 40ms rather than 50ms to absorb timing jitter.
             assert!(
                 elapsed >= Duration::from_millis(40),
                 "Timeout returned too quickly: {:?}",
                 elapsed
             );
-            // Hang detector only (see the mod-level timing policy): far above
-            // the 50ms deadline so scheduler delay can't flake it, far below
-            // the 65s a poll stuck on its full u16::MAX-ms window would take.
             assert!(
                 elapsed < Duration::from_secs(10),
                 "Timeout took too long: {:?}",
@@ -496,15 +446,12 @@ mod tests {
 
         #[test]
         fn timeout_waiting_for_payload() {
-            // Sender sends length but not payload - tests timeout during payload read
             let (mut raw_sender, mut recver) = raw_channel::<u32>();
 
-            // Send only the length prefix (4 bytes), not the payload
             let fake_len: u32 = 100;
             raw_sender.write_all(&fake_len.to_le_bytes()).unwrap();
 
-            // Keep sender alive to prevent EOF
-            let _keep_sender = raw_sender;
+            let _keep_sender = raw_sender; // held open so this is a timeout, not EOF
 
             let start = Instant::now();
             let error = recver.recv_timeout(Duration::from_millis(50)).unwrap_err();
@@ -514,7 +461,7 @@ mod tests {
                 "Unexpected error: {:?}",
                 error,
             );
-            // Use >= 40ms to account for timing jitter
+            // 40ms rather than 50ms to absorb timing jitter.
             assert!(
                 elapsed >= Duration::from_millis(40),
                 "Timeout returned too quickly: {:?}",
@@ -524,10 +471,9 @@ mod tests {
 
         #[test]
         fn sender_closes_after_partial_length() {
-            // Sender sends partial length then closes
             let (mut raw_sender, mut recver) = raw_channel::<u32>();
 
-            // Send only 2 of 4 length bytes, then close
+            // 2 of 4 length bytes, then close.
             raw_sender.write_all(&[1, 2]).unwrap();
             drop(raw_sender);
 
@@ -541,10 +487,9 @@ mod tests {
 
         #[test]
         fn sender_closes_after_partial_payload() {
-            // Sender sends length + partial payload then closes
             let (mut raw_sender, mut recver) = raw_channel::<Vec<u8>>();
 
-            // Send length indicating 100 bytes, but only send 10
+            // Length promises 100 bytes; only 10 are sent.
             let len: u32 = 100;
             raw_sender.write_all(&len.to_le_bytes()).unwrap();
             raw_sender.write_all(&[0u8; 10]).unwrap();
@@ -574,8 +519,6 @@ mod tests {
 
         #[test]
         fn roundtrip_empty_payload() {
-            // Zero-length payload still goes over the wire as
-            // [4-byte length=0] [0 bytes payload]. Receiver must complete.
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
             sender.send_raw(b"").unwrap();
             assert_eq!(
@@ -586,9 +529,8 @@ mod tests {
 
         #[test]
         fn roundtrip_near_max_payload() {
-            // A payload just under MAX_MESSAGE_SIZE must round-trip cleanly.
-            // Send/recv concurrently so we don't deadlock against the socket's
-            // OS-level buffer.
+            // Sent and received concurrently, so the socket's OS-level buffer
+            // can't deadlock the two.
             let payload: Vec<u8> = (0..MAX_MESSAGE_SIZE - 4).map(|i| (i % 251) as u8).collect();
             let expected = payload.clone();
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
@@ -602,10 +544,8 @@ mod tests {
 
         #[test]
         fn payload_over_max_size_rejected_on_send() {
-            // We can't actually allocate the over-sized buffer cheaply, but
-            // we can verify that `send_raw` enforces the same limit as
-            // `send`: it bails before touching the underlying fd, so a
-            // dummy peer-less sender suffices.
+            // `send_raw` bails before touching the fd, so a peer-less sender
+            // suffices.
             let (sender, _recver) = UnixStream::pair().unwrap();
             let mut sender: Sender<u32> = Sender::new(sender);
             let oversized = vec![0u8; MAX_MESSAGE_SIZE + 1];
@@ -626,18 +566,13 @@ mod tests {
         fn dropped_sender_gives_eof_to_recv_raw_timeout() {
             let (sender, mut recver) = channel_pair::<u32>().unwrap();
             drop(sender);
-            // EOF should be detected and surfaced as an error well before
-            // the timeout fires.
             assert!(recver.recv_raw_timeout(Duration::from_secs(1)).is_err());
         }
 
         #[test]
         fn length_prefix_is_four_bytes_little_endian() {
-            // Pin the wire format: a `send_raw` of N bytes writes exactly
-            // 4+N bytes total, with the leading 4 bytes being the
-            // little-endian u32 length. The fork+exec daemon child relies on
-            // this format being stable across build_id mismatches (otherwise
-            // the handshake check itself can't be validated).
+            // The wire format must stay stable across build_id mismatches,
+            // otherwise the handshake check itself can't be validated.
             let (sender, mut raw_recver) = UnixStream::pair().unwrap();
             let mut typed_sender: Sender<u32> = Sender::new(sender);
             typed_sender.send_raw(b"abc").unwrap();
@@ -649,11 +584,9 @@ mod tests {
 
         #[test]
         fn send_typed_then_recv_raw_observes_postcard_bytes() {
-            // Encoding asymmetry: `send` postcard-encodes; `recv_raw_timeout`
-            // returns the raw bytes that were sent. The receiver of a
-            // build-id handshake therefore sees exactly what the sender
-            // wrote, not postcard-decoded. Pin this with a value that
-            // postcard would encode non-trivially.
+            // `send` postcard-encodes while `recv_raw_timeout` returns raw
+            // bytes, so a build-id handshake receiver sees exactly what the
+            // sender wrote.
             #[derive(Debug, Serialize, Deserialize)]
             struct Msg {
                 a: u32,
@@ -667,9 +600,6 @@ mod tests {
                 })
                 .unwrap();
             let raw = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap();
-            // postcard varint-encodes integers and length-prefixes the
-            // string. We don't depend on the exact bytes here, just that
-            // we got something non-empty back.
             assert!(!raw.is_empty());
         }
     }
@@ -692,8 +622,6 @@ mod tests {
                 .recv_raw_timeout(Duration::from_millis(50))
                 .unwrap_err();
             assert!(matches!(err, ChannelRecvError::Timeout), "got {err:?}");
-            // The prefix is consumed; the receiver is now desynchronized and
-            // every later receive fails fast without touching the socket.
             let err = recver.recv_raw_timeout(Duration::from_secs(1)).unwrap_err();
             assert!(
                 matches!(err, ChannelRecvError::Desynchronized),
@@ -710,8 +638,7 @@ mod tests {
         #[test]
         fn clean_idle_recv_timeout_does_not_poison() {
             let (mut sender, mut recver) = channel_pair::<u32>().unwrap();
-            // Nothing sent yet: this timeout consumes 0 bytes and must not
-            // poison, so idle poll loops keep working.
+            // Consumes 0 bytes, so idle poll loops keep working.
             let err = recver
                 .recv_raw_timeout(Duration::from_millis(50))
                 .unwrap_err();

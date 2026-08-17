@@ -22,8 +22,6 @@ use super::handshake::{HANDSHAKE_TIMEOUT, validate_handshake_and_build_client};
 use super::{DAEMON_CHANNEL_FD, TOKEN_LEN, TOKEN_STAGE1, TOKEN_STAGE2, stage_token};
 use crate::ipc::RpcClient;
 use crate::ipc::error::SpawnDaemonError;
-// Via the `rpc` submodule, not `crate::ipc`'s re-export: that re-export is the
-// `testutils` surface (cfg-gated), while this is `ipc`-internal plumbing.
 use crate::ipc::rpc::RpcConnection;
 
 /// Resolve the path to exec for the daemon child.
@@ -75,17 +73,13 @@ pub(crate) fn daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
 /// any test environment) is unit-testable without a /proc-less setuid host.
 #[cfg(target_os = "linux")]
 fn linux_daemon_exe_path() -> Result<PathBuf, SpawnDaemonError> {
-    // Detect whether `/proc` is actually mounted by trying to *read* the magic
-    // link. `read_link` succeeding proves the link resolves; the resolver then
-    // hands the LITERAL "/proc/self/exe" string (not the read-link target) to
-    // `execve` so the same-inode guarantee is preserved. A TOCTOU where `/proc`
-    // disappears between this probe and the `execve` is astronomically unlikely
-    // and no worse than the previous unconditional behavior.
+    // Probing with `read_link` only proves the magic link resolves; the literal
+    // "/proc/self/exe" string is what reaches `execve`.
     let proc_self_exe_ok = std::fs::read_link("/proc/self/exe").is_ok();
-    // SAFETY: `getauxval` reads the process's own auxiliary vector; it takes
-    // no pointers, has no preconditions, and is callable in any process
-    // state. It returns 0 when the entry is absent, and AT_SECURE's value is
-    // a plain 0/1 flag, not a pointer.
+    // SAFETY: `getauxval` reads the process's own auxiliary vector; it takes no
+    // pointers, has no preconditions, and is callable in any process state. It
+    // returns 0 when the entry is absent, and AT_SECURE's value is a plain 0/1
+    // flag, not a pointer.
     let secure_exec = unsafe { libc::getauxval(libc::AT_SECURE) } != 0;
     resolve_linux_exe_path(
         proc_self_exe_ok,
@@ -111,19 +105,9 @@ fn resolve_linux_exe_path(
         return Ok(PathBuf::from("/proc/self/exe"));
     }
 
-    // `/proc` is unavailable, so only the invoker-chosen fallbacks remain. In
-    // a secure-execution process (setuid/setgid/file-caps — AT_SECURE != 0)
-    // both AT_EXECFN and argv[0] are picked by the *unprivileged* invoker and
-    // may be relative paths resolved against a caller-controlled cwd, so
-    // re-exec'ing them would let the invoker steer which binary runs with the
-    // elevated credentials. Refuse instead — deliberately BEFORE consulting
-    // either fallback: /proc-less *and* setuid is vanishingly rare, and a
-    // clean error beats a privilege-preserving exec of an unverified path.
-    // (The build-id handshake only catches accidents — a malicious binary can
-    // read the real binary's build id and replay it, and it has already run
-    // arbitrary code by handshake time.) The PermissionDenied kind is a
-    // documented contract on `SpawnDaemonError::ExePath` — callers distinguish
-    // this refusal from the NotFound exhaustion below via `Error::kind()`.
+    // The build-id handshake is no defense against the case this arm refuses: a
+    // malicious binary can replay the real build id, and has already run
+    // arbitrary code by handshake time.
     if secure_exec {
         return Err(SpawnDaemonError::ExePath(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -132,23 +116,16 @@ fn resolve_linux_exe_path(
         )));
     }
 
-    // Fall back to the exec-time pathname the kernel stashed in the auxiliary
-    // vector.
     if let Some(path) = auxv_execfn {
         return Ok(path);
     }
 
-    // Last resort: `argv[0]`. It may be a bare command name (then `Command`
-    // resolves it via `$PATH`) or a path relative to a since-changed cwd —
-    // best-effort, and again backstopped by the build-id handshake.
     if let Some(argv0) = argv0
         && !argv0.is_empty()
     {
         return Ok(PathBuf::from(argv0));
     }
 
-    // The NotFound kind is likewise part of the ExePath variant's documented
-    // contract: fallbacks consulted and exhausted, not refused.
     Err(SpawnDaemonError::ExePath(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         "/proc is not mounted and neither AT_EXECFN nor argv[0] yielded an \
@@ -166,28 +143,26 @@ fn exe_path_from_auxv() -> Option<PathBuf> {
     use std::ffi::CStr;
 
     // SAFETY: `getauxval` is always safe to call; it takes no pointers and
-    // returns 0 when the requested type isn't present. On a non-zero return
-    // the value is a pointer into the process's own auxiliary vector.
+    // returns 0 when the requested type isn't present. On a non-zero return the
+    // value is a pointer into the process's own auxiliary vector.
     let val = unsafe { libc::getauxval(libc::AT_EXECFN) };
     if val == 0 {
         return None;
     }
-    // `getauxval` returns the pointer as an integer (`c_ulong`);
-    // `with_exposed_provenance` spells out the int-to-pointer intent — the
-    // address originates outside Rust's provenance tracking (the kernel wrote
-    // it), so "exposed" is exactly its provenance status.
+    // The kernel wrote this address, so it lives outside Rust's provenance
+    // tracking — "exposed" is exactly its status.
     let ptr: *const libc::c_char = std::ptr::with_exposed_provenance(val as usize);
     // SAFETY: for this pointer-typed auxv entry, `ptr` is the kernel-supplied
     // pointer to the NUL-terminated pathname the process was `execve`'d with,
     // stored in the argv/environ/auxv block at the top of the initial stack:
     // correctly aligned (`c_char` has alignment 1), NUL-terminated well within
-    // `isize::MAX` bytes (the kernel caps that whole block at stack-size
-    // limits, orders of magnitude below `isize::MAX`), and mapped for the
-    // whole process lifetime. The borrowed `CStr` is consumed inline (its
-    // bytes copied into a `PathBuf` below), so it is never mutated or
-    // outlived. One assumption worth naming: nothing rewrites the initial
-    // argv/environ area (setproctitle-style tricks could clobber the string
-    // and its NUL terminator); neither this crate nor its dependencies does.
+    // `isize::MAX` bytes (the kernel caps that whole block at stack-size limits,
+    // orders of magnitude below `isize::MAX`), and mapped for the whole process
+    // lifetime. The borrowed `CStr` is consumed inline (its bytes copied into a
+    // `PathBuf` below), so it is never mutated or outlived. One assumption worth
+    // naming: nothing rewrites the initial argv/environ area (setproctitle-style
+    // tricks could clobber the string and its NUL terminator); neither this crate
+    // nor its dependencies does.
     let bytes = unsafe { CStr::from_ptr(ptr) }.to_bytes();
     usable_execfn(bytes)
 }
@@ -249,21 +224,7 @@ where
     Response: DeserializeOwned,
 {
     let exe = daemon_exe_path()?;
-    // The execve path is usually `/proc/self/exe` on Linux (kernel magic-link,
-    // see `daemon_exe_path`), but that string would also become argv[0] by
-    // default, so `ps`/`top` would show "/proc/self/exe" instead of the actual
-    // binary name. Override argv[0] to the resolved path so operators see a
-    // recognizable command line. Falls back to the exec path if `current_exe()`
-    // fails — preserves correctness over cosmetics. (In the `/proc`-absent
-    // fallback, `current_exe()` also fails, so argv[0] becomes `exe`, which is
-    // then already the real AT_EXECFN / argv[0] path — still recognizable.)
     let argv0 = std::env::current_exe().unwrap_or_else(|_| exe.clone());
-    // Pre-queue both stage-identity tokens into the parent→daemon direction as
-    // one contiguous write before the spawn: stage 1's dispatch consumes
-    // token 1, stage 2's (in the re-exec'd image) consumes token 2, then the
-    // framed RPC begins. Written by `start_background_process_inner` after the
-    // client is built; the test-only `*_with_exe` spawns pass `None` and never
-    // pollute their stream.
     let mut tokens = [0u8; TOKEN_LEN * 2];
     tokens[..TOKEN_LEN].copy_from_slice(&stage_token(TOKEN_STAGE1));
     tokens[TOKEN_LEN..].copy_from_slice(&stage_token(TOKEN_STAGE2));
@@ -299,12 +260,8 @@ where
     Request: Serialize,
     Response: DeserializeOwned,
 {
-    // `None` prequeue: this helper's daemon (`daemonizable-test-background`)
-    // builds its `RpcServer` directly and never runs `run()`/dispatch, so it
-    // would not consume tokens — writing them would corrupt its first
-    // `next_request`. The tradeoff is that this path doesn't exercise
-    // tokens+cleanup together; the real framework path (`spawn_daemon_process`)
-    // is covered by the framework e2e tests.
+    // `None` prequeue: this helper's daemon builds its `RpcServer` directly and
+    // never runs dispatch, so tokens would corrupt its first `next_request`.
     let (client, child) = start_background_process_inner(exe, None, extra_env, None)?;
     complete_spawn(client, child, expected_build_id, HANDSHAKE_TIMEOUT)
 }
@@ -346,78 +303,29 @@ where
     Request: Serialize,
     Response: DeserializeOwned,
 {
-    // `child` is the session-leader stage-1 intermediate (see
-    // `app::daemon_child`); the real daemon is its forked-then-re-exec'd
-    // grandchild. Capture the
-    // pid before any wait() so it still names the (live or zombie) direct child.
+    // Capture the pid before any wait() so it still names the (live or zombie)
+    // direct child.
     let child_pid = child.id() as libc::pid_t;
 
     match validate_handshake_and_build_client(client, expected_build_id, handshake_timeout) {
         Ok(client) => {
-            // The intermediate's only remaining act after spawning stage 2 is
-            // `_exit(0)` — but nothing ORDERS that exit before stage 2's
-            // handshake (the two run concurrently once the spawn returns), so
-            // a successful handshake proves the intermediate is dead or
-            // imminently dying, not already dead. This wait() therefore reaps
-            // it (near-)immediately in practice. Without it, every successful
-            // spawn would park a zombie intermediate in a long-lived caller.
-            //
-            // Blocking wait(): an externally SIGSTOPped or ptraced intermediate
-            // would block here indefinitely (documented on `spawn_daemon`). This
-            // is the only unbounded step of the spawn — the handshake recv is
-            // timeout-bounded. Since this wait is only zombie hygiene — the real
-            // daemon is the orphaned grandchild — it could degrade to
-            // try_wait()+timeout if that ever mattered.
+            // Nothing orders the intermediate's `_exit(0)` before stage 2's
+            // handshake, so it may still be dying here. This blocking wait is the
+            // spawn's only unbounded step: a SIGSTOPped or ptraced intermediate
+            // hangs it (documented on `spawn_daemon`).
             let _ = child.wait();
             Ok(client)
         }
         Err(err) => {
-            // Kill the whole spawn, then reap the direct child. Post-fork the
-            // direct child is the already-dead intermediate while the real
-            // daemon is the grandchild, so a plain child.kill() would signal a
-            // corpse and leave the daemon running — we must signal the process
-            // GROUP.
-            //
-            // kill(-child_pid) reaches the grandchild because the child's
-            // setsid() made child_pid the process-group id and the grandchild
-            // stays in that group. It is race-free even though we hold only the
-            // pid: child_pid is our OWN unreaped direct child, so by the POSIX
-            // pid-reuse rule (XBD 4.14 — a pid is not reused until BOTH the
-            // process lifetime ends AND any equal-pgid group's lifetime ends)
-            // plus the zombie-retention contract, child_pid cannot name any
-            // foreign process or group until the wait() below. MUST signal
-            // BEFORE wait(): reaping first frees child_pid for reuse and
-            // -child_pid could then hit an unrelated group.
-            //   * post-fork:  -child_pid SIGKILLs the live grandchild (the daemon)
-            //   * pre-setsid: -child_pid is ESRCH (the child is still in our
-            //     group, whose id is our pgid, not child_pid); the direct
-            //     child.kill() gets it instead — and the group kill is
-            //     repeated after it, for the sliver where setsid lands
-            //     between the two.
-            // A grandchild the group kills somehow miss (it left the group via
-            // its own setsid/setpgid) is delivered channel EOF as soon as the
-            // client is dropped on the error return; a daemon that honors the
-            // documented run_daemon contract (exit on SenderClosed) then shuts
-            // down promptly, but that is the app's obligation — the framework
-            // cannot force an escapee that ignores its channel to exit.
-            //
-            // `Pid::from_raw(-child_pid)` is the process group: nix passes it
-            // straight to `kill(2)`, so a negative pid signals the group, same
-            // as the raw call. A stale/foreign pid only yields ESRCH/EPERM
-            // (discarded).
+            // This whole sequence MUST precede the wait(): reaping frees
+            // `child_pid` for reuse, after which `-child_pid` could hit an
+            // unrelated group. Before the wait, POSIX pid-reuse rules (XBD 4.14)
+            // guarantee it cannot.
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(-child_pid),
                 nix::sys::signal::Signal::SIGKILL,
             );
             let _ = child.kill();
-            // Repeat the group kill AFTER the direct kill: if stage 1 was
-            // still pre-setsid at the first group kill (ESRCH) but got
-            // scheduled and completed setsid+spawn in the window before
-            // child.kill() delivered, a grandchild now exists in a group the
-            // first kill predated. The repeat catches it, and it is safe by
-            // the same argument as the first: the direct child is still
-            // unreaped (the wait() below hasn't run), so child_pid cannot yet
-            // name a foreign process or group.
             let _ = nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(-child_pid),
                 nix::sys::signal::Signal::SIGKILL,
@@ -473,10 +381,6 @@ where
     let rpc_channel = RpcConnection::<Request, Response>::new_channel()?;
     let (mut client, child_fd) = rpc_channel.into_client_and_child_fd();
 
-    // Pre-queue the stage-identity tokens (if any) BEFORE the spawn, so they sit
-    // in the socket buffer before the child exists — the daemon's dispatch reads
-    // them ahead of any framed request. A single small write into an empty
-    // AF_UNIX stream buffer can't block or short-write.
     if let Some(prequeue) = prequeue {
         client
             .write_channel_prelude(prequeue)
@@ -486,10 +390,8 @@ where
             })?;
     }
 
-    // No argv beyond argv0, BY DESIGN: stage identity rides the in-band
-    // channel tokens (see `TOKEN_MAGIC`), and the documented contract is that
-    // the daemon's argv stays empty (`run_daemon` sees no injected argument).
-    // Do not add an args parameter here without confronting that invariant.
+    // The daemon's empty argv is a documented contract — do not add an args
+    // parameter here without confronting that invariant.
     let mut cmd = Command::new(exe);
     if let Some(argv0) = argv0 {
         cmd.arg0(argv0);
@@ -499,20 +401,14 @@ where
     }
 
     // TODO Replace `command-fds` with stdlib `CommandExt::fd` once
-    // https://github.com/rust-lang/rust/pull/145687 lands and stabilizes.
-    // The stdlib version is expected to route through `posix_spawn` +
-    // `posix_spawn_file_actions_adddup2` when possible, which would close
-    // the fork-after-multithread hazard (see https://github.com/tokio-rs/tokio/issues/4301).
-    // `command-fds` itself uses `pre_exec` (it has no way around that
-    // through `std::process::Command` today), so this switch is a code-shape
-    // and edge-case-correctness improvement rather than a safety improvement
-    // — but it puts the migration one line away when the stdlib API lands.
+    // https://github.com/rust-lang/rust/pull/145687 lands and stabilizes. It is
+    // expected to route through `posix_spawn`, closing the fork-after-multithread
+    // hazard (https://github.com/tokio-rs/tokio/issues/4301) that `command-fds`
+    // inherits from its `pre_exec` implementation.
     cmd.fd_mappings(vec![FdMapping {
         parent_fd: child_fd,
         child_fd: DAEMON_CHANNEL_FD,
     }])
-    // Invariant, not an error path: a collision needs two mappings onto the
-    // same child fd, and we map a single owned parent fd onto fd 3.
     .expect("a single fd mapping onto fd 3 cannot collide");
 
     let child = cmd.spawn().map_err(|source| SpawnDaemonError::Spawn {
@@ -529,10 +425,6 @@ mod tests {
 
     #[test]
     fn prefers_proc_self_exe_when_proc_is_mounted() {
-        // The test process runs on a normal Linux box with `/proc` mounted, so
-        // resolution must take the primary path and hand `execve` the LITERAL
-        // magic-link string (preserving the same-inode guarantee), not a
-        // resolved or fallback path.
         assert!(
             std::fs::read_link("/proc/self/exe").is_ok(),
             "precondition: this test assumes /proc is mounted"
@@ -566,8 +458,8 @@ mod tests {
             PathBuf::from("/proc/self/exe")
         );
 
-        // /proc absent + secure-exec → refusal, BEFORE consulting the
-        // fallbacks (they are Some here and must not be used).
+        // /proc absent + secure-exec → refusal, without consulting the fallbacks
+        // passed here.
         assert_eq!(
             expath_kind(resolve_linux_exe_path(
                 false,
@@ -628,17 +520,12 @@ mod tests {
 
     #[test]
     fn auxv_fallback_resolves_to_this_test_binary() {
-        // `AT_EXECFN` is the pathname this process was `execve`'d with. It must
-        // be present and point at a real, existing file (the libtest binary) —
-        // this is the path the spawn would re-exec if `/proc` were unmounted.
         let from_auxv = exe_path_from_auxv().expect("AT_EXECFN should be present under glibc/musl");
         assert!(
             from_auxv.exists(),
             "AT_EXECFN path {from_auxv:?} should name an existing file"
         );
-        // It refers to the same on-disk file as `current_exe()` (which resolves
-        // via `/proc/self/exe`). Compare canonical paths so a relative or
-        // symlinked `AT_EXECFN` still matches.
+        // Canonicalized, so a relative or symlinked `AT_EXECFN` still matches.
         let via_proc = std::env::current_exe().unwrap();
         assert_eq!(
             std::fs::canonicalize(&from_auxv).unwrap(),

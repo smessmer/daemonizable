@@ -35,15 +35,11 @@ use std::path::PathBuf;
 use daemonizable::start_background_process_with_exe;
 
 fn main() {
-    // The daemon binary to launch (the `daemonizable-test-background` helper),
-    // handed to us by the test through the environment.
     let daemon_exe = PathBuf::from(
         std::env::var_os("DAEMONIZABLE_TEST_DAEMON_EXE")
             .expect("DAEMONIZABLE_TEST_DAEMON_EXE not set"),
     );
 
-    // The behavior to run the daemon in (the test sets it on our Command;
-    // default matches the original single-purpose version of this helper).
     // Behavior-specific paths ride the inherited environment untouched.
     let behavior =
         std::env::var_os("DAEMONIZABLE_TEST_BEHAVIOR").unwrap_or_else(|| "sentinel_loop".into());
@@ -61,10 +57,8 @@ fn main() {
     let _client = start_background_process_with_exe::<(), ()>(&daemon_exe, &env)
         .expect("start_background_process_with_exe failed in spawner");
 
-    // Exit immediately, like a CLI that has launched its daemon and is done.
-    // `exit(0)` skips destructors (dropping `_client` is unnecessary — the OS
-    // closes our channel end on exit, and the daemon must survive regardless),
-    // matching a real embedding application's parent CLI after successful
-    // startup (e.g. a mount helper once its filesystem is mounted).
+    // Immediately, like a CLI that has launched its daemon and is done. `exit(0)`
+    // skips destructors: the OS closes our channel end anyway, and the daemon
+    // must survive regardless.
     std::process::exit(0);
 }

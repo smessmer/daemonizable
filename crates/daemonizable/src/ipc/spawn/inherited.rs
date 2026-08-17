@@ -101,10 +101,6 @@ where
         });
     }
     validate_inherited_fd()?;
-    // The fd validated as an open socket above; adopt ownership now. This is the
-    // one irreducible `unsafe` in the claim — turning the inherited raw fd number
-    // into an owning `OwnedFd` — and the reason this function is `unsafe`.
-    //
     // SAFETY: by this function's `# Safety` contract the caller guarantees fd 3
     // is the daemon's exclusively-owned inherited channel end; `DAEMON_FD_CLAIMED`
     // made this the sole claim in the process, and it was just `fstat`ed as an
@@ -114,30 +110,15 @@ where
     // check→adopt window when starting from a raw fd number — it is part of why
     // this fn is `unsafe`).
     let channel = unsafe { OwnedFd::from_raw_fd(DAEMON_CHANNEL_FD) };
-    // Restore FD_CLOEXEC. The parent set it at creation, but the `dup2` onto
-    // fd 3 during the spawn necessarily cleared it so the fd would survive the
-    // `execve` into this daemon. Nothing re-sets it, so without this the fd
-    // stays inheritable for the daemon's whole lifetime: every subprocess the
-    // daemon later spawns (`std::process::Command` inherits non-CLOEXEC fds
-    // across its own fork+exec) gets a duplicate of the channel end, and since
-    // EOF only fires once ALL copies of an end close, such a subprocess
-    // outliving the daemon suppresses the EOF the parent waits on — silently
-    // defeating the liveness of `recv_response_blocking`.
-    //
-    // Runs on the adopted `OwnedFd` — `as_fd()` needs no raw-fd `unsafe`, and
-    // there is no fstat→borrow window to reason about. A failure here closes the
-    // fd on the error return; acceptable, since the claim has begun and this
-    // function's contract says it takes ownership of it. This restores CLOEXEC on
-    // fd 3 itself; the internal `dup` the server does next is independently
-    // CLOEXEC (std's `try_clone` uses `F_DUPFD_CLOEXEC` regardless of the source
-    // flag), so both halves of the channel end up close-on-exec either way.
+    // Nothing else re-sets FD_CLOEXEC after the spawn's `dup2` cleared it, so
+    // without this every subprocess the daemon later spawns gets a duplicate of
+    // the channel end. EOF only fires once all copies of an end close, so such a
+    // subprocess outliving the daemon would suppress the EOF the parent waits on.
     set_cloexec(channel.as_fd()).map_err(|(operation, source)| InheritedFdError::SetCloexec {
         fd: DAEMON_CHANNEL_FD,
         operation,
         source,
     })?;
-    // Build the server, which `dup`s the one socket into its send/recv halves.
-    // A `dup` failure closes `channel` on the error return (`CloneFd`).
     RpcServer::from_owned_fd(channel)
 }
 
@@ -149,11 +130,10 @@ where
 /// `fstat` unsafe and is named in the claim's `# Safety` docs.
 fn validate_inherited_fd() -> Result<(), InheritedFdError> {
     let fd = DAEMON_CHANNEL_FD;
-    // Probe the raw fd number with a bare `fstat` BEFORE building any fd
-    // wrapper. A hand-invoked daemon may have closed fd 3, and a `BorrowedFd` /
-    // `OwnedFd` must point at an *open* fd — whereas `libc::fstat` on a bare
-    // descriptor is defined for any int (EBADF for a closed one), so it can
-    // reject a bad fd without an I/O-safety-contract violation.
+    // A bare `fstat`, before any fd wrapper: a hand-invoked daemon may have
+    // closed fd 3, and `BorrowedFd`/`OwnedFd` require an *open* fd, whereas
+    // `libc::fstat` on a bare int is defined for any value (EBADF for a closed
+    // one) and so can reject it without violating the I/O safety contract.
     //
     // SAFETY: `std::mem::zeroed()` yields a valid `libc::stat` — a `repr(C)`
     // struct of integer fields with no niche/validity constraints — used only as
@@ -170,11 +150,9 @@ fn validate_inherited_fd() -> Result<(), InheritedFdError> {
         });
     }
     if statbuf.st_mode & libc::S_IFMT != libc::S_IFSOCK {
-        // Widened to u32 so the (platform-varying) libc::mode_t alias stays
-        // out of the public error type. Not an identity cast everywhere:
-        // mode_t is u32 on Linux but u16 on Apple, so the cast is a real
-        // widening there — clippy (1.94+) only sees the Linux view, where it
-        // degenerates to u32-to-u32.
+        // Widened so the platform-varying `libc::mode_t` alias stays out of the
+        // public error type. A real widening on Apple (u16), where clippy — which
+        // only sees the Linux u32 view — wrongly reads it as an identity cast.
         #[allow(clippy::unnecessary_cast)]
         let st_mode = statbuf.st_mode as u32;
         return Err(InheritedFdError::NotASocket { fd, st_mode });
@@ -196,7 +174,6 @@ fn validate_inherited_fd() -> Result<(), InheritedFdError> {
 /// go through `nix` and need no `unsafe`.
 fn set_cloexec(fd: BorrowedFd<'_>) -> Result<(), (&'static str, std::io::Error)> {
     let flags = fcntl(fd, FcntlArg::F_GETFD).map_err(|e| ("F_GETFD", e.into()))?;
-    // Preserve any other descriptor flags; only add FD_CLOEXEC.
     let flags = FdFlag::from_bits_retain(flags | libc::FD_CLOEXEC);
     fcntl(fd, FcntlArg::F_SETFD(flags)).map_err(|e| ("F_SETFD", e.into()))?;
     Ok(())
@@ -208,20 +185,11 @@ mod tests {
 
     #[test]
     fn rpc_server_from_inherited_fd_rejects_a_second_claim() {
-        // The daemon channel fd (3) is a process singleton; claiming it twice
-        // would alias owning `OwnedFd`s and risk a use-after-free. Simulate a
-        // prior claim by setting the flag directly — this deterministically
-        // exercises the guard without depending on what fd 3 happens to be in
-        // the test process, and without taking ownership of it.
-        //
-        // This swap→call→restore sequence is not atomic as a whole, so it is
-        // only sound while this test is the binary's SOLE claimant: a
-        // concurrent test that genuinely claimed fd 3 could observe a spurious
-        // `AlreadyClaimed`, or have its claim's flag clobbered back to `false`
-        // by the restore below — re-arming a second, aliasing claim. The assert
-        // enforces that invariant: if it ever fires, some other test in this
-        // binary now touches the claim guard, and this test needs a different
-        // design (e.g. a spawned-process test).
+        // Setting the flag directly exercises the guard deterministically,
+        // without depending on what fd 3 happens to be in the test process and
+        // without taking ownership of it. The swap→call→restore sequence isn't
+        // atomic as a whole, so it is only sound while this test is the binary's
+        // sole claimant — which the assert below enforces.
         let previously = DAEMON_FD_CLAIMED.swap(true, Ordering::SeqCst);
         assert!(
             !previously,
@@ -235,8 +203,6 @@ mod tests {
         // fd-claiming code — it never wraps a descriptor, so the
         // exclusive-ownership precondition is vacuously satisfied.
         let result = unsafe { rpc_server_from_inherited_fd::<(), ()>() };
-        // Restore the flag (asserted `false` above) so a later claim in this
-        // process — none exists today — isn't spuriously rejected.
         DAEMON_FD_CLAIMED.store(false, Ordering::SeqCst);
 
         let err = result.expect_err("a second claim of the daemon channel fd must be rejected");
@@ -250,13 +216,10 @@ mod tests {
     fn sets_cloexec_on_a_fd_that_lacks_it() {
         use std::os::unix::net::UnixStream;
 
-        // `UnixStream::pair` sets CLOEXEC, so clear it first to observe
-        // `set_cloexec` re-adding it (mirrors the claim's restore, where the
-        // spawn's `dup2` had cleared the flag).
+        // `UnixStream::pair` sets CLOEXEC, so clear it first.
         let (sender, _recver) = UnixStream::pair().unwrap();
         let fd = sender.as_fd();
 
-        // Precondition: clear the flag so we can observe set_cloexec setting it.
         let flags = fcntl(fd, FcntlArg::F_GETFD).unwrap();
         fcntl(
             fd,

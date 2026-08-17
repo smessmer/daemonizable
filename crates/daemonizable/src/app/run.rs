@@ -110,8 +110,6 @@ pub fn run<A: Daemonizable>() -> ExitCode {
     {
         panic!("daemonizable::run may only be called once per process");
     }
-    // Peek the head of the channel fd (3) for a stage token and route on it —
-    // non-consuming and non-blocking; see the doc above and `TOKEN_MAGIC`.
     match dispatch_from_channel() {
         StageDispatch::DaemonStage1 => run_as_daemon_stage1(), // diverges
         StageDispatch::DaemonStage2 => run_as_daemon_stage2::<A>(), // diverges
@@ -149,9 +147,8 @@ mod tests {
         }
     }
 
-    // The pure token classifier is unit-tested in `ipc::spawn::token`; the
-    // stage arms (which peek/claim fd 3 and exit the process) are covered by
-    // the spawned-binary e2e tests.
+    // The pure token classifier is unit-tested in `ipc::spawn::token`; the stage
+    // arms are covered by the spawned-binary e2e tests.
 
     /// The ONLY in-process test allowed to call `run` — the once-guard is a
     /// process-global, so a second test calling `run` would race this one for

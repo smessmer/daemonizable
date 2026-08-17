@@ -94,17 +94,11 @@ fn test_child_exiting_before_request() {
 
 #[test]
 fn test_child_send_request_after_daemon_exited() {
-    // The SEND direction against a dead daemon (the tests above cover the
-    // receive direction): once the daemon has exited, `send_request` must
-    // fail with `BrokenPipe` — not succeed into a buffer no one will read,
-    // and not hang. Every synchronization point is an observed event, never
-    // a delay:
-    //   1. EOF on the channel (`SenderClosed`) proves the daemon
-    //      reached its exit path and closed its channel end.
-    //   2. `waitpid` reaps the daemon (our direct child on this raw spawn
-    //      path); once it returns, the process is fully gone, so every fd it
-    //      held — including the request direction — is closed and the
-    //      send outcome below is deterministic.
+    // The send direction against a dead daemon; the tests above cover receives.
+    // Every synchronization point below is an observed event, never a delay: EOF
+    // proves the daemon reached its exit path, and the `waitpid` that follows
+    // proves it is fully gone, so every fd it held — the request direction
+    // included — is closed and the send outcome is deterministic.
     let tmp = tempfile::tempdir().unwrap();
     let pid_file = tmp.path().join("daemon.pid");
     let pid_param: OsString = pid_file.clone().into_os_string();
@@ -125,11 +119,9 @@ fn test_child_send_request_after_daemon_exited() {
         "expected SenderClosed, got: {err:?}"
     );
 
-    // The daemon wrote its pid file before touching its channel end
-    // (`write_pid_then_exit`), so after the EOF above the file is guaranteed
-    // present and complete — read it directly, no existence polling. The
-    // blocking reap returns promptly for the same reason: EOF is only
-    // observable once the daemon is already on its exit path.
+    // The daemon writes its pid file before touching its channel end, so after
+    // the EOF above the file is guaranteed complete — no existence polling. The
+    // blocking reap returns promptly for the same reason.
     let daemon_pid: i32 = std::fs::read_to_string(&pid_file)
         .expect("read pid file")
         .trim()

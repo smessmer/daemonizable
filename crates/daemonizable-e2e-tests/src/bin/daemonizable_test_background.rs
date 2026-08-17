@@ -21,21 +21,16 @@ fn main() {
     let behavior =
         std::env::var("DAEMONIZABLE_TEST_BEHAVIOR").unwrap_or_else(|_| "echo".to_string());
 
-    // SAFETY: `rpc_server_from_inherited_fd` requires fd 3 to be this
-    // process's exclusively-owned inherited channel socket (see its `# Safety`).
-    // The discharge is positional and holds for ANY invocation, not just the
-    // intended one: this call is the first fd-related action in a fresh
-    // post-exec image (only the env read above precedes it), so no live
-    // `OwnedFd`/`File` here can already own fd 3 — whatever open socket
-    // sits there gets its sole in-process owner, and a hand-run invocation
-    // with a closed or non-socket fd is rejected by the callee's fstat probe as
-    // a clean error, never as aliased ownership. Keep this call the first
-    // fd-creating operation in `main`: opening any fd before it would
-    // reintroduce aliasing risk in hand-run processes. The intended
-    // configuration remains the test harness spawning us
-    // (`start_background_process_with_exe` / `spawn_daemon_process_with_exe`),
-    // which `dup2`s the parent's socketpair end onto fd 3 across `execve`; this
-    // is the only claim in the process.
+    // SAFETY: `rpc_server_from_inherited_fd` requires fd 3 to be this process's
+    // exclusively-owned inherited channel socket (see its `# Safety`). The
+    // discharge is positional and holds for ANY invocation, not just the intended
+    // one: this call is the first fd-related action in a fresh post-exec image
+    // (only the env read above precedes it), so no live `OwnedFd`/`File` here can
+    // already own fd 3 — whatever open socket sits there gets its sole in-process
+    // owner, and a hand-run invocation with a closed or non-socket fd is rejected
+    // by the callee's fstat probe as a clean error, never as aliased ownership.
+    // Keep this the first fd-creating operation in `main`: opening any fd before
+    // it would reintroduce aliasing risk in hand-run processes.
     let mut rpc: RpcServer<Request, Response> = unsafe { rpc_server_from_inherited_fd() }
         .expect("daemon: failed to rebuild RpcServer from inherited fds");
 
@@ -46,9 +41,7 @@ fn main() {
                 // Parent dropped the client → EOF → clean exit.
                 Err(ChannelRecvError::SenderClosed) => std::process::exit(0),
                 Err(err) => {
-                    // Any other error is a real daemon-side failure; surface
-                    // it on stderr so a hung/failing parent test isn't the
-                    // only diagnostic.
+                    // On stderr, so a hung parent test isn't the only diagnostic.
                     eprintln!("daemon: echo receive failed: {err}");
                     std::process::exit(1);
                 }
@@ -73,13 +66,9 @@ fn main() {
             std::process::exit(0);
         }
         "write_to_fd_then_idle" => {
-            // Used by spawn_fd_isolation. Attempts to write a sentinel byte
-            // to the file descriptor number in DAEMONIZABLE_TEST_LEAK_FD — under
-            // fork+exec + FD_CLOEXEC, this fd should already be closed (no
-            // longer inherited), so the write fails with EBADF. The test
-            // verifies its parent-side read end gets EOF rather than the
-            // sentinel byte. Then writes a PID file and idles so the test
-            // can clean up.
+            // For spawn_fd_isolation: write a sentinel byte to the fd named by
+            // DAEMONIZABLE_TEST_LEAK_FD, which under fork+exec + FD_CLOEXEC is
+            // already closed, so the test's read end sees EOF instead.
             drop(rpc);
             let leak_fd: i32 = std::env::var("DAEMONIZABLE_TEST_LEAK_FD")
                 .expect("DAEMONIZABLE_TEST_LEAK_FD not set")
@@ -88,10 +77,8 @@ fn main() {
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
-            // The write is expected to fail with EBADF when the test
-            // succeeds. Do it before the PID file write so the parent
-            // doesn't observe "pid file present" until we've at least
-            // attempted the leak.
+            // Before the pid-file write, so the parent doesn't observe "pid file
+            // present" until the leak has at least been attempted.
             let payload = b"LEAK\n";
             // SAFETY: libc::write reads `count` bytes from `buf`. Here `buf` is
             // `payload.as_ptr()` and `count` is `payload.len()`, both derived from
@@ -113,39 +100,29 @@ fn main() {
             }
         }
         "spawn_child_holding_fds_then_exit" => {
-            // Regression coverage for FD_CLOEXEC restoration on the inherited
-            // channel fd (3). Spawn a long-lived grandchild via fork+exec, then
-            // exit this daemon. If the fd were left without FD_CLOEXEC, execve
-            // would NOT close it and the grandchild would inherit the channel
-            // end (fd 3) — keeping it open after we exit and starving the
-            // parent's EOF. With CLOEXEC restored the grandchild does not
-            // inherit it, so our exit closes the last copy of the end and the
-            // parent's receive returns SenderClosed promptly.
+            // Regression coverage for FD_CLOEXEC restoration on fd 3: without it
+            // the grandchild spawned below would inherit the channel end and hold
+            // it open past this daemon's exit, starving the parent's EOF.
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
-            // 30s: not a synchronization point — the test kills the sleeper
-            // by the pid recorded below. The duration must merely outlast,
-            // with a wide margin, the 5s recv_response wait in
-            // daemon_child_fd_cloexec (a leaked fd 3 has to stay open past
-            // that whole wait for the test to detect it), while still
-            // self-cleaning eventually if the kill-based cleanup never ran.
+            // Not a synchronization point — the test kills the sleeper by the pid
+            // recorded below. 30s merely has to outlast the 5s recv_response wait
+            // in daemon_child_fd_cloexec by a wide margin, while still
+            // self-cleaning if the kill-based cleanup never ran.
             let child = std::process::Command::new("sleep")
                 .arg("30")
                 .spawn()
                 .expect("daemon: spawn sleeper grandchild");
-            // Record the grandchild's pid so the test can kill it in cleanup
-            // (it is reparented to init once we exit).
+            // The grandchild is reparented to init once we exit, so the test needs
+            // its pid to clean it up.
             std::fs::write(&pid_file, child.id().to_string()).expect("daemon: write sleeper pid");
-            drop(rpc); // close this daemon's own copies of the channel fd
+            drop(rpc);
             std::process::exit(0);
         }
         "sentinel_loop" => {
-            // Used by daemon_survives_parent_exit. Ignore RPC entirely;
-            // loop writing the current monotonic timestamp to the path in
-            // DAEMONIZABLE_TEST_SENTINEL, plus the daemon's PID to DAEMONIZABLE_TEST_PID.
-            // The test verifies the file is still being updated after the
-            // sub-test parent exits.
+            // For daemon_survives_parent_exit, which verifies the sentinel file
+            // is still being updated after the sub-test parent exits.
             drop(rpc);
             let sentinel = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_SENTINEL")
@@ -156,9 +133,8 @@ fn main() {
             );
             std::fs::write(&pid_file, std::process::id().to_string())
                 .expect("daemon: write pid file");
-            // setsid for the test daemon so it survives the sub-test-process
-            // exit even though we haven't gone through the framework's
-            // daemon dispatch (which would have called setsid).
+            // By hand, since this helper never goes through the framework's daemon
+            // dispatch, which is what would normally call setsid.
             if let Err(err) = nix::unistd::setsid() {
                 eprintln!("daemon: setsid failed: {err}");
                 std::process::exit(1);
@@ -173,22 +149,14 @@ fn main() {
             }
         }
         "send_after_parent_exit" => {
-            // Used by daemon_send_after_foreground_exit: the daemon side of a
-            // send whose foreground peer is ALREADY GONE. Our parent is the
-            // spawner helper (`daemonizable-test-spawn-then-exit`), standing
-            // in for a foreground CLI that exits right after the spawn; it
-            // hands us its pid via the environment. Wait until it is fully
-            // dead, then attempt `send_response` and record the outcome —
-            // the test asserts it was a clean `BrokenPipe`, not a success and
-            // not a hang.
+            // For daemon_send_after_foreground_exit: a send whose foreground peer
+            // is already gone. That peer is the spawner helper, which hands us its
+            // pid via the environment.
             //
-            // The wait is an observed event, not a delay: we poll for the
-            // moment `getppid()` stops being the spawner's pid. The kernel
-            // reparents us only during the spawner's teardown, after its fds
-            // are closed — so once the reparent is visible, the response
-            // channel's only other end is guaranteed gone and the send outcome
-            // is deterministic. (If the spawner died before we even started,
-            // `getppid()` never equals its pid and the loop exits at once.)
+            // The wait below is an observed event, not a delay: the kernel
+            // reparents us only during the spawner's teardown, after its fds are
+            // closed, so once `getppid()` changes the channel's other end is
+            // guaranteed gone and the send outcome is deterministic.
             let outfile = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_OUTFILE")
                     .expect("DAEMONIZABLE_TEST_OUTFILE not set"),
@@ -200,18 +168,14 @@ fn main() {
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
-            // Publish our pid first so the test can clean us up if an
-            // assertion fails before we exit on our own.
+            // First, so the test can clean us up if an assertion fails before we
+            // exit on our own.
             std::fs::write(&pid_file, std::process::id().to_string())
                 .expect("daemon: write pid file");
-            // Optionally reset SIGPIPE to its default disposition — the common
-            // real-daemon configuration (done before spawning pipeline
-            // children) that forfeits Rust's process-wide SIG_IGN. The
-            // dead-peer send below must STILL surface as a clean BrokenPipe
-            // (see the SIGPIPE note on `channel_pair` in the library's
-            // channel module for the per-platform mechanism). If the guarantee
-            // ever broke, this process would die on SIGPIPE here and never
-            // publish an outcome, failing the test loudly.
+            // Forfeiting Rust's process-wide SIG_IGN, as a real daemon commonly
+            // does before spawning pipeline children. The dead-peer send below
+            // must still surface as a clean BrokenPipe; if that guarantee ever
+            // broke, this process would die on SIGPIPE and publish no outcome.
             if std::env::var_os("DAEMONIZABLE_TEST_SIGPIPE_DFL").is_some() {
                 // SAFETY: `libc::signal` with SIG_DFL installs the default
                 // disposition for SIGPIPE — no handler function pointer is
@@ -231,20 +195,16 @@ fn main() {
                 Ok(()) => "send:unexpected_success".to_string(),
                 Err(other) => format!("send:unexpected_error:{other:?}"),
             };
-            // Publish atomically (write to a sibling path, then rename) so
-            // the test's existence poll can never observe a partial write.
+            // Written to a sibling path and renamed, so the test's existence poll
+            // can never observe a partial write.
             let tmp = outfile.with_extension("tmp");
             std::fs::write(&tmp, &outcome).expect("daemon: write outcome tmp file");
             std::fs::rename(&tmp, &outfile).expect("daemon: publish outcome file");
             std::process::exit(0);
         }
         "idle_without_handshake" => {
-            // Used by failed_spawn_cleanup. Claims the channel, writes its pid,
-            // then idles WITHOUT ever sending a handshake — the wedged-child
-            // case the parent's handshake TIMEOUT exists for. The test drives
-            // it through the timeout-injectable spawn variant so it doesn't
-            // wait out the production 10 s bound, then asserts the cleanup
-            // killed and reaped us exactly as on a mismatch.
+            // For failed_spawn_cleanup: the wedged-child case the parent's
+            // handshake timeout exists for.
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
@@ -255,10 +215,8 @@ fn main() {
             }
         }
         "wrong_handshake_then_idle" => {
-            // Used by failed_spawn_cleanup. Drives the parent's handshake
-            // validation to a Mismatch, then idles (blocks forever) so the
-            // parent's failed-spawn cleanup has a LIVE child to kill and reap.
-            // Writes its pid first so the test can assert it was reaped.
+            // For failed_spawn_cleanup: drives the handshake to a Mismatch, then
+            // idles so the cleanup has a live child to kill and reap.
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
@@ -271,13 +229,10 @@ fn main() {
             }
         }
         "double_fork_wrong_handshake_then_idle" => {
-            // Mimics the real framework child arm (setsid → second fork →
-            // intermediate _exit(0) → grandchild serves), but the grandchild
-            // sends a WRONG build id. Proves the parent's failed-spawn cleanup
-            // group-kill (`kill(-child_pid)`) reaches the GRANDCHILD — the real
+            // Mimics the real framework child arm, but with a wrong build id, to
+            // prove the cleanup's group-kill reaches the grandchild — the real
             // daemon, reparented away from the parent — not merely the direct
-            // child. The grandchild writes ITS pid so the test can assert it
-            // was killed.
+            // child.
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );
@@ -302,7 +257,7 @@ fn main() {
                     std::process::exit(1);
                 }
                 0 => {
-                    // Grandchild: the "daemon". Owns the inherited channel fd (3).
+                    // The "daemon", owning the inherited channel fd.
                     std::fs::write(&pid_file, std::process::id().to_string())
                         .expect("daemon: write pid file");
                     daemonizable::send_handshake(&mut rpc, "deliberately-wrong-build-id")
@@ -321,11 +276,8 @@ fn main() {
             }
         }
         "write_pid_then_exit" => {
-            // Used by failed_spawn_cleanup. Dies immediately — before any
-            // handshake and before setsid — so the parent's handshake recv
-            // sees EOF (SenderClosed) and the cleanup has an already-dead child
-            // to reap (the wait()-reaps-a-zombie path). Writes its pid first so
-            // the test can assert no zombie survives.
+            // For failed_spawn_cleanup: dies before any handshake and before
+            // setsid, so the cleanup has an already-dead child to reap.
             let pid_file = std::path::PathBuf::from(
                 std::env::var_os("DAEMONIZABLE_TEST_PID").expect("DAEMONIZABLE_TEST_PID not set"),
             );

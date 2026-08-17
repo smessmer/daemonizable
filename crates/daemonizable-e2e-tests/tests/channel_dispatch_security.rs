@@ -27,11 +27,9 @@ fn test_app_exe() -> &'static str {
     env!("CARGO_BIN_EXE_daemonizable-test-app")
 }
 
-/// Assert the child consumed NOTHING from the crafted socket: everything the
-/// test queued into `childs`'s receive direction must still be readable from
-/// our retained copy after the child exited. This pins the documented
-/// "falls to the foreground arm having consumed nothing" guarantee — the
-/// existing foreground assertions alone would keep passing if dispatch
+/// Assert the child consumed nothing from the crafted socket: everything the
+/// test queued must still be readable from our retained copy after the child
+/// exited. The foreground assertions alone would keep passing if dispatch
 /// started eating queued bytes on the no-match path.
 fn assert_socket_unconsumed(childs: &UnixStream, expected: &[u8]) {
     let mut buf = vec![0u8; expected.len() + 16];
@@ -100,11 +98,8 @@ fn run_with_fd3(
 
 #[test]
 fn foreign_fifo_on_fd3_dispatches_foreground() {
-    // A make-jobserver-style FIFO (a pipe) on fd 3 is not a socket, so the
-    // dispatch probe's `recv` returns ENOTSOCK and the app runs foreground —
-    // never touching (consuming from) the jobserver. A byte is queued into the
-    // pipe before the spawn, standing in for a jobserver token: it must still
-    // be there afterwards (eating it would wedge a real parallel build).
+    // The queued byte stands in for a make jobserver token: eating it would
+    // wedge a real parallel build.
     let (read_fd, write_fd) = nix::unistd::pipe().expect("pipe");
     nix::unistd::write(&write_fd, b"J").expect("queue the jobserver-token stand-in");
 
@@ -112,8 +107,8 @@ fn foreign_fifo_on_fd3_dispatches_foreground() {
     let outfile = tmpdir.path().join("result.txt");
     let outfile_str = outfile.to_str().unwrap();
 
-    // Keep the write end open so the pipe isn't at EOF (belt-and-suspenders; the
-    // ENOTSOCK verdict doesn't depend on it).
+    // The write end stays open so the pipe isn't at EOF, though the ENOTSOCK
+    // verdict doesn't depend on that.
     let output = run_with_fd3(
         &["--outfile", outfile_str],
         &read_fd,
@@ -132,9 +127,8 @@ fn foreign_fifo_on_fd3_dispatches_foreground() {
         "a FIFO on fd 3 must not hijack dispatch"
     );
 
-    // The "jobserver token" byte must still be in the pipe. Non-blocking read
-    // (the write end is still open, so a consumed byte would mean a HANG here
-    // if the read were blocking).
+    // Non-blocking: the write end is still open, so a blocking read would hang
+    // here rather than fail if the byte had been consumed.
     nix::fcntl::fcntl(
         &read_fd,
         nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
@@ -149,9 +143,6 @@ fn foreign_fifo_on_fd3_dispatches_foreground() {
 
 #[test]
 fn wrong_magic_socket_on_fd3_dispatches_foreground() {
-    // A connected socket on fd 3 whose queued bytes are not the framework magic
-    // (33 bytes of garbage) → the classifier returns Foreground and the socket
-    // is left unconsumed.
     let (ours, childs) = UnixStream::pair().expect("socketpair");
     // 33 = TOKEN_LEN worth of non-magic bytes.
     (&ours)
@@ -179,20 +170,14 @@ fn wrong_magic_socket_on_fd3_dispatches_foreground() {
         "foreground-ran", result,
         "a wrong-magic socket on fd 3 must not hijack dispatch"
     );
-    // The queued bytes must all still be there — the no-match path consumes
-    // nothing.
     assert_socket_unconsumed(&childs, &[0xABu8; 33]);
 }
 
 #[test]
 fn partial_token_socket_on_fd3_dispatches_foreground() {
-    // A socket on fd 3 carrying a real stage-1 token with its final byte missing
-    // (one byte short of a full token), then left open with no further writes:
-    // the non-blocking `MSG_PEEK` sees a short read, the classifier returns
-    // Foreground, and — crucially — dispatch does NOT block waiting for the rest
-    // of the token. The socket is never closed (`ours` is held open for the whole
-    // spawn), so a *blocking* read here would hang the child forever; the fact
-    // that `cmd.output()` returns at all is the non-hang assertion.
+    // `ours` is held open for the whole spawn and nothing more is written, so a
+    // dispatch that blocked waiting for the rest of the token would hang the
+    // child forever — `cmd.output()` returning at all is the non-hang assertion.
     let (ours, childs) = UnixStream::pair().expect("socketpair");
     let full = daemonizable::stage_token_bytes(1);
     (&ours)
@@ -220,18 +205,12 @@ fn partial_token_socket_on_fd3_dispatches_foreground() {
         "foreground-ran", result,
         "a truncated token on fd 3 must not hijack dispatch"
     );
-    // The truncated token must still be queued in full — a short peek consumes
-    // nothing.
     assert_socket_unconsumed(&childs, &full[..full.len() - 1]);
 }
 
 #[test]
 fn single_token_socket_is_rejected_by_stage1() {
-    // A crafted socket carrying ONLY stage 1's token: dispatch routes to stage
-    // 1 (token 1 matched), but stage 1's mandatory token-2 peek finds nothing —
-    // so it exits 2 (pre-setsid, pre-fork) rather than letting a detached
-    // stage-2 image later run foreground code. This is the defense against a
-    // pre-main constructor consuming token 1.
+    // The defense against a pre-main constructor consuming token 1.
     let (ours, childs) = UnixStream::pair().expect("socketpair");
     (&ours)
         .write_all(&daemonizable::stage_token_bytes(1))
@@ -254,14 +233,10 @@ fn single_token_socket_is_rejected_by_stage1() {
 
 #[test]
 fn both_tokens_hand_run_as_group_leader_fails_stage1_setsid() {
-    // BOTH tokens queued (a faithful forgery of the parent's prequeue), but the
-    // process is hand-run as a process-group LEADER: dispatch routes to stage 1
-    // (token 1 matched), the mandatory token-2 peek passes — and then `setsid`
-    // fails with EPERM, because POSIX forbids a group leader from creating a
-    // session. Exit 1, before any fork or exec. This pins the setsid-failure
-    // arm of stage 1 (the hand-launched-shell-job misuse its comment names),
-    // which no other test reaches: the single-token test exits earlier, and
-    // genuine spawns are never group leaders.
+    // A faithful forgery of the parent's prequeue gets past the token-2 peek, so
+    // `setsid` is what refuses it — POSIX forbids a group leader from creating a
+    // session. This is the only test reaching stage 1's setsid-failure arm: the
+    // single-token test exits earlier, and genuine spawns are never group leaders.
     let (ours, childs) = UnixStream::pair().expect("socketpair");
     let mut both = daemonizable::stage_token_bytes(1);
     both.extend_from_slice(&daemonizable::stage_token_bytes(2));
@@ -284,11 +259,7 @@ fn both_tokens_hand_run_as_group_leader_fails_stage1_setsid() {
 
 #[test]
 fn stage2_token_hand_run_as_leader_is_rejected() {
-    // A crafted socket carrying a valid stage-2 token, hand-run as a session
-    // leader (pre_exec setsid): dispatch routes to stage 2, but the provenance
-    // guard refuses a session/group leader (a framework-spawned daemon is a
-    // non-leader grandchild). Exit 1, before the claim or handshake — a forged
-    // token cannot yield a running daemon.
+    // A forged token must not yield a running daemon.
     let (ours, childs) = UnixStream::pair().expect("socketpair");
     (&ours)
         .write_all(&daemonizable::stage_token_bytes(2))
@@ -311,13 +282,8 @@ fn stage2_token_hand_run_as_leader_is_rejected() {
 
 #[test]
 fn stage2_token_hand_run_as_group_leader_is_rejected() {
-    // A crafted socket carrying a valid stage-2 token, hand-run as a process-
-    // GROUP leader (pre_exec `setpgid(0, 0)`, no new session): the child is not
-    // a session leader, but it IS a group leader and its `sid != pgid`, so the
-    // provenance guard still refuses it. This exercises the group-leader arm of
-    // the guard that the session-leader test above does not reach — a genuine
-    // framework daemon is a non-leader grandchild whose session id equals its
-    // process-group id. Exit 1, before the claim or handshake.
+    // A group leader that is not a session leader, exercising the arm of the
+    // provenance guard the session-leader test above doesn't reach.
     let (ours, childs) = UnixStream::pair().expect("socketpair");
     (&ours)
         .write_all(&daemonizable::stage_token_bytes(2))

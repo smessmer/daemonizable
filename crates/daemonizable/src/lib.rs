@@ -549,47 +549,31 @@
 //! Unix-only (Linux is the primary target; macOS works with caveats documented
 //! in the source).
 
-// The macOS/iOS CLOEXEC race the docs above mention is discussed in full in
-// ipc/channel/mod.rs (targets with `SOCK_CLOEXEC` have no race at all).
-
 mod app;
 mod ipc;
 mod stdio;
 
-// Documentation only — the full daemonization-protocol reference (no code).
-// Public so it renders on docs.rs and the README can link to it; the modules
-// that implement the protocol link back to it from their own docs.
+// Documentation only — the full daemonization-protocol reference, no code.
+// Public so it renders on docs.rs and the README can link to it.
 pub mod protocol;
 
 pub use app::{Daemonizable, Daemonizer, run};
 
-// The #[daemonizable::main] attribute. Lives in the companion proc-macro crate
-// (proc macros can't be defined here) and is re-exported so applications only
-// ever depend on `daemonizable` itself.
+// Re-exported from the companion proc-macro crate (proc macros can't be defined
+// here) so applications only ever depend on `daemonizable` itself.
 #[cfg(feature = "macros")]
 pub use daemonizable_macros::main;
 
-// The typed handles applications receive: the client from
-// `Daemonizer::spawn_daemon` and the server passed to `Daemonizable::run_daemon`.
 pub use ipc::{RpcClient, RpcServer};
 
-// Typed errors returned by the IPC layer (thiserror, not anyhow) so callers
-// can match on failure modes. Only errors reachable from the stable public API
-// are here; `InheritedFdError` comes solely from the `testutils` fd-claim
-// helper and is re-exported alongside it below.
 pub use ipc::{
     ChannelCreateError, ChannelRecvError, ChannelSendError, HandshakeError, SpawnDaemonError,
 };
 
-// App-facing daemon-lifecycle utility, not IPC — hence its own `stdio` module.
 pub use stdio::{DetachStdioError, detach_stdio};
 
-// Test-only surface (each item documents itself): lower-level handles that let
-// `daemonizable-e2e-tests` (and downstream crates testing their own IPC wiring)
-// substitute a helper binary for the re-exec'd self and drive the
-// spawn/handshake machinery directly. Gated behind `testutils` and hidden from
-// docs; production code implements [`Daemonizable`] and lets [`run`]
-// orchestrate the daemon side instead.
+// Test-only surface, each item documenting itself. Production code implements
+// [`Daemonizable`] and lets [`run`] orchestrate the daemon side instead.
 #[cfg(any(test, feature = "testutils"))]
 #[doc(hidden)]
 pub use ipc::{
