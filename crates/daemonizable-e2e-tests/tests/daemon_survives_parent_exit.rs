@@ -44,11 +44,8 @@ fn daemon_survives_parent_exit() {
     let sentinel_path = tmp.path().join("sentinel");
     let pid_path = tmp.path().join("daemon.pid");
 
-    // Run the spawner: it launches the daemon and exits immediately,
-    // simulating a parent CLI that daemonizes and returns. The daemon paths
-    // ride the environment — set on the spawner's `Command`, inherited by the
-    // daemon across the spawn — so this test process never mutates its own
-    // environment (no `set_var`, hence no cross-thread env race).
+    // The daemon paths ride the spawner's `Command` environment, so this test
+    // process never mutates its own — no `set_var`, no cross-thread env race.
     let status = Command::new(spawner_exe())
         .env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
         .env("DAEMONIZABLE_TEST_SENTINEL", &sentinel_path)
@@ -60,16 +57,14 @@ fn daemon_survives_parent_exit() {
         "spawner process did not exit cleanly: {status:?}",
     );
 
-    // The daemon is not our child; discover its PID through the file it
-    // writes on startup (content-polled — see `read_pid_file`).
+    // The daemon is not our child, so its pid comes from the file it writes on
+    // startup (content-polled — see `read_pid_file`).
     let daemon_pid = read_pid_file(&pid_path, Duration::from_secs(5));
-    // Installed *before* any assertion below, so the daemon gets killed even if
-    // a check panics.
+    // Before any assertion below, so the daemon is killed even if a check panics.
     let _guard = DaemonGuard(daemon_pid);
 
-    // setsid moved the daemon into its own session. Without this, the daemon
-    // would die on SIGHUP when the parent's controlling terminal closes (e.g.
-    // when the user closes the shell).
+    // Without setsid the daemon would die on SIGHUP when the parent's
+    // controlling terminal closes.
     let daemon_sid = getsid(Some(daemon_pid)).expect("getsid(daemon)");
     let test_sid = getsid(None).expect("getsid(test)");
     assert_ne!(
@@ -77,11 +72,8 @@ fn daemon_survives_parent_exit() {
         "daemon and test share a session — setsid did not take effect",
     );
 
-    // Daemon must keep writing the sentinel even though its spawner (the
-    // sub-process) has exited. Wait for the file to appear, then poll until its
-    // contents change. Daemon writes every 50 ms, so observing a change normally
-    // takes <100 ms; 5 s is a generous ceiling that fails fast if the daemon has
-    // actually stopped.
+    // The daemon writes every 50 ms, so a change normally shows up in <100 ms;
+    // 5 s is a ceiling that fails fast if it has actually stopped.
     let sentinel_appear_deadline = Instant::now() + Duration::from_secs(5);
     while !sentinel_path.exists() {
         assert!(
@@ -103,6 +95,4 @@ fn daemon_survives_parent_exit() {
             "daemon stopped writing sentinel after parent exited (no change in 5s)",
         );
     }
-
-    // Cleanup happens via DaemonGuard's Drop.
 }

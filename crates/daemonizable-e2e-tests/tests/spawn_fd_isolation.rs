@@ -21,17 +21,13 @@ use nix::fcntl::OFlag;
 
 #[test]
 fn pipes_do_not_leak_into_daemon() {
-    // Sentinel pipe — its fds should not be inherited by the daemon. Created
-    // via std's anonymous-pipe API (stable since 1.87, inside the MSRV), which
-    // sets CLOEXEC on the fds it creates like every other std fd — the way a
-    // real application's own pipes typically are — so the test isolates the
-    // *daemon spawn* layer rather than relying on a coincidental inheritance
-    // default. (Not nix::unistd::pipe2: macOS has no pipe2 syscall, and this
-    // test compiles on the macOS CI leg.)
+    // std's anonymous-pipe API sets CLOEXEC like every other std fd, the way a
+    // real application's own pipes typically are, so this isolates the daemon
+    // spawn layer rather than a coincidental inheritance default. Not
+    // nix::unistd::pipe2: macOS has no pipe2, and this test runs on macOS CI.
     let (mut sentinel_recver, sentinel_sender) = std::io::pipe().expect("create sentinel pipe");
     let sentinel_write_fd = sentinel_sender.as_raw_fd();
 
-    // Tell the helper daemon (via env) which fd to attempt a write on.
     let tmp = tempfile::Builder::new()
         .prefix("daemonizable-spawn-fd-isolation")
         .tempdir()
@@ -39,11 +35,8 @@ fn pipes_do_not_leak_into_daemon() {
     let pid_file = tmp.path().join("daemon.pid");
     let sentinel_param: OsString = sentinel_write_fd.to_string().into();
 
-    // All three variables ride `extra_env` (`Command::env`, applied in the
-    // spawned child) rather than `std::env::set_var` on this process: mutating
-    // our own environment is `unsafe` (racy with any concurrently-reading
-    // thread, e.g. the libtest controller), and the helper only reads these
-    // from its own environment anyway.
+    // `extra_env` rather than `std::env::set_var`: mutating our own environment
+    // is `unsafe`, racy against the libtest controller's own reads.
     let env: [(&OsStr, &OsStr); 3] = [
         (
             OsStr::new("DAEMONIZABLE_TEST_BEHAVIOR"),
@@ -61,29 +54,21 @@ fn pipes_do_not_leak_into_daemon() {
     )
     .expect("spawn daemon");
 
-    // Drop our own copy of the sentinel sender so the only writer left
-    // *would* be the daemon's inherited copy — if it had one. The recver
-    // will go to EOF only after every writer is closed.
+    // Dropped so the only writer left would be the daemon's inherited copy, if
+    // it had one — the recver reaches EOF only once every writer is closed.
     drop(sentinel_sender);
 
-    // Wait for the daemon to publish its PID, so we know it's reached its
-    // main and (if the fd leaked) has had a chance to write. Content-polled,
-    // not existence-polled — see `read_pid_file`.
+    // Content-polled, not existence-polled — see `read_pid_file`.
     let daemon_pid = read_pid_file(&pid_file, Duration::from_secs(5));
-    // Installed *before* the EOF assertion below, so the daemon gets killed
-    // even if it panics. The reaping guard: this raw helper-spawn daemon is
-    // our DIRECT child (no framework second fork), so it must be waitpid'd.
+    // Before the EOF assertion below, so the daemon gets killed even if it
+    // panics. This raw helper-spawn daemon is our direct child (no framework
+    // second fork), so it must be waitpid'd.
     let _guard = ChildDaemonGuard(daemon_pid);
 
-    // No wait is needed before the check below: the helper attempts its leak
-    // write BEFORE publishing the pid file (see `write_to_fd_then_idle`), so
-    // having observed the pid file above already proves the write attempt
-    // happened — ordering by observed events, not by timing.
-
-    // Read from the sentinel pipe with a non-blocking read. Expect EOF (no
-    // data) because the daemon's inherited copy of the fd was closed by
-    // execve. If the fd had leaked, the daemon's write would have succeeded
-    // and we'd see the bytes here.
+    // No wait is needed: the helper attempts its leak write before publishing
+    // the pid file, so observing that file already proves the attempt happened.
+    // EOF here means execve closed the daemon's inherited copy of the fd; a leak
+    // would show up as the sentinel bytes instead.
     nix::fcntl::fcntl(
         &sentinel_recver,
         nix::fcntl::FcntlArg::F_SETFL(OFlag::O_NONBLOCK),
@@ -104,6 +89,4 @@ fn pipes_do_not_leak_into_daemon() {
         }
         Err(e) => panic!("unexpected read error: {e}"),
     }
-
-    // Cleanup happens via ChildDaemonGuard's Drop.
 }

@@ -26,8 +26,7 @@ fn detach_stdio_redirects_a_preclosed_std_fd_to_dev_null() {
     for fd in [0, 1, 2] {
         let status = Command::new(preclosed_helper_exe())
             .arg(fd.to_string())
-            // Inherit real stdio so the helper starts with 0/1/2 open and then
-            // closes exactly the one under test.
+            // So the helper starts with 0/1/2 open and closes exactly one.
             .status()
             .expect("spawn the pre-closed detach_stdio helper");
         assert!(

@@ -39,16 +39,15 @@ fn pre_detach_stdio_reaches_inherited_streams_and_post_detach_is_severed() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    // Exit code 3 means `detach_stdio` itself returned an error (the helper
-    // reports it on the pre-detach stderr, surfaced here).
+    // Exit code 3 means `detach_stdio` itself returned an error.
     assert!(
         output.status.success(),
         "helper did not exit cleanly: status={:?}\nstdout: {stdout}\nstderr: {stderr}",
         output.status,
     );
 
-    // Pre-detach writes must survive: the daemon's inherited stdio was still
-    // live, so this is the startup logging the user needs to see.
+    // The startup logging the user needs to see, written while the daemon's
+    // inherited stdio was still live.
     assert!(
         stdout.contains(BEFORE_STDOUT),
         "pre-detach stdout was lost — inherited stdout not live before detach_stdio\nstdout: {stdout}",
@@ -58,9 +57,8 @@ fn pre_detach_stdio_reaches_inherited_streams_and_post_detach_is_severed() {
         "pre-detach stderr was lost — inherited stderr not live before detach_stdio\nstderr: {stderr}",
     );
 
-    // Post-detach writes must be swallowed by /dev/null: leaking them would
-    // dump background-daemon output onto the user's terminal, which is exactly
-    // what detach_stdio exists to prevent.
+    // Leaking these would dump background-daemon output onto the user's
+    // terminal, which is exactly what detach_stdio exists to prevent.
     assert!(
         !stdout.contains(AFTER_STDOUT),
         "post-detach stdout leaked to inherited stdout — detach_stdio did not sever fd 1\nstdout: {stdout}",

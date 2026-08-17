@@ -12,11 +12,9 @@ use super::RpcServer;
 use crate::ipc::channel::{Receiver, Sender, endpoint_from_stream};
 use crate::ipc::error::ChannelCreateError;
 
-// Direction-correct bounds: this type owns the PARENT/client side pre-split
-// (`Sender<Request>` + `Receiver<Response>`), so it needs exactly the client's
-// bounds. The child end is a raw socket with no typed obligations until it is
-// turned into a server — `into_server_and_client` adds the server-side bounds
-// on that method alone.
+// Only the client's bounds: the child end is a raw socket with no typed
+// obligations until `into_server_and_client` turns it into a server, which is
+// where the server-side bounds are added.
 pub struct RpcConnection<Request, Response>
 where
     Request: Serialize,
@@ -40,7 +38,7 @@ where
     Request: Serialize,
     Response: DeserializeOwned,
 {
-    // Manual impl (like `Daemonizer`'s) so no `Debug` bounds leak into the API.
+    // Manual impl so no `Debug` bounds leak into the API.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RpcConnection")
             .field("client_sender", &self.client_sender)
@@ -84,16 +82,11 @@ where
     Response: DeserializeOwned,
 {
     pub fn new_channel() -> Result<Self, ChannelCreateError> {
-        // One full-duplex socketpair: the parent keeps one end (split into the
-        // client's send/recv halves), the child gets the other.
         let (parent_end, child_end) =
             UnixStream::pair().map_err(ChannelCreateError::CreateSocket)?;
-        // Apple targets: set SO_NOSIGPIPE on both ends OURSELVES — std does
-        // not for socketpairs, and Apple has no MSG_NOSIGNAL to put on the
-        // writes instead. The option lives on the socket, so the daemon's
-        // inherited fd-3 end and every `try_clone` dup share it. This is what
-        // makes the dead-peer-send guarantee disposition-independent on Apple;
-        // see the SIGPIPE note on `channel_pair` in `channel/mod.rs`.
+        // Set here rather than left to std, which doesn't do it for socketpairs,
+        // and Apple has no MSG_NOSIGNAL to put on the writes instead. See the
+        // SIGPIPE note on `channel_pair` in `channel/mod.rs`.
         #[cfg(target_vendor = "apple")]
         for end in [&parent_end, &child_end] {
             set_nosigpipe(end).map_err(ChannelCreateError::CreateSocket)?;
@@ -123,11 +116,8 @@ where
         (client, OwnedFd::from(self.child_end))
     }
 
-    // The Result-of-tuple return is inherent (both endpoints, or a clone
-    // failure); a type alias for a single testutils constructor would obscure
-    // more than it clarifies. The extra bounds are the SERVER side's: this is
-    // the one method that builds both endpoints in-process, so it is the one
-    // place both directions of both types are needed.
+    // A type alias for a single testutils constructor would obscure more than
+    // it clarifies.
     #[allow(clippy::type_complexity)]
     #[cfg(any(test, feature = "testutils"))]
     pub fn into_server_and_client(
@@ -137,8 +127,6 @@ where
         Request: DeserializeOwned,
         Response: Serialize,
     {
-        // The in-process server clones the child end internally; a `dup` failure
-        // surfaces as a channel-creation error, same class as `new_channel`'s.
         let server =
             RpcServer::from_stream(self.child_end).map_err(ChannelCreateError::CreateSocket)?;
         let client = RpcClient::new(self.client_sender, self.client_receiver);

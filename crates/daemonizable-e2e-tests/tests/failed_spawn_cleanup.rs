@@ -48,8 +48,7 @@ fn assert_reaped_and_gone(pid: Pid) {
              (expected ECHILD)"
         ),
     }
-    // The reap is synchronous with the SIGKILL, so the process is already gone;
-    // poll briefly only to absorb scheduler skew on loaded CI.
+    // The process is already gone; the poll only absorbs CI scheduler skew.
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match kill(pid, None) {
@@ -120,8 +119,8 @@ fn failed_spawn_kills_and_reaps_a_live_child_on_handshake_mismatch() {
         "expected Handshake(Mismatch), got: {err:?}"
     );
 
-    // The helper wrote its pid, sent the wrong handshake, then idled — so the
-    // cleanup had a LIVE child to SIGKILL and reap.
+    // The helper idled after its wrong handshake, so the cleanup had a live
+    // child to SIGKILL and reap.
     let pid = read_helper_pid(&pid_file);
     assert_reaped_and_gone(pid);
 }
@@ -157,7 +156,7 @@ fn failed_spawn_reaps_a_child_that_died_before_the_handshake() {
         "expected Handshake(Recv(SenderClosed)), got: {err:?}"
     );
 
-    // The child exited before the handshake; the cleanup's wait() must have
+    // The child exited before the handshake, so the cleanup's wait() must have
     // reaped the resulting zombie.
     let pid = read_helper_pid(&pid_file);
     assert_reaped_and_gone(pid);
@@ -208,8 +207,8 @@ fn failed_spawn_kills_and_reaps_a_child_that_never_handshakes() {
         "expected Handshake(Recv(Timeout)), got: {err:?}"
     );
 
-    // The helper was alive and idling when the timeout fired — the cleanup
-    // must have SIGKILLed and reaped it.
+    // The helper was idling when the timeout fired, so the cleanup must have
+    // SIGKILLed and reaped it.
     let pid = read_helper_pid(&pid_file);
     assert_reaped_and_gone(pid);
 }
@@ -253,8 +252,8 @@ fn failed_spawn_group_kill_reaches_the_grandchild() {
         "expected Handshake(Mismatch), got: {err:?}"
     );
 
-    // The pid file holds the GRANDCHILD's pid (written after the second fork).
-    // The group-kill must have reached it even though it is not our direct child.
+    // The pid file holds the grandchild's pid, which the group-kill must have
+    // reached even though it is not our direct child.
     let grandchild = read_helper_pid(&pid_file);
     assert_killed_reparented(grandchild);
 }

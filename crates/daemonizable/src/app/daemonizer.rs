@@ -88,10 +88,7 @@ mod tests {
 
     struct StubApp;
 
-    // A minimal `Daemonizable` impl whose only job is to give `Daemonizer` a
-    // concrete `A` to be generic over. `StubApp` itself is none of
-    // Copy/Send/Sync-relevant — the token must be all three regardless,
-    // thanks to `PhantomData<fn() -> A>`.
+    // A minimal impl whose only job is to give `Daemonizer` a concrete `A`.
     impl Daemonizable for StubApp {
         type Request = ();
         type Response = ();

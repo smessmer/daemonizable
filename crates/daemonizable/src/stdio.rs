@@ -87,9 +87,6 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
         .map_err(DetachStdioError::OpenDevNull)?;
     let mut source = OwnedFd::from(devnull);
 
-    // If `/dev/null` opened onto one of the std fds (only reachable when that fd
-    // was already closed on entry), move it above the range first — see the
-    // relocation subtlety in the doc comment.
     if source.as_raw_fd() <= libc::STDERR_FILENO {
         let relocated = fcntl(
             source.as_fd(),
@@ -101,18 +98,15 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
         // else owns it, so adopting it into an `OwnedFd` (which closes it on
         // drop) is sound.
         let relocated = unsafe { OwnedFd::from_raw_fd(relocated) };
-        // Deliberately LEAK the old low fd (`into_raw_fd`, not drop): closing
-        // would reopen the std-fd hole for a moment, and a descriptor another
-        // thread allocates in that window would be silently clobbered by the
-        // dup2s below. Leaked, it stays parked on /dev/null until its matching
-        // dup2 replaces it in place; on a dup2 error return it stays open on
-        // /dev/null — a strictly better failure state than a closed std fd.
+        // `into_raw_fd`, not drop: closing would reopen the std-fd hole for a
+        // moment, and a descriptor another thread allocates in that window would
+        // be silently clobbered by the dup2s below. Leaked, it stays parked on
+        // /dev/null until its matching dup2 replaces it in place.
         let _ = std::mem::replace(&mut source, relocated).into_raw_fd();
     }
 
-    // Redirect stdin/stdout/stderr onto `source`. `dup2_std*` are safe wrappers
-    // around `dup2(source, 0/1/2)`; the relocation above guarantees `source > 2`,
-    // so none of these is a self-copy no-op that would fail to replace the target.
+    // The relocation above guarantees `source > 2`, so none of these is a
+    // self-copy no-op that would fail to replace its target.
     dup2_stdin(source.as_fd()).map_err(|errno| DetachStdioError::Dup2 {
         target: libc::STDIN_FILENO,
         source: errno.into(),
@@ -125,7 +119,5 @@ pub fn detach_stdio() -> Result<(), DetachStdioError> {
         target: libc::STDERR_FILENO,
         source: errno.into(),
     })?;
-    // `source` (now guaranteed > 2) drops at end of scope, closing the temp fd;
-    // the three targets keep their duplicated descriptors.
     Ok(())
 }

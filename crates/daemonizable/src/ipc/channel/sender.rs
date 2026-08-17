@@ -31,9 +31,7 @@ impl<T> std::fmt::Debug for Sender<T>
 where
     T: Serialize,
 {
-    // Manual impl (like `Daemonizer`'s) so no `T: Debug` bound leaks into the
-    // API via the `PhantomData`. The socket's own Debug shows the fd numbers,
-    // which is the useful part when debugging a daemon channel.
+    // Manual impl so no `T: Debug` bound leaks into the API via the `PhantomData`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sender")
             .field("sender", &self.sender)
@@ -93,31 +91,23 @@ where
     /// [`send_raw`](Self::send_raw): `[4-byte LE length] [payload]`, with the
     /// sender-side poison contract documented on the `poisoned` field.
     fn write_length_prefixed(&mut self, bytes: &[u8]) -> Result<(), ChannelSendError> {
-        // Poison check first: a desynchronized wire is terminal, and reporting
-        // it dominates every other outcome (even an oversized payload).
+        // Checked first: a desynchronized wire is terminal, so reporting it
+        // dominates every other outcome, even an oversized payload.
         if self.poisoned {
             return Err(ChannelSendError::Desynchronized);
         }
         if bytes.len() > MAX_MESSAGE_SIZE {
-            // Nothing was written, so the wire is still synchronized — no
-            // poison, mirroring the receiver's clean-idle-timeout rule.
+            // Deliberately unpoisoned: nothing was written, so the wire is
+            // still synchronized.
             return Err(ChannelSendError::MessageTooLarge {
                 size: bytes.len(),
                 max: MAX_MESSAGE_SIZE,
             });
         }
-        // The socket is always blocking — nothing ever switches it to
-        // non-blocking (the receiver's timeout path uses `MSG_DONTWAIT`
-        // instead of toggling the shared description's `O_NONBLOCK`; see
-        // `Receiver`). So `write_all` can't return `WouldBlock` mid-frame
-        // under backpressure — a full send blocks until the peer drains, and a
-        // broken pipe surfaces as a terminal Io error, never a fatal SIGPIPE
-        // (see the SIGPIPE note on `channel_pair` in `channel/mod.rs`).
-        //
-        // Any error from either write poisons the sender: `write_all` gives no
-        // way to observe how many bytes landed before the failure, so the wire
-        // must be assumed mid-frame — a retried send would misframe (see the
-        // `poisoned` field doc). Poisoning after a terminal EPIPE is harmless.
+        // Nothing ever switches this socket to non-blocking, so `write_all`
+        // can't return `WouldBlock` mid-frame under backpressure. Any error it
+        // does return poisons: it gives no way to observe how many bytes landed,
+        // so the wire must be assumed mid-frame.
         let len = bytes.len() as u32;
         if let Err(err) = self
             .sender

@@ -52,11 +52,6 @@ mod tests {
 
     #[test]
     fn in_process_rpc_pair_round_trips_a_request_and_response() {
-        // The one-call helper must be equivalent to
-        // `new_channel().into_server_and_client()`: a connected, usable pair.
-        // This is the entry point downstream crates use to test their own typed
-        // `Request`/`Response` against the real wire format, so a round trip
-        // through it is exactly what it has to guarantee.
         let (mut server, mut client) = in_process_rpc_pair::<u32, u32>().unwrap();
 
         client.send_request(&41).unwrap();
@@ -82,10 +77,8 @@ mod tests {
 
     #[test]
     fn recv_response_blocking_errors_when_the_daemon_drops_its_end() {
-        // Liveness: if the daemon dies, its end of the socket closes and the
-        // parent's blocking receive returns an error immediately instead of
-        // hanging. Both `dup`-clones that make up the server endpoint must close
-        // for the client to see EOF; dropping the whole `RpcServer` closes both.
+        // Both `dup`-clones of the server endpoint must close for the client to
+        // see EOF; dropping the whole `RpcServer` closes both.
         let (server, mut client) = in_process_rpc_pair::<u32, u32>().unwrap();
         drop(server); // daemon "dies": closes both clones of the server's end
 
@@ -100,10 +93,8 @@ mod tests {
 
     #[test]
     fn next_request_errors_when_the_client_drops_its_end() {
-        // Mirror liveness: when the parent drops its `RpcClient`, BOTH clones
-        // of the client's end close, so the daemon's blocking `next_request`
-        // sees EOF promptly rather than hanging. This is what lets a daemon
-        // shut its request loop down when its foreground peer exits.
+        // The mirror image: this is what lets a daemon shut its request loop
+        // down when its foreground peer exits.
         let (mut server, client) = in_process_rpc_pair::<u32, u32>().unwrap();
         drop(client); // foreground "exits": closes both clones of the client's end
 

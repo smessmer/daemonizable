@@ -187,15 +187,12 @@ mod tests {
 
     #[test]
     fn creds_match_accepts_equal_and_rejects_any_difference() {
-        // Same principal on both ends → accepted (the genuine flow: the peer is
-        // our own parent running the same image).
+        // The genuine flow: the peer is our own parent running the same image.
         assert!(creds_match((1000, 1000), (1000, 1000)).is_ok());
         assert!(creds_match((0, 0), (0, 0)).is_ok());
 
-        // A difference in EITHER half is a cross-principal channel and must be
-        // refused, with the mismatching values carried through for the message.
-        // (The live `verify_channel_peer_creds` can't reach this arm under a
-        // same-uid test harness, so this pure check is the reject-path coverage.)
+        // The live `verify_channel_peer_creds` can't reach this arm under a
+        // same-uid test harness, so this pure check is the reject-path coverage.
         let uid_only = creds_match((1001, 1000), (1000, 1000));
         assert!(matches!(
             uid_only,
@@ -207,8 +204,7 @@ mod tests {
             })
         ));
 
-        // gid-only difference (the setgid-to-a-different-gid case the gid half
-        // exists to catch) is rejected too.
+        // The setgid-to-a-different-gid case the gid half exists to catch.
         let gid_only = creds_match((1000, 1001), (1000, 1000));
         assert!(matches!(
             gid_only,
@@ -219,7 +215,6 @@ mod tests {
             })
         ));
 
-        // Both halves differing is still a single rejection.
         assert!(matches!(
             creds_match((0, 0), (1000, 1000)),
             Err(PeerCredError::CredMismatch { .. })

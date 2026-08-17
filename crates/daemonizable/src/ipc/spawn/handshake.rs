@@ -137,9 +137,8 @@ mod tests {
 
     #[test]
     fn rejects_when_daemon_closes_before_handshake() {
-        // Daemon dies (or was a non-application binary that just exited)
-        // before writing the handshake. Parent's `recv_raw_timeout` sees
-        // EOF and bails — must surface as an error rather than hang.
+        // A daemon that dies before writing the handshake — or a non-application
+        // binary that just exited.
         let (server, client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()
@@ -155,10 +154,8 @@ mod tests {
 
     #[test]
     fn rejects_when_daemon_hangs_without_sending() {
-        // Daemon (or a wrong binary like a hung `/bin/cat`) holds the channel
-        // fd open but never writes. Without a timeout the parent would hang forever;
-        // bounded `recv_raw_handshake_with_timeout` surfaces a timeout error
-        // instead. Tiny timeout so the test doesn't actually wait 10s.
+        // A wrong binary — a hung `/bin/cat`, say — holds the channel fd open but
+        // never writes. Tiny timeout so the test doesn't actually wait 10s.
         let (_server_keepalive, mut client) = RpcConnection::<Req, Resp>::new_channel()
             .unwrap()
             .into_server_and_client()

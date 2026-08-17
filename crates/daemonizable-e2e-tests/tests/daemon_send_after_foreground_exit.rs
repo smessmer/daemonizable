@@ -69,11 +69,9 @@ fn dead_peer_send_reports_broken_pipe(reset_sigpipe_to_default: bool) {
     let outcome_path = tmp.path().join("outcome");
     let pid_path = tmp.path().join("daemon.pid");
 
-    // Run the spawner (the stand-in foreground CLI): it launches the daemon
-    // and exits. `status()` reaps it, so once this returns the foreground
-    // process is gone — though the daemon does not rely on that ordering; it
-    // detects the death itself via its reparenting. The daemon inherits the
-    // DAEMONIZABLE_TEST_* variables through the spawner's environment.
+    // `status()` reaps the spawner, so once this returns the stand-in foreground
+    // process is gone — though the daemon doesn't rely on that ordering, detecting
+    // the death itself via its reparenting.
     let mut cmd = Command::new(spawner_exe());
     cmd.env("DAEMONIZABLE_TEST_DAEMON_EXE", background_exe())
         .env("DAEMONIZABLE_TEST_BEHAVIOR", "send_after_parent_exit")
@@ -88,15 +86,12 @@ fn dead_peer_send_reports_broken_pipe(reset_sigpipe_to_default: bool) {
         "spawner process did not exit cleanly: {status:?}",
     );
 
-    // The daemon writes its pid on startup; discover it so cleanup can kill
-    // the daemon if an assertion below fails before it exits on its own.
     let daemon_pid = read_pid_file(&pid_path, Duration::from_secs(5));
     let _guard = DaemonGuard(daemon_pid);
 
-    // Wait for the daemon to publish its verdict. The rename-based publish
-    // makes existence sufficient: once the file is there, it is complete.
-    // 10s is a failure ceiling, not a synchronization point — the daemon
-    // publishes as soon as it has observed the spawner's death.
+    // The rename-based publish makes existence sufficient: once the file is
+    // there, it is complete. 10s is a failure ceiling, not a synchronization
+    // point — the daemon publishes as soon as it observes the spawner's death.
     let outcome_deadline = Instant::now() + Duration::from_secs(10);
     while !outcome_path.exists() {
         assert!(
@@ -110,7 +105,4 @@ fn dead_peer_send_reports_broken_pipe(reset_sigpipe_to_default: bool) {
         outcome, "send:broken_pipe",
         "daemon's send_response after the foreground exited did not fail with BrokenPipe",
     );
-
-    // Cleanup happens via DaemonGuard's Drop (normally a no-op: the daemon
-    // exits by itself right after publishing the outcome).
 }

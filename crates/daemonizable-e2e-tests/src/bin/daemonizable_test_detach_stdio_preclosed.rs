@@ -37,27 +37,20 @@ fn main() {
         _ => std::process::exit(2),
     };
 
-    // The device identity of `/dev/null`, read before we disturb any std fd.
-    // Each fd's `st_rdev` is compared against this so "open" specifically means
-    // "reopened onto /dev/null", not merely "some character device" (an
-    // inherited terminal is also a char device). Probed at runtime rather than
-    // hard-coded, since the (major, minor) of /dev/null differs across OSes.
+    // Read before any std fd is disturbed. Probed rather than hard-coded, since
+    // the (major, minor) of /dev/null differs across OSes.
     let Some(devnull_rdev) = devnull_rdev() else {
         std::process::exit(6);
     };
 
     // `open` returns the lowest-numbered *closed* fd, so `/dev/null` only lands
     // on `to_close` inside `detach_stdio` if every lower std fd is already open.
-    // Normalize that here, independent of whatever stdio the harness inherited,
-    // so each iteration truly exercises its intended loop position.
     for fd in 0..to_close {
         if !ensure_open(fd) {
             std::process::exit(6);
         }
     }
 
-    // Pre-close the chosen std fd, so `/dev/null` will reopen onto that low
-    // number inside `detach_stdio`.
     // SAFETY: `close` takes a bare fd int; a bad fd is EBADF, not UB. `to_close`
     // is a std fd (0/1/2, per the `0..=2` match above) held as a raw number, not
     // owned by any `OwnedFd`/`File`, so closing it sets up no double-close, and
@@ -75,9 +68,8 @@ fn main() {
         std::process::exit(3);
     }
 
-    // After detaching, all three std fds must be open and point at /dev/null.
-    // A closed fd (fstat → EBADF) is the bug; a live fd with a different
-    // identity means detach redirected it somewhere other than /dev/null.
+    // A closed fd (fstat → EBADF) is the bug; a live fd with a different identity
+    // means detach redirected it somewhere other than /dev/null.
     for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
         // SAFETY: `libc::stat` is a `repr(C)` struct of only integer fields (no
         // references/NonZero/bool/enums), so an all-zero bit pattern is a valid,
@@ -85,7 +77,6 @@ fn main() {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
         // SAFETY: `fstat` reads into a valid out-param; a closed fd is EBADF.
         if unsafe { libc::fstat(fd, &mut st) } < 0 {
-            // Not open — detach left it closed.
             std::process::exit(4);
         }
         if st.st_mode & libc::S_IFMT != libc::S_IFCHR || st.st_rdev != devnull_rdev {
@@ -101,13 +92,9 @@ fn main() {
 /// the std fds the rest of the helper manages.
 fn devnull_rdev() -> Option<libc::dev_t> {
     let devnull = std::fs::File::open("/dev/null").ok()?;
-    // Safe fstat via std — `metadata()` stats the live `File`. (The raw-libc
-    // `fstat` in `main` cannot be replaced the same way: it probes possibly
-    // *closed* fd numbers, which no safe `AsFd`-based API may wrap.)
     let meta = devnull.metadata().ok()?;
-    // `MetadataExt::rdev` widens `st_rdev` to `u64`; cast back to the
-    // platform's `dev_t` (a lossless round-trip of the kernel value) so the
-    // comparison against the raw `libc::stat` in `main` stays exact.
+    // `MetadataExt::rdev` widens `st_rdev` to `u64`; cast back so the comparison
+    // against the raw `libc::stat` in `main` stays exact.
     Some(meta.rdev() as libc::dev_t)
 }
 
@@ -120,7 +107,6 @@ fn ensure_open(fd: i32) -> bool {
     if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
         return true; // already open
     }
-    // Closed — open /dev/null and move it onto `fd` if it didn't land there.
     // SAFETY: `open` takes a valid NUL-terminated path (a C string literal
     // that outlives the call) and creates a fresh descriptor; it reads no
     // other memory.

@@ -98,9 +98,8 @@ fn assert_n_isolated_daemons(result: &str, n: usize) {
             "duplicate daemon idx {idx}:\n{result}"
         );
 
-        // Isolation: the value this client got back must be *its* daemon's
-        // echo (sent value + 1), not another daemon's. A crossed pair of
-        // channels would surface here as a mismatched fingerprint.
+        // A crossed pair of channels would surface here as a mismatched
+        // fingerprint.
         let got: i32 = rec["got"].parse().expect("got is not an integer");
         let expected = 100 * (idx as i32 + 1) + 1;
         assert_eq!(
@@ -108,10 +107,6 @@ fn assert_n_isolated_daemons(result: &str, n: usize) {
             "daemon {idx} returned the wrong fingerprint — channels crossed?\n{result}"
         );
 
-        // The framework put every daemon at cwd `/`, and no framework env
-        // var exists in any daemon's environment (stage identity rides the
-        // in-band channel token; nothing is ever set in argv or the
-        // environment) — same as the single-daemon case.
         assert_eq!(rec["cwd"], "/", "daemon {idx} cwd is not /:\n{result}");
         assert_eq!(
             rec["marker"], "removed",
@@ -124,9 +119,8 @@ fn assert_n_isolated_daemons(result: &str, n: usize) {
             pid > 0 && sid > 0,
             "daemon {idx} reported bogus ids:\n{result}"
         );
-        // Grandchild, not a session leader: its sid is the (dead) intermediate's
-        // pid, so sid != its own pid. This is what pins the framework's second
-        // fork, per daemon.
+        // sid is the (dead) intermediate's pid, so sid != pid. This is what
+        // pins the framework's second fork, per daemon.
         assert_ne!(
             sid, pid,
             "daemon {idx} is a session leader (sid == pid) — second fork missing:\n{result}"
@@ -145,8 +139,7 @@ fn assert_n_isolated_daemons(result: &str, n: usize) {
 
 #[test]
 fn foreground_spawns_many_daemons_sequentially_each_isolated() {
-    // Three daemons, all brought up before any round-trip, so all three are
-    // live simultaneously while each answers only its own client.
+    // All brought up before any round-trip, so all three are live at once.
     const N: usize = 3;
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
@@ -158,20 +151,16 @@ fn foreground_spawns_many_daemons_sequentially_each_isolated() {
     assert_n_isolated_daemons(&result, N);
 }
 
-// Concurrent `spawn_daemon` from several threads is race-free only on targets
-// with `SOCK_CLOEXEC`; on macOS/iOS the documented spawn-time race (see the
-// CLOEXEC discussion in the library's channel module) can leak one thread's
-// channel ends into another thread's daemon, defeating EOF liveness and
-// hanging this test's `Command::output()`. That is exactly the case the
-// library's caller contract says to avoid, so the concurrent path is only
-// exercised on the SOCK_CLOEXEC platforms; the serial `--spawn-many` /
-// `--spawn-interleaved` tests cover macOS.
+// Concurrent `spawn_daemon` is race-free only on targets with `SOCK_CLOEXEC`.
+// On macOS/iOS the documented spawn-time race can leak one thread's channel ends
+// into another thread's daemon, hanging this test's `Command::output()` — the
+// very case the library's caller contract says to avoid. macOS is covered by the
+// serial `--spawn-many` / `--spawn-interleaved` tests instead.
 #[cfg(not(any(target_os = "macos", target_os = "ios")))]
 #[test]
 fn foreground_spawns_many_daemons_concurrently_from_threads() {
-    // Five threads enter `spawn_daemon` together (a Barrier in the helper), the
-    // advertised concurrent use of the Copy+Send+Sync Daemonizer. All five must
-    // come up as distinct, correctly-answering daemons.
+    // Five threads enter `spawn_daemon` together, held at a Barrier in the
+    // helper — the advertised concurrent use of the Copy+Send+Sync Daemonizer.
     const N: usize = 5;
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
@@ -185,9 +174,6 @@ fn foreground_spawns_many_daemons_concurrently_from_threads() {
 
 #[test]
 fn two_live_daemons_do_not_cross_talk() {
-    // Two daemons kept live at once, with interleaved requests across two
-    // rounds. Proves each client's channel stays bound to its own daemon and
-    // never receives the other's responses.
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
 
@@ -209,16 +195,14 @@ fn two_live_daemons_do_not_cross_talk() {
     let a = by_tag.get("A").expect("no record for daemon A");
     let b = by_tag.get("B").expect("no record for daemon B");
 
-    // Correct routing across both rounds: A was sent 100 then 300, B was sent
-    // 200 then 400; each echoes its own value + 1. A crossed pair of channels
-    // would swap these numbers.
+    // A was sent 100 then 300, B 200 then 400; each echoes its own value + 1,
+    // so a crossed pair of channels would swap these numbers.
     assert_eq!(a["got1"], "101", "A round 1 wrong — cross-talk?\n{result}");
     assert_eq!(a["got2"], "301", "A round 2 wrong — cross-talk?\n{result}");
     assert_eq!(b["got1"], "201", "B round 1 wrong — cross-talk?\n{result}");
     assert_eq!(b["got2"], "401", "B round 2 wrong — cross-talk?\n{result}");
 
-    // Each channel stayed bound to the *same* daemon process across both
-    // rounds (its pid didn't change between requests).
+    // Each channel stayed bound to the same daemon process across both rounds.
     assert_eq!(
         a["pid1"], a["pid2"],
         "channel A jumped to a different daemon between rounds:\n{result}"

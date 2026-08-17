@@ -32,8 +32,7 @@ pub use inherited::rpc_server_from_inherited_fd;
 pub(crate) use peercred::verify_channel_peer_creds;
 pub(crate) use process::{daemon_exe_path, spawn_daemon_process};
 pub(crate) use token::{StageDispatch, channel_has_stage2_token, dispatch_from_channel};
-// Test-only spawn helpers: gated so they don't ship in the default published
-// surface (their crate-root re-exports in `lib.rs` are `testutils`-gated too).
+// Test-only spawn helpers, gated so they don't ship in the published surface.
 #[cfg(any(test, feature = "testutils"))]
 pub use process::{
     spawn_daemon_process_with_exe, spawn_daemon_process_with_exe_and_timeout,

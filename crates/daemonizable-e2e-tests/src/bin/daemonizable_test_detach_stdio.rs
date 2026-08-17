@@ -25,10 +25,9 @@ const AFTER_STDOUT: &str = "detach-test: AFTER-DETACH-STDOUT";
 const AFTER_STDERR: &str = "detach-test: AFTER-DETACH-STDERR";
 
 fn main() {
-    // Pre-detach logging on the inherited stdio. Flush so the bytes reach the
-    // captured pipe *before* `detach_stdio`'s `dup2` closes this end of it —
-    // exactly the ordering a real daemon relies on when it logs startup
-    // progress and only then detaches.
+    // Flushed so the bytes reach the captured pipe before `detach_stdio`'s
+    // `dup2` closes this end of it — the ordering a real daemon relies on when
+    // it logs startup progress and only then detaches.
     let mut stdout = std::io::stdout();
     let mut stderr = std::io::stderr();
     writeln!(stdout, "{BEFORE_STDOUT}").expect("write BEFORE_STDOUT");
@@ -37,16 +36,14 @@ fn main() {
     stderr.flush().expect("flush stderr before detach");
 
     if let Err(err) = daemonizable::detach_stdio() {
-        // This still lands on the captured stderr (detach hasn't taken effect),
-        // so the test sees a diagnostic rather than a bare non-zero exit.
+        // Detach hasn't taken effect, so this still lands on the captured stderr.
         let _ = writeln!(stderr, "detach-test: detach_stdio failed: {err}");
         let _ = stderr.flush();
         std::process::exit(3);
     }
 
-    // Post-detach logging. fds 1/2 now point at `/dev/null`, so these writes
-    // (and the flushes that force them out of the userspace buffer to the fd)
-    // must go nowhere the test can observe.
+    // fds 1/2 now point at `/dev/null`, so these writes — and the flushes that
+    // force them out of the userspace buffer — must go nowhere the test can see.
     writeln!(stdout, "{AFTER_STDOUT}").expect("write AFTER_STDOUT");
     writeln!(stderr, "{AFTER_STDERR}").expect("write AFTER_STDERR");
     stdout.flush().expect("flush stdout after detach");

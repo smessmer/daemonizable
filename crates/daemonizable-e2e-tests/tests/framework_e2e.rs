@@ -39,12 +39,9 @@ fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    // "parent-got:43" proves the whole chain worked: the parent re-exec'd
-    // itself, the daemon passed the build-id handshake, and the typed echo+1
-    // RPC round-tripped through `run_daemon`. "cwd:/" pins the framework
-    // chdir; "marker:removed" pins that no framework env var exists in the
-    // daemon's environment; "argv1:empty" pins that the daemon receives no
-    // arguments (see the `TestResponse` field docs in the test app).
+    // "parent-got:43" proves the whole chain worked: re-exec, build-id
+    // handshake, and a typed echo+1 round-trip through `run_daemon`. The
+    // `TestResponse` field docs in the test app say what the rest pin.
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
     let fields = parse_outfile(&result);
     assert_eq!(fields["parent-got"], "43", "outfile: {result}");
@@ -52,30 +49,25 @@ fn daemonize_dispatch_does_full_spawn_handshake_and_rpc_roundtrip() {
     assert_eq!(fields["marker"], "removed", "outfile: {result}");
     assert_eq!(fields["argv1"], "empty", "outfile: {result}");
 
-    // Session assertions — the payoff of the framework's `setsid` + second fork.
     let daemon_sid: i32 = fields["sid"].parse().expect("sid not an int");
     let daemon_pid: i32 = fields["pid"].parse().expect("pid not an int");
-    // `getsid(None)` queries this process's own session id, which cannot fail.
     let test_sid = nix::unistd::getsid(None)
         .expect("getsid for the calling process")
         .as_raw();
     assert!(daemon_sid > 0, "daemon reported a bogus sid: {daemon_sid}");
-    // setsid took effect: the daemon is in its own session, not the test's
-    // (the test-app parent shares this test's session; the daemon left it).
+    // The test-app parent shares this test's session; the daemon left it.
     assert_ne!(
         daemon_sid, test_sid,
         "daemon shares the test's session — framework setsid did not take effect",
     );
-    // The daemon is NOT a session leader: its sid is the (dead) intermediate's
-    // pid, so sid != its own pid. Under a single fork the daemon WOULD be the
-    // leader (sid == pid), so this is the assertion that pins the second fork.
+    // Under a single fork the daemon would be the session leader (sid == pid),
+    // so this is the assertion that pins the second fork.
     assert_ne!(
         daemon_sid, daemon_pid,
         "daemon is a session leader (sid == pid) — the second fork did not happen",
     );
 
-    // The successful spawn left no zombie: `spawn_daemon` reaped the
-    // intermediate (Linux-only scan; 0 elsewhere — see the test app).
+    // Linux-only scan; 0 elsewhere — see the test app.
     assert_eq!(
         fields["zombies"], "0",
         "spawn_daemon left a zombie intermediate: {result}",
@@ -125,12 +117,10 @@ fn assert_former_sentinel_is_foreground(arg: &str) {
         .expect("failed to spawn daemonizable-test-app");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Reached the app's own foreground argument parser...
     assert!(
         stderr.contains(&format!("unknown argument: {arg}")),
         "expected the foreground arg parser to reject {arg:?}, got stderr: {stderr}"
     );
-    // ...and did NOT go down any daemon-stage arm.
     assert!(
         !stderr.contains("internal to this binary"),
         "the {arg} argument was routed to a daemon stage; it must be inert as a \
@@ -140,8 +130,7 @@ fn assert_former_sentinel_is_foreground(arg: &str) {
 
 #[test]
 fn former_stage1_sentinel_is_an_ordinary_argument() {
-    // Regression pin: the argv sentinels of older releases must stay inert as
-    // dispatch signals.
+    // The argv sentinels of older releases must stay inert as dispatch signals.
     assert_former_sentinel_is_foreground("__daemonizable-stage1");
 }
 
@@ -152,10 +141,9 @@ fn former_stage2_sentinel_is_an_ordinary_argument() {
 
 #[test]
 fn legacy_env_marker_is_ignored() {
-    // Regression pin: the env var older releases dispatched on must be
-    // completely inert — an app whose environment happens to carry it (stale
-    // wrapper scripts, supervisor units) runs its normal foreground code
-    // instead of being hijacked into a daemon arm.
+    // An app whose environment happens to carry the env var older releases
+    // dispatched on — from a stale wrapper script or supervisor unit — must run
+    // its normal foreground code rather than be hijacked into a daemon arm.
     let tmpdir = tempfile::tempdir().unwrap();
     let outfile = tmpdir.path().join("result.txt");
 

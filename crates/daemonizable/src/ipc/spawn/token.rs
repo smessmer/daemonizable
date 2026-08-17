@@ -41,18 +41,15 @@ pub(crate) enum StageDispatch {
 /// (`< TOKEN_LEN` bytes, so not a full token yet) do too.
 fn classify(peeked: Result<&[u8], Errno>) -> StageDispatch {
     let Ok(bytes) = peeked else {
-        // Any errno at all → not a routable channel.
         return StageDispatch::Foreground;
     };
-    // Need a whole token; a short read (including 0 == peer closed) is not one.
     if bytes.len() < TOKEN_LEN || bytes[..TOKEN_MAGIC.len()] != TOKEN_MAGIC {
         return StageDispatch::Foreground;
     }
     match bytes[TOKEN_MAGIC.len()] {
         TOKEN_STAGE1 => StageDispatch::DaemonStage1,
         TOKEN_STAGE2 => StageDispatch::DaemonStage2,
-        // Right magic, unknown stage tag: a future/garbage token → Foreground,
-        // consume nothing (the boring, safe choice).
+        // A future or garbage token: consume nothing, the boring safe choice.
         _ => StageDispatch::Foreground,
     }
 }
@@ -104,9 +101,6 @@ pub(crate) fn dispatch_from_channel() -> StageDispatch {
         decision,
         StageDispatch::DaemonStage1 | StageDispatch::DaemonStage2
     ) {
-        // The peek proved TOKEN_LEN bytes are queued and we are the only reader
-        // of fd 3 at this point (dispatch runs before any app code), so this
-        // non-blocking consume removes exactly the token.
         consume_token();
     }
     decision
@@ -126,11 +120,11 @@ fn consume_token() {
             &mut scratch[consumed..],
             MsgFlags::MSG_DONTWAIT,
         ) {
-            Ok(0) => return, // peer closed mid-token (shouldn't happen post-peek); stop
+            Ok(0) => return, // peer closed mid-token; shouldn't happen post-peek
             Ok(n) => consumed += n,
             Err(Errno::EINTR) => continue,
-            // EAGAIN can't occur (peek saw the bytes, we're the sole reader); any
-            // other error means a broken channel the stage will fail on anyway.
+            // EAGAIN can't occur (the peek saw the bytes and we're the sole
+            // reader); anything else is a channel the stage will fail on anyway.
             Err(_) => return,
         }
     }
@@ -157,7 +151,7 @@ mod tests {
 
     #[test]
     fn classify_decision_table() {
-        // Errors of every stripe → Foreground (catch-all, not an allowlist).
+        // Every errno → Foreground: this is a catch-all, not an allowlist.
         for errno in [
             Errno::EAGAIN,
             Errno::EINVAL,   // Linux AF_UNIX listening socket
@@ -174,8 +168,7 @@ mod tests {
             );
         }
 
-        // Peer closed / nothing queued (ret == 0) and short reads → Foreground,
-        // no full token yet.
+        // Peer closed / nothing queued, and short reads → Foreground.
         assert_eq!(classify(Ok(&[])), StageDispatch::Foreground);
         assert_eq!(classify(Ok(&[TOKEN_MAGIC[0]])), StageDispatch::Foreground);
         assert_eq!(
@@ -207,9 +200,7 @@ mod tests {
             );
         }
 
-        // A valid token followed by trailing bytes still classifies (the peek
-        // buffer is TOKEN_LEN, so extra queued bytes aren't even peeked, but a
-        // classifier fed a longer slice must key only on the first token).
+        // A classifier fed a longer slice must key only on the first token.
         let mut trailing = magic_with(TOKEN_STAGE1);
         trailing.extend_from_slice(b"more data");
         assert_eq!(classify(Ok(&trailing)), StageDispatch::DaemonStage1);

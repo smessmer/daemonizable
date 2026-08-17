@@ -42,8 +42,7 @@ impl<T> std::fmt::Debug for Receiver<T>
 where
     T: DeserializeOwned,
 {
-    // Manual impl (like `Daemonizer`'s) so no `T: Debug` bound leaks into the
-    // API via the `PhantomData`. `poisoned` is the key diagnostic state.
+    // Manual impl so no `T: Debug` bound leaks into the API via the `PhantomData`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Receiver")
             .field("recver", &self.recver)
@@ -74,8 +73,8 @@ where
 
     pub fn recv(&mut self) -> Result<T, ChannelRecvError> {
         let buf = self.read_frame(ReadMode::Blocking)?;
-        // A decode failure here does NOT poison: the whole frame was read off
-        // the wire correctly, so the stream is still synchronized.
+        // Deliberately not poisoning on a decode failure: the whole frame came
+        // off the wire correctly, so the stream is still synchronized.
         Ok(postcard::from_bytes(&buf)?)
     }
 
@@ -108,11 +107,9 @@ where
     /// than panicking on deadline overflow; for a genuinely unbounded wait, use
     /// the blocking [`recv`](Self::recv) instead.
     //
-    // No `T: Send` here: the timeout machinery is a same-thread poll +
-    // `recv(MSG_DONTWAIT)` loop (`read_exact_with_timeout`); nothing crosses a
-    // thread boundary, so the bound would be pure API noise that cascades into
-    // `Daemonizable::Response` — don't add it back without something that
-    // actually moves `T` between threads.
+    // No `T: Send`: the timeout machinery is a same-thread poll + recv loop, so
+    // the bound would be API noise cascading into `Daemonizable::Response`. Don't
+    // add it back without something that actually moves `T` between threads.
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<T, ChannelRecvError> {
         let buf = self.recv_raw_timeout(timeout)?;
         Ok(postcard::from_bytes(&buf)?)
@@ -127,11 +124,6 @@ where
             return Err(ChannelRecvError::Desynchronized);
         }
 
-        // Length prefix. A failure that provably consumed 0 bytes (an idle
-        // timeout, or an errno before anything was read) leaves the wire
-        // coherent and must not poison; one after a partial prefix — or with
-        // unknown consumption, as on the blocking path — leaves it possibly
-        // mid-frame and must, Timeout and Io alike (see `poison_after`).
         let mut len_bytes = [0u8; 4];
         if let Err(failure) = mode.read_exact_from(&mut self.recver, &mut len_bytes) {
             if poison_after(&failure.err, failure.consumed) {
@@ -143,7 +135,7 @@ where
         let len = u32::from_le_bytes(len_bytes) as usize;
         if len > MAX_MESSAGE_SIZE {
             // The prefix is consumed but the declared payload is still on the
-            // wire; a later read would misframe it. Poison.
+            // wire, so a later read would misframe it.
             self.poisoned = true;
             return Err(ChannelRecvError::MessageTooLarge {
                 size: len,
@@ -151,10 +143,8 @@ where
             });
         }
 
-        // Payload. The prefix was fully consumed, so ANY failure here is
-        // mid-frame; the prefix bytes are counted into the consumed total so
-        // even a zero-progress payload error poisons (only EOF is exempt —
-        // terminal on its own).
+        // The prefix bytes are folded into the consumed total, so even a
+        // zero-progress payload read counts as mid-frame.
         let mut buf = vec![0u8; len];
         if let Err(failure) = mode.read_exact_from(&mut self.recver, &mut buf) {
             if poison_after(&failure.err, failure.consumed.plus(len_bytes.len())) {
@@ -276,9 +266,7 @@ fn deadline_from(timeout: Duration) -> Instant {
     let now = Instant::now();
     now.checked_add(timeout)
         .or_else(|| now.checked_add(MAX_DEADLINE_FROM_NOW))
-        // `now + MAX_DEADLINE_FROM_NOW` can't overflow in practice; the final
-        // `unwrap_or(now)` (an immediate deadline) keeps this total and
-        // panic-free even if some exotic platform disagreed.
+        // Unreachable in practice; keeps this total on an exotic platform.
         .unwrap_or(now)
 }
 
@@ -313,10 +301,9 @@ fn read_exact_with_timeout(
     timeout_at: Instant,
     bytes_read: &mut usize,
 ) -> Result<(), ChannelRecvError> {
-    // `PollTimeout` holds milliseconds in a `u16`, so a single `poll` call can
-    // wait at most ~65.5s; the impl loops across windows up to the real
-    // deadline. `u16::MAX` is the production window; tests pass a small one to
-    // drive the multi-window path without a 65s wait.
+    // `PollTimeout` holds milliseconds in a `u16`, so a single `poll` waits at
+    // most ~65.5s and the impl loops across windows up to the real deadline.
+    // Tests pass a small window to drive that path without a 65s wait.
     read_exact_with_timeout_impl(fd, buf, timeout_at, u16::MAX, bytes_read)
 }
 
@@ -329,11 +316,9 @@ fn read_exact_with_timeout_impl(
 ) -> Result<(), ChannelRecvError> {
     *bytes_read = 0;
     while *bytes_read < buf.len() {
-        // Read without blocking first. `MSG_DONTWAIT` makes this recv
-        // non-blocking regardless of the socket's (blocking) mode. Reading
-        // before polling means data already waiting is consumed even when the
-        // deadline has already passed (e.g. a `Duration::ZERO` timeout with a
-        // ready frame).
+        // Reading before polling means already-waiting data is consumed even
+        // when the deadline has passed — e.g. a `Duration::ZERO` timeout with a
+        // ready frame.
         match recv(
             fd.as_raw_fd(),
             &mut buf[*bytes_read..],
@@ -352,22 +337,15 @@ fn read_exact_with_timeout_impl(
             Err(e) => return Err(ChannelRecvError::Io(std::io::Error::from(e))),
         }
 
-        // Not ready: wait for readiness using poll() instead of busy-waiting.
         let remaining = timeout_at.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(ChannelRecvError::Timeout);
         }
         let poll_fd = PollFd::new(fd, PollFlags::POLLIN);
-        // Cap each poll wait at `max_poll_window_ms`. When `remaining` exceeds
-        // that window a single `poll` expires before the real deadline — so on
-        // expiry we loop back (retry the recv, then re-check the real deadline)
-        // rather than erroring, which would cut any timeout longer than one
-        // window short. `remaining` is > 0 here (the `is_zero()` guard above),
-        // but `as_millis()` truncates a sub-millisecond remainder to 0, and
-        // `poll(0)` returns immediately — which would busy-spin recv/poll for
-        // the final fraction of a millisecond. Floor the window at 1ms so the
-        // poll actually blocks for that remainder instead of spinning; a timeout
-        // is a lower bound, so returning up to ~1ms late is fine.
+        // Floored at 1ms because `as_millis()` truncates a sub-millisecond
+        // remainder to 0 and `poll(0)` returns immediately, busy-spinning
+        // recv/poll for that last fraction. A timeout is a lower bound, so
+        // returning up to ~1ms late is fine.
         let timeout_ms: u16 = remaining
             .as_millis()
             .try_into()
@@ -386,12 +364,8 @@ fn read_exact_with_timeout_impl(
 mod tests {
     use super::*;
 
-    // The poison rule as a decision table: any failure after partial (or
-    // unknown, possibly partial) consumption poisons, except EOF (terminal on
-    // its own); provably-zero-consumption failures never poison (clean idle
-    // timeout, pre-read errno). This pins the rule for the error variants
-    // fault injection can't easily produce on a real socketpair (mid-frame
-    // `Io`).
+    // Pins the rule for error variants fault injection can't easily produce on
+    // a real socketpair, such as a mid-frame `Io`.
     #[test]
     fn poison_after_decision_table() {
         use Consumed::{Exactly, Unknown};
@@ -400,22 +374,17 @@ mod tests {
         assert!(!poison_after(&ChannelRecvError::Timeout, Exactly(0)));
         assert!(!poison_after(&io(), Exactly(0)));
         assert!(!poison_after(&ChannelRecvError::SenderClosed, Exactly(0)));
-        // Partial consumption → poison for Timeout and Io alike...
+        // Partial consumption → poison...
         assert!(poison_after(&ChannelRecvError::Timeout, Exactly(1)));
         assert!(poison_after(&io(), Exactly(3)));
         assert!(poison_after(&ChannelRecvError::Timeout, Exactly(4)));
         // ...but not for EOF, which is terminal without the flag.
         assert!(!poison_after(&ChannelRecvError::SenderClosed, Exactly(3)));
-        // Unknown consumption (blocking `read_exact` doesn't report it) is
-        // conservatively treated as possibly mid-frame: poison, except EOF.
+        // Unknown consumption is conservatively treated as possibly mid-frame.
         assert!(poison_after(&io(), Unknown));
         assert!(!poison_after(&ChannelRecvError::SenderClosed, Unknown));
     }
 
-    // `plus` folds bytes consumed earlier in the frame into the count — a
-    // zero-progress payload read after the 4-byte prefix is still mid-frame
-    // (`Exactly(0).plus(4)` must poison, per the table above) — and `Unknown`
-    // is absorbing.
     #[test]
     fn consumed_plus_folds_prior_bytes_and_preserves_unknown() {
         assert_eq!(Consumed::Exactly(0).plus(4), Consumed::Exactly(4));
@@ -423,12 +392,8 @@ mod tests {
         assert_eq!(Consumed::Unknown.plus(4), Consumed::Unknown);
     }
 
-    // Regression test for the deadline-overflow guard: `Instant::now() + timeout`
-    // panics when `timeout` is large enough to overflow `Instant` (e.g.
-    // `Duration::MAX`, a plausible "wait a long time" stand-in). `deadline_from`
-    // must clamp instead of panicking. Data is already available, so the receive
-    // returns immediately after computing the (clamped) deadline — exercising the
-    // previously-panicking line without actually waiting.
+    // Data is already available, so the receive returns immediately after
+    // computing the clamped deadline instead of waiting it out.
     #[test]
     fn recv_timeout_with_overflowing_duration_does_not_panic() {
         let (mut sender, mut recver) = crate::ipc::channel::channel_pair::<u32>().unwrap();
@@ -440,9 +405,6 @@ mod tests {
         );
     }
 
-    // `deadline_from` is total and never panics, even on `Duration::MAX`, and a
-    // clamped deadline is still in the future (so it doesn't spuriously time out
-    // immediately).
     #[test]
     fn deadline_from_clamps_instead_of_overflowing() {
         let before = Instant::now();
@@ -451,23 +413,16 @@ mod tests {
             clamped > before,
             "a clamped deadline must still be in the future"
         );
-        // A normal timeout is unaffected: the deadline is ~`timeout` out.
         let normal = deadline_from(Duration::from_secs(1));
         assert!(normal > Instant::now());
     }
 
-    // Regression test for the poll-window clamp: a read whose deadline is longer
-    // than a single poll window must not be cut short when the window expires
-    // (a poll-window expiry must loop, not error out as a timeout). Driven with
-    // a tiny window so we don't need a 65s wait; the production path uses
-    // u16::MAX.
     #[test]
     fn read_exact_with_timeout_receives_data_spanning_multiple_poll_windows() {
         use std::io::Write;
         use std::thread;
 
-        // Drive the poll loop against a raw socketpair so we can write unframed
-        // bytes directly (the typed `Sender::send` would length-prefix them).
+        // Raw, so the bytes go out unframed — `Sender::send` would length-prefix.
         let (mut raw_sender, raw_recver) = UnixStream::pair().unwrap();
 
         let writer = thread::spawn(move || {
@@ -491,9 +446,8 @@ mod tests {
         drop(writer.join().unwrap());
     }
 
-    // The wait must run until the *real* deadline, not stop after one poll
-    // window. No data ever arrives; an implementation that treated a poll-window
-    // expiry as the deadline would return after ~20ms instead of ~120ms.
+    // An implementation that treated a poll-window expiry as the deadline would
+    // return after ~20ms instead of ~120ms.
     #[test]
     fn read_exact_with_timeout_waits_full_deadline_not_one_poll_window() {
         let (sender, recver) = UnixStream::pair().unwrap();

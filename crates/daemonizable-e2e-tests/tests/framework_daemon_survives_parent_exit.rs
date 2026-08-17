@@ -32,13 +32,10 @@ fn framework_daemon_survives_parent_exit() {
     let outfile = tmp.path().join("result.txt");
     let sentinel_path = tmp.path().join("sentinel");
 
-    // Run the foreground CLI: it spawns the daemon through the full framework
-    // path, does one RPC round-trip, writes the outfile, and exits.
-    // `output()` reaps it AND waits for EOF on its captured stdout/stderr —
-    // which the daemon's inherited pipe copies hold open until its
-    // sentinel-mode `detach_stdio`. Returning from this call therefore
-    // already proves the daemon released the parent's stdio; a daemon that
-    // failed to detach would hang the test here, not pass it.
+    // `output()` reaps the CLI and waits for EOF on its captured stdout/stderr,
+    // which the daemon's inherited pipe copies hold open until its sentinel-mode
+    // `detach_stdio`. Returning here therefore already proves the daemon released
+    // the parent's stdio; one that failed to detach would hang the test.
     let output = Command::new(env!("CARGO_BIN_EXE_daemonizable-test-app"))
         .args(["--daemonize", "--outfile"])
         .arg(&outfile)
@@ -53,24 +50,17 @@ fn framework_daemon_survives_parent_exit() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    // The foreground process is gone (reaped by `output()` above). Everything
-    // it learned before exiting is in the outfile; `parent-got:43` confirms
-    // the round-trip really went through the daemon (spawn + handshake + RPC),
-    // so the pid below is the daemon's own report, not a stale file.
+    // `parent-got:43` confirms the round-trip really went through the daemon, so
+    // the pid below is the daemon's own report, not a stale file.
     let result = std::fs::read_to_string(&outfile).expect("outfile was not written");
     let fields = parse_outfile(&result);
     assert_eq!(fields["parent-got"], "43", "outfile: {result}");
     let daemon_pid = Pid::from_raw(fields["pid"].parse().expect("pid not an int"));
-    // Installed *before* any assertion below, so the daemon gets killed even
-    // if a check panics.
+    // Before any assertion below, so the daemon is killed even if a check panics.
     let _guard = DaemonGuard(daemon_pid);
 
-    // Session checks, live against the SURVIVING daemon rather than trusting
-    // the sid it self-reported while the parent still ran. Its session
-    // differs from the test's (the framework `setsid` took effect — without
-    // it the daemon would die on SIGHUP when the launching terminal closes)
-    // and from its own pid (it is not a session leader — the second fork
-    // happened).
+    // Live against the surviving daemon, rather than trusting the sid it
+    // self-reported while the parent still ran.
     let daemon_sid = getsid(Some(daemon_pid)).expect("getsid(daemon)");
     let test_sid = getsid(None).expect("getsid(test)");
     assert_ne!(
@@ -82,11 +72,8 @@ fn framework_daemon_survives_parent_exit() {
         "daemon is a session leader (sid == pid) — the second fork did not happen",
     );
 
-    // The daemon must keep working now that the foreground process is gone.
-    // Wait for the sentinel to appear, then poll until its contents change.
-    // The daemon writes every 50 ms, so observing a change normally takes
-    // <100 ms; 5 s is a generous ceiling that fails fast if the daemon has
-    // actually stopped.
+    // The daemon writes every 50 ms, so a change normally shows up in <100 ms;
+    // 5 s is a ceiling that fails fast if it has actually stopped.
     let sentinel_appear_deadline = Instant::now() + Duration::from_secs(5);
     while !sentinel_path.exists() {
         assert!(
@@ -108,8 +95,6 @@ fn framework_daemon_survives_parent_exit() {
             "daemon stopped writing sentinel after the foreground process exited (no change in 5s)",
         );
     }
-
-    // Cleanup happens via DaemonGuard's Drop.
 }
 
 /// Parse the test app's `key:value key:value ...` outfile. All values are

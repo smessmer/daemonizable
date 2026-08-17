@@ -112,8 +112,8 @@ fn parse_args() -> Result<Args, String> {
             other => return Err(format!("unknown argument: {other}")),
         }
     }
-    // `--spawn-many` (with its optional `--concurrent`) wins over the simpler
-    // flags if both are somehow present; `--concurrent` alone is a no-op.
+    // `--spawn-many` wins if both are somehow present; `--concurrent` alone is
+    // a no-op.
     if let Some(count) = spawn_many {
         mode = Mode::SpawnMany { count, concurrent };
     }
@@ -128,8 +128,8 @@ impl Daemonizable for TestApp {
     type Response = TestResponse;
 
     fn build_id() -> String {
-        // Parent and daemon are the same binary, so any deterministic string
-        // works; name + version mirrors what a real application should use.
+        // Any deterministic string works here; name + version mirrors what a
+        // real application should use.
         format!("daemonizable-test-app {}", env!("CARGO_PKG_VERSION"))
     }
 
@@ -161,8 +161,7 @@ impl Daemonizable for TestApp {
     }
 
     fn run_daemon(mut rpc: RpcServer<TestRequest, TestResponse>) -> ! {
-        // Gather the observable daemon-side facts the response reports (see
-        // the `TestResponse` field docs for what each one pins).
+        // The `TestResponse` field docs say what each of these pins.
         let daemon_cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
@@ -171,35 +170,26 @@ impl Daemonizable for TestApp {
         } else {
             "removed"
         };
-        // The daemon's argv must be empty (see the `argv1` field doc).
         let argv1 = if std::env::args_os().nth(1).is_none() {
             "empty"
         } else {
             "present"
         };
-        // `run_daemon` runs in the surviving grandchild (post second fork), so
-        // these report the FINAL daemon identity: pid is the grandchild's, sid
-        // is the (dead) intermediate's pid.
+        // `run_daemon` runs in the surviving grandchild, so these report the
+        // final daemon identity: pid is the grandchild's, sid the (dead)
+        // intermediate's pid.
         let pid = std::process::id();
-        // `getsid(None)` queries the calling process's own session id, which
-        // cannot fail for the caller itself.
         let sid = nix::unistd::getsid(None)
             .expect("getsid for the calling process")
             .as_raw();
 
-        // Sentinel mode (`DAEMONIZABLE_TEST_APP_SENTINEL` set — inherited from
-        // the test through the foreground process and both daemon-stage
-        // execs): the daemon must OUTLIVE the foreground process, which is
-        // what `tests/framework_daemon_survives_parent_exit.rs` asserts.
-        // Answer the parent's single round-trip first (its response carries
-        // pid/sid into the outfile the test reads), then behave like a real
-        // long-lived daemon: detach stdio and keep working — writing an
-        // incrementing tick to the sentinel path forever, never watching for
-        // RPC EOF. The detach is load-bearing for the test harness, not just
-        // verisimilitude: the test captures the foreground process with
-        // `Command::output()`, which reads until ALL write ends of the
-        // stdout/stderr pipes close — including the copies this daemon
-        // inherited across the spawn — so without it the test would hang.
+        // Sentinel mode, for `tests/framework_daemon_survives_parent_exit.rs`:
+        // answer the parent's one round-trip, then behave like a real long-lived
+        // daemon and tick forever, never watching for RPC EOF. The detach below
+        // is load-bearing rather than verisimilitude — the test captures the
+        // foreground with `Command::output()`, which reads until every write end
+        // of the stdout/stderr pipes closes, including the copies this daemon
+        // inherited across the spawn.
         if let Some(sentinel) = std::env::var_os("DAEMONIZABLE_TEST_APP_SENTINEL") {
             let sentinel = PathBuf::from(sentinel);
             let request = rpc
@@ -215,9 +205,8 @@ impl Daemonizable for TestApp {
             })
             .expect("daemon: failed to send response");
             if let Err(err) = daemonizable::detach_stdio() {
-                // Still on the inherited stderr (detach failed), so this
-                // reaches the test's captured output; exiting makes the test
-                // fail its liveness check with that diagnostic available.
+                // The detach failed, so this still reaches the test's captured
+                // output.
                 eprintln!("daemon: detach_stdio failed: {err}");
                 std::process::exit(1);
             }
@@ -225,15 +214,14 @@ impl Daemonizable for TestApp {
             let mut tick: u64 = 0;
             loop {
                 tick += 1;
-                // Best-effort: stdio is detached, so there's nowhere useful to
-                // report a write failure; a persistently failing write shows
-                // up as the test's "sentinel stopped changing" assertion.
+                // Stdio is detached, so there's nowhere to report a failure; a
+                // persistently failing write shows up as the test's "sentinel
+                // stopped changing" assertion.
                 let _ = std::fs::write(&sentinel, tick.to_string());
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
 
-        // Echo+1 until the parent drops its client (EOF), then exit cleanly.
         while let Ok(request) = rpc.next_request() {
             rpc.send_response(&TestResponse {
                 v: request.v + 1,
@@ -260,9 +248,6 @@ fn run_parent(daemonizer: Daemonizer<TestApp>, outfile: &Path) -> Result<(), Str
     let response = rpc
         .recv_response(Duration::from_secs(10))
         .map_err(|err| format!("recv_response failed: {err}"))?;
-    // After a successful spawn, this process must have no zombie children: the
-    // double-fork intermediate was reaped by `spawn_daemon`'s success-path
-    // wait(), and the daemon itself is a grandchild orphaned away from us.
     let zombies = count_own_zombie_children();
     std::fs::write(
         outfile,
@@ -318,9 +303,9 @@ fn run_spawn_many(
         spawn_many_sequential(daemonizer, count)?
     };
 
-    // Grandchild daemons are orphaned to init, so they never become *our*
-    // zombies; the only direct children were the double-fork intermediates,
-    // which `spawn_daemon` reaps on success. This must therefore read 0.
+    // Grandchild daemons are orphaned to init, so they never become our zombies;
+    // the only direct children were the double-fork intermediates, which
+    // `spawn_daemon` reaps on success. This must therefore read 0.
     let zombies = count_own_zombie_children();
 
     let mut out = String::new();
@@ -356,8 +341,7 @@ fn spawn_many_sequential(
         results.push((idx, resp));
     }
 
-    // Every daemon was live throughout the loop above; drop them now so each
-    // sees EOF on its client and exits.
+    // Dropped only now, so every daemon was live throughout the loop above.
     drop(clients);
     Ok(results)
 }
@@ -376,8 +360,7 @@ fn spawn_many_concurrent(
     let barrier = Arc::new(Barrier::new(count));
     let handles: Vec<_> = (0..count)
         .map(|idx| {
-            // `Daemonizer` is `Copy`, so the `move` closure copies the token
-            // into each thread; only the `Arc` needs an explicit clone.
+            // `Daemonizer` is `Copy`, so only the `Arc` needs an explicit clone.
             let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || -> Result<(usize, TestResponse), String> {
                 // Release all threads into `spawn_daemon` at once so the calls
